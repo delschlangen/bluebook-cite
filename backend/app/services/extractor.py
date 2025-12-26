@@ -9,7 +9,59 @@ from ..utils.bluebook_patterns import PATTERNS, abbreviate_party_name
 
 class CitationExtractor:
     """Extracts citations from legal text using Bluebook patterns."""
-    
+
+    def _clean_party_name(self, name: str) -> str:
+        """Clean up party name captured by greedy regex.
+
+        The greedy regex may capture entire sentences before "v.". This
+        function extracts just the party name by finding where it actually
+        starts (typically the last few capitalized words before the end).
+        """
+        name = name.strip()
+        words = name.split()
+        if not words:
+            return name
+
+        # Boundary words that signal end of preceding text, start of party name
+        boundary_words = {'in', 'see', 'but', 'cf.', 'compare', 'e.g.', 'accord',
+                          'held', 'ruled', 'found', 'stated', 'noted', 'concluded'}
+
+        # Work backwards to find where the party name starts
+        best_start = 0
+        for i in range(len(words) - 1, -1, -1):
+            word = words[i]
+            word_lower = word.lower().rstrip('.,;:')
+
+            # If we hit a sentence boundary (ends with period not abbreviation)
+            if i < len(words) - 1 and word.endswith('.') and not self._is_abbreviation(word):
+                best_start = i + 1
+                break
+
+            # If we hit a boundary word, the party name likely starts after it
+            if word_lower in boundary_words:
+                best_start = i + 1
+                break
+
+            # Stop if we've captured more than 6 words for the party name
+            if len(words) - i > 6:
+                best_start = i + 1
+                break
+
+        result_words = words[best_start:]
+
+        # Remove leading signal words and articles
+        skip_words = {'The', 'A', 'An', 'See', 'In', 'But', 'Cf.', 'Also', 'also', 'that'}
+        while result_words and result_words[0] in skip_words:
+            result_words = result_words[1:]
+
+        return ' '.join(result_words).strip() if result_words else name
+
+    def _is_abbreviation(self, word: str) -> bool:
+        """Check if a word ending in period is likely an abbreviation."""
+        abbrevs = {'Mr.', 'Mrs.', 'Ms.', 'Dr.', 'Jr.', 'Sr.', 'Inc.', 'Corp.',
+                   'Co.', 'Ltd.', 'LLC.', 'v.', 'U.S.', 'S.', 'N.', 'E.', 'W.'}
+        return word in abbrevs or (len(word) <= 4 and word.endswith('.'))
+
     def extract_all(self, text: str) -> List[Citation]:
         """Extract all citations from text."""
         citations = []
@@ -52,13 +104,16 @@ class CitationExtractor:
             
             spans.append((match.start(), match.end()))
             
-            parties = [match.group(1).strip(), match.group(2).strip()]
+            parties = [
+                self._clean_party_name(match.group(1)),
+                self._clean_party_name(match.group(2))
+            ]
             volume = match.group(3)
             reporter = match.group(4).strip()
             page = match.group(5)
             pincite = match.group(6) if match.lastindex >= 6 else None
             court_year = match.group(7) if match.lastindex >= 7 else ""
-            
+
             # Parse court and year from parenthetical
             year = None
             court = None
@@ -89,8 +144,11 @@ class CitationExtractor:
             
             spans.append((match.start(), match.end()))
             
-            parties = [match.group(1).strip(), match.group(2).strip()]
-            
+            parties = [
+                self._clean_party_name(match.group(1)),
+                self._clean_party_name(match.group(2))
+            ]
+
             citations.append(Citation(
                 type=CitationType.CASE,
                 status=CitationStatus.INCOMPLETE,

@@ -9,20 +9,16 @@ from typing import Dict, List, Pattern
 # Citation detection patterns
 PATTERNS: Dict[str, Pattern] = {
     # Cases: Party v. Party, Volume Reporter Page (Court Year)
-    # Party names: capitalized words, can include LLC/Inc/Corp, no greedy whitespace
     "case_complete": re.compile(
-        r"([A-Z][a-zA-Z\.\'\-]+(?:\s+[A-Za-z\.\'\-]+){0,5})\s+v\.\s+"
-        r"([A-Z][a-zA-Z\.\'\-]+(?:\s+[A-Za-z\.\'\-]+){0,5}),\s*"
-        r"(\d+)\s+([A-Z][a-zA-Z\.\s\d]+?)\s+(\d+)"
+        r"([A-Z][a-zA-Z\.\'\-\s]+)\s+v\.\s+([A-Z][a-zA-Z\.\'\-\s]+),\s*"
+        r"(\d+)\s+([A-Z][a-zA-Z\.\s\d]+)\s+(\d+)"
         r"(?:,\s*(\d+(?:-\d+)?))?\s*"
         r"\(([^)]+)\)"
     ),
-
+    
     # Incomplete case: just Party v. Party (missing reporter info)
-    # Limited to reasonable party name length (max 5 words per party)
     "case_incomplete": re.compile(
-        r"([A-Z][a-zA-Z\.\'\-]+(?:\s+[A-Za-z\.\'\-]+){0,5})\s+v\.\s+"
-        r"([A-Z][a-zA-Z\.\'\-]+(?:\s+[A-Za-z\.\'\-]+){0,5})"
+        r"([A-Z][a-zA-Z\.\'\-\s]+)\s+v\.\s+([A-Z][a-zA-Z\.\'\-\s]+)"
         r"(?!\s*,\s*\d+\s+[A-Z])"
     ),
     
@@ -457,17 +453,36 @@ def get_journal_abbreviation(journal: str) -> str:
     return JOURNAL_ABBREVIATIONS.get(journal, journal)
 
 def abbreviate_party_name(party: str) -> str:
-    """Abbreviate a party name per Bluebook Table 6."""
+    """Abbreviate a party name per Bluebook Table 6.
+
+    Protects state names from being incorrectly abbreviated (e.g.,
+    "North Carolina" should not become "N. Carolina").
+    """
     result = party
-    
+
     # Remove "The" at beginning (Rule 10.2.1(e))
     if result.lower().startswith("the "):
         result = result[4:]
-    
+
+    # Protect state names from being abbreviated
+    # Replace them with placeholders, then restore after other abbreviations
+    protected = {}
+    placeholder_idx = 0
+    for state_name in STATE_ABBREVIATIONS.keys():
+        if state_name in result:
+            placeholder = f"__STATE_{placeholder_idx}__"
+            result = result.replace(state_name, placeholder)
+            protected[placeholder] = state_name
+            placeholder_idx += 1
+
     # Apply abbreviations
     for full, abbrev in PARTY_ABBREVIATIONS.items():
         # Use word boundaries for replacement
         pattern = re.compile(r'\b' + re.escape(full) + r'\b', re.IGNORECASE)
         result = pattern.sub(abbrev, result)
-    
+
+    # Restore protected state names
+    for placeholder, state_name in protected.items():
+        result = result.replace(placeholder, state_name)
+
     return result.strip()
