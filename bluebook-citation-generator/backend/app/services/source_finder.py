@@ -1,10 +1,15 @@
 """
 Unsourced claim detection and source suggestion.
+
+Enhanced with:
+- Auto-lookup of potential sources
+- Legal database integration for finding citations
+- Suggested citation generation
 """
 
 import re
-from typing import List, Tuple, Optional
-from ..models.citation import UnsourcedClaim
+from typing import List, Tuple, Optional, Dict, Any
+from ..models.citation import UnsourcedClaim, Citation, CitationType, CitationStatus
 
 class ClaimDetector:
     """
@@ -207,8 +212,301 @@ class ClaimDetector:
             'had', 'do', 'does', 'did', 'will', 'would', 'could', 'should',
             'may', 'might', 'must', 'shall', 'can', 'need', 'there', 'here',
         }
-        
+
         words = re.findall(r'\b[a-zA-Z]{4,}\b', sentence.lower())
         key_terms = [w for w in words if w not in stop_words]
-        
+
         return list(dict.fromkeys(key_terms))[:5]
+
+
+class SourceFinder:
+    """
+    Automatically finds potential sources for unsourced claims.
+
+    Integrates with legal databases to suggest actual citations
+    for claims that need supporting authority.
+    """
+
+    def __init__(self, lookup_service=None):
+        """
+        Initialize with optional lookup service.
+
+        Args:
+            lookup_service: LegalLookupService instance for database queries
+        """
+        self.lookup_service = lookup_service
+        self.claim_detector = ClaimDetector()
+
+    async def find_sources_for_claims(
+        self,
+        claims: List[UnsourcedClaim],
+        max_suggestions: int = 3
+    ) -> List[Dict[str, Any]]:
+        """
+        Find potential sources for a list of unsourced claims.
+
+        Returns enriched claims with suggested sources.
+        """
+        results = []
+
+        for claim in claims:
+            result = await self.find_sources_for_claim(claim, max_suggestions)
+            results.append(result)
+
+        return results
+
+    async def find_sources_for_claim(
+        self,
+        claim: UnsourcedClaim,
+        max_suggestions: int = 3
+    ) -> Dict[str, Any]:
+        """
+        Find potential sources for a single unsourced claim.
+
+        Uses claim type to determine search strategy.
+        """
+        result = {
+            "claim_id": claim.id,
+            "claim_text": claim.text,
+            "claim_type": claim.claim_type,
+            "search_terms": claim.suggested_search_terms,
+            "suggested_sources": [],
+            "suggested_citations": [],
+        }
+
+        if not self.lookup_service:
+            return result
+
+        # Different strategies based on claim type
+        if claim.claim_type == "legal":
+            sources = await self._find_legal_sources(claim, max_suggestions)
+        elif claim.claim_type == "quotation":
+            sources = await self._find_quotation_source(claim)
+        elif claim.claim_type == "statistical":
+            sources = await self._find_statistical_sources(claim, max_suggestions)
+        else:  # factual
+            sources = await self._find_factual_sources(claim, max_suggestions)
+
+        result["suggested_sources"] = sources
+        result["suggested_citations"] = self._format_suggested_citations(sources)
+
+        return result
+
+    async def _find_legal_sources(
+        self,
+        claim: UnsourcedClaim,
+        max_suggestions: int
+    ) -> List[Dict]:
+        """Find case law and statutory sources for legal claims."""
+        sources = []
+
+        # Search for cases using legal terms
+        search_terms = claim.suggested_search_terms or []
+
+        # Try case name patterns first
+        case_name_patterns = [
+            term for term in search_terms
+            if " v. " in term or " v " in term
+        ]
+
+        for term in case_name_patterns[:2]:
+            try:
+                result = await self.lookup_service.search_by_text(term, "case")
+                if result.get("found"):
+                    for suggestion in result.get("suggestions", [])[:max_suggestions]:
+                        suggestion["source_type"] = "case"
+                        suggestion["relevance"] = "high"
+                        sources.append(suggestion)
+            except Exception:
+                pass
+
+        # Try legal concept searches
+        legal_concepts = [
+            term for term in search_terms
+            if term not in case_name_patterns and len(term) > 3
+        ]
+
+        for concept in legal_concepts[:3]:
+            try:
+                result = await self.lookup_service._search_case_by_text(concept)
+                if result.get("found"):
+                    for suggestion in result.get("suggestions", [])[:2]:
+                        suggestion["source_type"] = "case"
+                        suggestion["relevance"] = "medium"
+                        suggestion["matched_concept"] = concept
+                        if suggestion not in sources:
+                            sources.append(suggestion)
+            except Exception:
+                pass
+
+        return sources[:max_suggestions]
+
+    async def _find_quotation_source(self, claim: UnsourcedClaim) -> List[Dict]:
+        """Find the source of a quotation."""
+        sources = []
+
+        # Extract the quoted text
+        quote_match = re.search(r'"([^"]+)"', claim.text)
+        if not quote_match:
+            return sources
+
+        quote_text = quote_match.group(1)
+
+        # Search for the quote in cases
+        try:
+            result = await self.lookup_service._search_case_by_text(quote_text[:100])
+            if result.get("found"):
+                for suggestion in result.get("suggestions", [])[:3]:
+                    suggestion["source_type"] = "case"
+                    suggestion["matched_quote"] = True
+                    sources.append(suggestion)
+        except Exception:
+            pass
+
+        # Also try article search
+        try:
+            result = await self.lookup_service._search_article_by_text(quote_text[:100])
+            if result.get("found"):
+                for suggestion in result.get("suggestions", [])[:2]:
+                    suggestion["source_type"] = "article"
+                    suggestion["matched_quote"] = True
+                    sources.append(suggestion)
+        except Exception:
+            pass
+
+        return sources
+
+    async def _find_statistical_sources(
+        self,
+        claim: UnsourcedClaim,
+        max_suggestions: int
+    ) -> List[Dict]:
+        """Find sources for statistical claims."""
+        sources = []
+
+        # Statistical claims often cite studies or government sources
+        search_terms = claim.suggested_search_terms or []
+
+        # Try article/study search
+        for term in search_terms[:3]:
+            try:
+                result = await self.lookup_service._search_article_by_text(
+                    f"{term} study statistics"
+                )
+                if result.get("found"):
+                    for suggestion in result.get("suggestions", [])[:2]:
+                        suggestion["source_type"] = "study"
+                        suggestion["relevance"] = "medium"
+                        sources.append(suggestion)
+            except Exception:
+                pass
+
+        return sources[:max_suggestions]
+
+    async def _find_factual_sources(
+        self,
+        claim: UnsourcedClaim,
+        max_suggestions: int
+    ) -> List[Dict]:
+        """Find sources for general factual claims."""
+        sources = []
+
+        search_terms = claim.suggested_search_terms or []
+
+        # Try multiple source types
+        for term in search_terms[:2]:
+            # Cases
+            try:
+                result = await self.lookup_service._search_case_by_text(term)
+                if result.get("found"):
+                    for suggestion in result.get("suggestions", [])[:1]:
+                        suggestion["source_type"] = "case"
+                        sources.append(suggestion)
+            except Exception:
+                pass
+
+            # Articles
+            try:
+                result = await self.lookup_service._search_article_by_text(term)
+                if result.get("found"):
+                    for suggestion in result.get("suggestions", [])[:1]:
+                        suggestion["source_type"] = "article"
+                        sources.append(suggestion)
+            except Exception:
+                pass
+
+        return sources[:max_suggestions]
+
+    def _format_suggested_citations(self, sources: List[Dict]) -> List[str]:
+        """Format found sources as Bluebook citations."""
+        citations = []
+
+        for source in sources:
+            source_type = source.get("source_type", "")
+
+            if source_type == "case":
+                # Format case citation
+                case_name = source.get("case_name", "")
+                cite_list = source.get("citation", [])
+                date_filed = source.get("date_filed", "")
+
+                if case_name and cite_list:
+                    cite_str = cite_list[0] if isinstance(cite_list, list) else str(cite_list)
+                    year = date_filed[:4] if date_filed else ""
+                    formatted = f"*{case_name}*, {cite_str}"
+                    if year:
+                        formatted += f" ({year})"
+                    citations.append(formatted)
+
+            elif source_type in ["article", "study"]:
+                # Format article citation
+                author = source.get("author", "")
+                title = source.get("title", "")
+                journal = source.get("container_title", "")
+                volume = source.get("volume", "")
+                page = source.get("page", "")
+                year = source.get("year", "")
+
+                if author and title:
+                    formatted = f"{author}, *{title}*"
+                    if volume and journal and page:
+                        formatted += f", {volume} {journal} {page}"
+                    if year:
+                        formatted += f" ({year})"
+                    citations.append(formatted)
+
+        return citations
+
+    async def analyze_document_for_sources(
+        self,
+        text: str,
+        existing_citations: List[Tuple[int, int]]
+    ) -> Dict[str, Any]:
+        """
+        Comprehensive analysis of a document's unsourced claims
+        with automatic source suggestions.
+
+        Returns:
+            Dict with claims, sources, and statistics
+        """
+        # Detect unsourced claims
+        claims = self.claim_detector.detect_unsourced_claims(text, existing_citations)
+
+        # Find sources for each claim
+        enriched_claims = await self.find_sources_for_claims(claims)
+
+        # Calculate statistics
+        claims_with_sources = sum(
+            1 for c in enriched_claims
+            if c.get("suggested_sources")
+        )
+
+        return {
+            "total_claims": len(claims),
+            "claims_with_suggestions": claims_with_sources,
+            "claims": enriched_claims,
+            "priority_claims": [
+                c for c in enriched_claims
+                if c.get("suggested_sources") or c["claim_type"] in ["quotation", "legal"]
+            ],
+        }

@@ -1,12 +1,20 @@
 """
 Legal database lookup service using free APIs.
 No API keys required.
+
+Enhanced with:
+- Smarter search strategies for minimal input
+- URL metadata extraction
+- Fuzzy matching for case names
+- Multiple fallback sources
 """
 
 import httpx
 import asyncio
-from typing import Optional, List, Dict, Any
-from ..models.citation import Citation, CitationType
+import re
+from typing import Optional, List, Dict, Any, Tuple
+from urllib.parse import urlparse
+from ..models.citation import Citation, CitationType, CitationStatus
 
 class LegalLookupService:
     """
@@ -296,7 +304,294 @@ class LegalLookupService:
     async def _no_lookup(self, citation: Citation) -> Dict[str, Any]:
         """Fallback for unsupported citation types."""
         return {"found": False, "data": None, "suggestions": [], "source": None}
-    
+
+    async def lookup_website(self, citation: Citation) -> Dict[str, Any]:
+        """Extract metadata from a URL to complete website citations."""
+        results = {"found": False, "data": None, "suggestions": [], "source": "URL Metadata"}
+
+        if not citation.url:
+            return results
+
+        try:
+            client = await self._get_client()
+            response = await client.get(citation.url, follow_redirects=True)
+
+            if response.status_code == 200:
+                html = response.text
+
+                # Extract title
+                title_match = re.search(r'<title[^>]*>([^<]+)</title>', html, re.IGNORECASE)
+                title = title_match.group(1).strip() if title_match else None
+
+                # Extract meta author
+                author_match = re.search(
+                    r'<meta[^>]+name=["\']author["\'][^>]+content=["\']([^"\']+)["\']',
+                    html, re.IGNORECASE
+                )
+                if not author_match:
+                    author_match = re.search(
+                        r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+name=["\']author["\']',
+                        html, re.IGNORECASE
+                    )
+                author = author_match.group(1).strip() if author_match else None
+
+                # Extract publication date
+                date_match = re.search(
+                    r'<meta[^>]+(?:property=["\']article:published_time["\']|name=["\']date["\'])[^>]+content=["\']([^"\']+)["\']',
+                    html, re.IGNORECASE
+                )
+                pub_date = date_match.group(1)[:10] if date_match else None
+
+                # Get site name from og:site_name or domain
+                site_match = re.search(
+                    r'<meta[^>]+property=["\']og:site_name["\'][^>]+content=["\']([^"\']+)["\']',
+                    html, re.IGNORECASE
+                )
+                site_name = site_match.group(1) if site_match else urlparse(citation.url).netloc
+
+                results["found"] = True
+                results["data"] = {
+                    "title": title,
+                    "author": author,
+                    "publication_date": pub_date,
+                    "site_name": site_name,
+                    "url": citation.url,
+                }
+        except Exception as e:
+            results["error"] = str(e)
+
+        return results
+
+    async def search_by_text(self, search_text: str, search_type: str = "case") -> Dict[str, Any]:
+        """
+        Search for citations using free-form text.
+        Useful when user just has a title, quote, or partial info.
+        """
+        results = {"found": False, "data": None, "suggestions": [], "source": None}
+
+        if not search_text or len(search_text.strip()) < 3:
+            return results
+
+        search_text = search_text.strip()
+
+        if search_type == "case":
+            results = await self._search_case_by_text(search_text)
+        elif search_type == "article":
+            results = await self._search_article_by_text(search_text)
+        elif search_type == "statute":
+            results = await self._parse_statute_from_text(search_text)
+
+        return results
+
+    async def _search_case_by_text(self, text: str) -> Dict[str, Any]:
+        """Search CourtListener with free-form text."""
+        results = {"found": False, "data": None, "suggestions": [], "source": "CourtListener"}
+
+        try:
+            client = await self._get_client()
+
+            # Try multiple search strategies
+            search_queries = self._generate_case_search_queries(text)
+
+            for query in search_queries:
+                response = await client.get(
+                    f"{self.courtlistener_base}/search/",
+                    params={"q": query, "type": "o", "order_by": "score desc"}
+                )
+
+                if response.status_code == 200:
+                    data = response.json()
+                    if data.get("results"):
+                        for result in data["results"][:5]:
+                            parsed = self._parse_courtlistener_result(result)
+                            if parsed not in results["suggestions"]:
+                                results["suggestions"].append(parsed)
+
+                        if results["suggestions"]:
+                            results["found"] = True
+                            results["data"] = results["suggestions"][0]
+                            break
+
+        except Exception as e:
+            results["error"] = str(e)
+
+        return results
+
+    def _generate_case_search_queries(self, text: str) -> List[str]:
+        """Generate multiple search query variations for better matching."""
+        queries = [text]
+
+        # Check if it looks like a case name
+        if " v. " in text or " v " in text:
+            # Extract party names
+            parts = re.split(r'\s+v\.?\s+', text, maxsplit=1)
+            if len(parts) == 2:
+                # Try just the party names
+                queries.append(f'"{parts[0]}" "{parts[1]}"')
+                # Try with v.
+                queries.append(f"{parts[0]} v. {parts[1]}")
+
+        # If it contains a year, try searching with it
+        year_match = re.search(r'\b(19|20)\d{2}\b', text)
+        if year_match:
+            year = year_match.group(0)
+            text_without_year = text.replace(year, "").strip()
+            queries.append(f"{text_without_year} {year}")
+
+        # Try removing common legal words that might interfere
+        clean_text = re.sub(r'\b(Inc\.|Corp\.|Co\.|Ltd\.)\b', '', text)
+        if clean_text != text:
+            queries.append(clean_text.strip())
+
+        return queries
+
+    async def _search_article_by_text(self, text: str) -> Dict[str, Any]:
+        """Search CrossRef with free-form text."""
+        results = {"found": False, "data": None, "suggestions": [], "source": "CrossRef"}
+
+        try:
+            client = await self._get_client()
+
+            # Filter to legal/law journals
+            response = await client.get(
+                self.crossref_base,
+                params={
+                    "query": text,
+                    "rows": 10,
+                    "filter": "type:journal-article",
+                    "select": "title,author,container-title,volume,page,published,DOI,URL",
+                }
+            )
+
+            if response.status_code == 200:
+                data = response.json()
+                items = data.get("message", {}).get("items", [])
+
+                # Prioritize law journals
+                law_items = []
+                other_items = []
+
+                for item in items:
+                    container = item.get("container-title", [""])[0].lower() if item.get("container-title") else ""
+                    if any(term in container for term in ["law", "legal", "juris", "journal"]):
+                        law_items.append(item)
+                    else:
+                        other_items.append(item)
+
+                for item in (law_items + other_items)[:5]:
+                    suggestion = {
+                        "title": item.get("title", [""])[0] if item.get("title") else "",
+                        "author": self._format_crossref_authors(item.get("author", [])),
+                        "container_title": item.get("container-title", [""])[0] if item.get("container-title") else "",
+                        "volume": item.get("volume", ""),
+                        "page": item.get("page", ""),
+                        "year": self._extract_crossref_year(item.get("published", {})),
+                        "doi": item.get("DOI", ""),
+                        "url": item.get("URL", ""),
+                    }
+                    results["suggestions"].append(suggestion)
+
+                if results["suggestions"]:
+                    results["found"] = True
+                    results["data"] = results["suggestions"][0]
+
+        except Exception as e:
+            results["error"] = str(e)
+
+        return results
+
+    async def _parse_statute_from_text(self, text: str) -> Dict[str, Any]:
+        """Try to parse statute info from free-form text."""
+        results = {"found": False, "data": None, "suggestions": [], "source": "Cornell Law"}
+
+        # Try to extract USC citation
+        usc_match = re.search(r'(\d+)\s*U\.?S\.?C\.?\s*§?\s*(\d+[a-z]?)', text, re.IGNORECASE)
+        if usc_match:
+            title = usc_match.group(1)
+            section = usc_match.group(2)
+
+            results["found"] = True
+            results["data"] = {
+                "title": title,
+                "section": section,
+                "code": "U.S.C.",
+                "url": f"https://www.law.cornell.edu/uscode/text/{title}/{section}",
+            }
+            return results
+
+        # Try CFR
+        cfr_match = re.search(r'(\d+)\s*C\.?F\.?R\.?\s*§?\s*(\d+(?:\.\d+)?)', text, re.IGNORECASE)
+        if cfr_match:
+            title = cfr_match.group(1)
+            section = cfr_match.group(2)
+
+            results["found"] = True
+            results["source"] = "eCFR"
+            results["data"] = {
+                "title": title,
+                "section": section,
+                "code": "C.F.R.",
+                "url": f"https://www.ecfr.gov/current/title-{title}/section-{section}",
+            }
+
+        return results
+
+    async def smart_complete(self, citation: Citation) -> Dict[str, Any]:
+        """
+        Intelligently complete a citation using multiple strategies.
+        Tries different approaches based on what info is available.
+        """
+        results = {"found": False, "data": None, "suggestions": [], "strategies_tried": []}
+
+        # Strategy 1: Use existing lookup if we have structured data
+        if citation.type != CitationType.OTHER:
+            lookup_result = await self.lookup_citation(citation)
+            results["strategies_tried"].append("structured_lookup")
+            if lookup_result.get("found"):
+                return lookup_result
+
+        # Strategy 2: Try URL metadata extraction for websites
+        if citation.url:
+            url_result = await self.lookup_website(citation)
+            results["strategies_tried"].append("url_metadata")
+            if url_result.get("found"):
+                return url_result
+
+        # Strategy 3: Search by raw text
+        if citation.raw_text:
+            raw_text = citation.raw_text.strip()
+
+            # Check if it looks like a case
+            if " v. " in raw_text or " v " in raw_text:
+                case_result = await self.search_by_text(raw_text, "case")
+                results["strategies_tried"].append("case_text_search")
+                if case_result.get("found"):
+                    case_result["inferred_type"] = "case"
+                    return case_result
+
+            # Check if it looks like a statute
+            if re.search(r'\b(U\.?S\.?C|C\.?F\.?R|Code|§)', raw_text, re.IGNORECASE):
+                statute_result = await self.search_by_text(raw_text, "statute")
+                results["strategies_tried"].append("statute_text_search")
+                if statute_result.get("found"):
+                    statute_result["inferred_type"] = "statute"
+                    return statute_result
+
+            # Try as article
+            article_result = await self.search_by_text(raw_text, "article")
+            results["strategies_tried"].append("article_text_search")
+            if article_result.get("found"):
+                article_result["inferred_type"] = "law_review"
+                return article_result
+
+            # Last resort: generic case search
+            case_result = await self.search_by_text(raw_text, "case")
+            results["strategies_tried"].append("fallback_case_search")
+            if case_result.get("found"):
+                return case_result
+
+        return results
+
     async def close(self) -> None:
         """Close the HTTP client."""
         if self.client and not self.client.is_closed:
@@ -305,28 +600,74 @@ class LegalLookupService:
 
 class CitationCompleter:
     """Completes incomplete citations using lookup results."""
-    
+
     def __init__(self, lookup_service: LegalLookupService):
         self.lookup = lookup_service
-    
+
     async def complete_citation(self, citation: Citation) -> Citation:
-        """Attempt to complete an incomplete citation."""
+        """Attempt to complete an incomplete citation using smart lookup."""
         if citation.status.value == "complete":
             return citation
-        
-        results = await self.lookup.lookup_citation(citation)
-        
+
+        # Try smart completion first (uses multiple strategies)
+        results = await self.lookup.smart_complete(citation)
+
+        # If smart complete found nothing, try basic lookup
+        if not results.get("found"):
+            results = await self.lookup.lookup_citation(citation)
+
         if results.get("found") and results.get("data"):
+            # Update citation type if it was inferred
+            if results.get("inferred_type"):
+                citation.type = CitationType(results["inferred_type"])
+
             citation = self._merge_lookup_data(citation, results["data"])
             citation.lookup_results = results
             citation.confidence_score = self._calculate_confidence(citation, results)
-            
+
             if citation.confidence_score > 0.8:
-                citation.status = "complete"
+                citation.status = CitationStatus.COMPLETE
             else:
-                citation.status = "needs_verification"
-        
+                citation.status = CitationStatus.NEEDS_VERIFICATION
+
         return citation
+
+    async def complete_from_text(self, text: str) -> Tuple[Optional[Citation], Dict[str, Any]]:
+        """
+        Create and complete a citation from raw text input.
+        Useful when user just pastes a case name, title, or URL.
+        """
+        # Create a minimal citation object
+        citation = Citation(
+            type=CitationType.OTHER,
+            status=CitationStatus.INCOMPLETE,
+            raw_text=text,
+            position_start=0,
+            position_end=len(text),
+        )
+
+        # Check if it's a URL
+        if text.startswith("http://") or text.startswith("https://"):
+            citation.type = CitationType.WEBSITE
+            citation.url = text
+
+        # Use smart completion
+        results = await self.lookup.smart_complete(citation)
+
+        if results.get("found") and results.get("data"):
+            if results.get("inferred_type"):
+                citation.type = CitationType(results["inferred_type"])
+
+            citation = self._merge_lookup_data(citation, results["data"])
+            citation.lookup_results = results
+            citation.confidence_score = self._calculate_confidence(citation, results)
+
+            if citation.confidence_score > 0.8:
+                citation.status = CitationStatus.COMPLETE
+            else:
+                citation.status = CitationStatus.NEEDS_VERIFICATION
+
+        return citation, results
     
     def _merge_lookup_data(self, citation: Citation, data: dict) -> Citation:
         """Merge lookup data into citation, filling gaps."""
@@ -387,7 +728,17 @@ class CitationCompleter:
                 citation.publisher = data["publisher"]
             if not citation.year and data.get("year"):
                 citation.year = data["year"]
-        
+
+        elif citation.type == CitationType.WEBSITE:
+            if not citation.author and data.get("author"):
+                citation.author = data["author"]
+            if not citation.title and data.get("title"):
+                citation.title = data["title"]
+            if not citation.url and data.get("url"):
+                citation.url = data["url"]
+            if not citation.access_date and data.get("publication_date"):
+                citation.access_date = data["publication_date"]
+
         return citation
     
     def _calculate_confidence(self, citation: Citation, results: dict) -> float:
