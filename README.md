@@ -2,6 +2,8 @@
 
 Automated legal citation formatting, completion, and verification using Bluebook 21st Edition rules.
 
+**[Try it live](https://delschlangen.github.io/bluebook-cite/)**
+
 ## Features
 
 - **Citation Extraction**: Automatically detects cases, statutes, regulations, articles, and books
