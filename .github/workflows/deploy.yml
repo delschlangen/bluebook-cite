@@ -17,7 +17,6 @@ concurrency:
 jobs:
   build:
     runs-on: ubuntu-latest
-    environment: github-pages
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -36,7 +35,7 @@ jobs:
       - name: Build
         working-directory: frontend
         env:
-          VITE_API_URL: ${{ vars.API_URL }}
+          VITE_API_URL: https://pleasing-insight-production.up.railway.app
         run: npm run build
 
       - name: Upload artifact
