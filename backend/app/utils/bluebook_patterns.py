@@ -9,16 +9,20 @@ from typing import Dict, List, Pattern
 # Citation detection patterns
 PATTERNS: Dict[str, Pattern] = {
     # Cases: Party v. Party, Volume Reporter Page (Court Year)
+    # Party names: capitalized words, can include LLC/Inc/Corp, no greedy whitespace
     "case_complete": re.compile(
-        r"([A-Z][a-zA-Z\.\'\-\s]+)\s+v\.\s+([A-Z][a-zA-Z\.\'\-\s]+),\s*"
-        r"(\d+)\s+([A-Z][a-zA-Z\.\s\d]+)\s+(\d+)"
+        r"([A-Z][a-zA-Z\.\'\-]+(?:\s+[A-Za-z\.\'\-]+){0,5})\s+v\.\s+"
+        r"([A-Z][a-zA-Z\.\'\-]+(?:\s+[A-Za-z\.\'\-]+){0,5}),\s*"
+        r"(\d+)\s+([A-Z][a-zA-Z\.\s\d]+?)\s+(\d+)"
         r"(?:,\s*(\d+(?:-\d+)?))?\s*"
         r"\(([^)]+)\)"
     ),
-    
+
     # Incomplete case: just Party v. Party (missing reporter info)
+    # Limited to reasonable party name length (max 5 words per party)
     "case_incomplete": re.compile(
-        r"([A-Z][a-zA-Z\.\'\-\s]+)\s+v\.\s+([A-Z][a-zA-Z\.\'\-\s]+)"
+        r"([A-Z][a-zA-Z\.\'\-]+(?:\s+[A-Za-z\.\'\-]+){0,5})\s+v\.\s+"
+        r"([A-Z][a-zA-Z\.\'\-]+(?:\s+[A-Za-z\.\'\-]+){0,5})"
         r"(?!\s*,\s*\d+\s+[A-Z])"
     ),
     
@@ -47,11 +51,11 @@ PATTERNS: Dict[str, Pattern] = {
         r"\((\d{4})\)"
     ),
     
-    # Books: Author, Title (Edition Year)
+    # Books: Author, Title (Edition Year) - captures full ordinal like "6th"
     "book": re.compile(
         r"([A-Z][a-zA-Z\.\s]+),\s+"
         r"([A-Z][^(]+)\s*"
-        r"\((?:(\d+)(?:st|nd|rd|th)\s+ed\.\s+)?(\d{4})\)"
+        r"\((?:(\d+(?:st|nd|rd|th))\s+ed\.\s+)?(\d{4})\)"
     ),
     
     # Short forms - Id.
