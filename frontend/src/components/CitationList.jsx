@@ -1,5 +1,17 @@
 import React from 'react';
 
+// Render markdown-style *italics* as actual italics
+function renderCitation(text) {
+  if (!text) return null;
+  const parts = text.split(/(\*[^*]+\*)/g);
+  return parts.map((part, i) => {
+    if (part.startsWith('*') && part.endsWith('*')) {
+      return <em key={i}>{part.slice(1, -1)}</em>;
+    }
+    return part;
+  });
+}
+
 const statusColors = {
   complete: 'bg-green-100 text-green-800',
   incomplete: 'bg-yellow-100 text-yellow-800',
@@ -76,7 +88,7 @@ export default function CitationList({ citations, shortFormSuggestions, onSelect
                       Suggested ({suggestion.short_form_type}):
                     </p>
                     <p className="text-sm text-green-800 font-mono">
-                      {suggestion.suggested_form}
+                      {renderCitation(suggestion.suggested_form)}
                     </p>
                     {suggestion.explanation && (
                       <p className="text-xs text-green-600 mt-1">{suggestion.explanation}</p>

@@ -1,5 +1,17 @@
 import React, { useState, useEffect } from 'react';
 
+// Render markdown-style *italics* as actual italics
+function renderCitation(text) {
+  if (!text) return null;
+  const parts = text.split(/(\*[^*]+\*)/g);
+  return parts.map((part, i) => {
+    if (part.startsWith('*') && part.endsWith('*')) {
+      return <em key={i}>{part.slice(1, -1)}</em>;
+    }
+    return part;
+  });
+}
+
 export default function CitationEditor({ citation, suggestion, onSave, onLookup, onCancel }) {
   const [formData, setFormData] = useState({});
   const [lookupResults, setLookupResults] = useState(null);
@@ -209,7 +221,7 @@ export default function CitationEditor({ citation, suggestion, onSave, onLookup,
         {suggestion?.suggested_form && (
           <div className="p-3 bg-blue-50 border border-blue-100 rounded-lg">
             <p className="text-xs font-medium text-blue-700 mb-1">Formatted suggestion:</p>
-            <p className="text-sm font-mono text-blue-800">{suggestion.suggested_form}</p>
+            <p className="text-sm font-mono text-blue-800">{renderCitation(suggestion.suggested_form)}</p>
           </div>
         )}
 
