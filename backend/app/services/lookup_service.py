@@ -561,13 +561,20 @@ class LegalLookupService:
         if citation.raw_text:
             raw_text = citation.raw_text.strip()
 
-            # Check if it looks like a case
-            if " v. " in raw_text or " v " in raw_text:
-                case_result = await self.search_by_text(raw_text, "case")
+            # Check if it looks like a case name (contains "v." pattern)
+            # This is the primary indicator - don't search for articles about cases
+            case_name_pattern = re.search(r'([A-Z][a-zA-Z\.\'\-]+(?:\s+[A-Z][a-zA-Z\.\'\-]+)*)\s+v\.?\s+([A-Z][a-zA-Z\.\'\-]+(?:\s+[A-Z][a-zA-Z\.\'\-]+)*)', raw_text)
+            if case_name_pattern:
+                # Extract just the case name for search
+                case_name = case_name_pattern.group(0)
+                case_result = await self.search_by_text(case_name, "case")
                 results["strategies_tried"].append("case_text_search")
                 if case_result.get("found"):
                     case_result["inferred_type"] = "case"
                     return case_result
+                # Don't fall through to article search for case names
+                results["note"] = f"Looks like case citation: {case_name}"
+                return results
 
             # Check if it looks like a statute
             if re.search(r'\b(U\.?S\.?C|C\.?F\.?R|Code|§)', raw_text, re.IGNORECASE):
@@ -577,18 +584,21 @@ class LegalLookupService:
                     statute_result["inferred_type"] = "statute"
                     return statute_result
 
-            # Try as article
-            article_result = await self.search_by_text(raw_text, "article")
-            results["strategies_tried"].append("article_text_search")
-            if article_result.get("found"):
-                article_result["inferred_type"] = "law_review"
-                return article_result
+            # Only try article search if it doesn't look like a case
+            # and has some indication it's an article (author name pattern, journal words)
+            if re.search(r'(Law Review|L\. Rev\.|Journal|L\.J\.|\d+\s+[A-Z][a-z]+\.\s+L\.)', raw_text):
+                article_result = await self.search_by_text(raw_text, "article")
+                results["strategies_tried"].append("article_text_search")
+                if article_result.get("found"):
+                    article_result["inferred_type"] = "law_review"
+                    return article_result
 
-            # Last resort: generic case search
-            case_result = await self.search_by_text(raw_text, "case")
-            results["strategies_tried"].append("fallback_case_search")
-            if case_result.get("found"):
-                return case_result
+            # Last resort: generic case search (but only if text is short enough to be a citation)
+            if len(raw_text) < 200:
+                case_result = await self.search_by_text(raw_text, "case")
+                results["strategies_tried"].append("fallback_case_search")
+                if case_result.get("found"):
+                    return case_result
 
         return results
 

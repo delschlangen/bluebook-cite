@@ -33,16 +33,30 @@ class BluebookFormatter:
     def format_case(self, citation: Citation, is_law_review: bool = True) -> str:
         """
         Format case citation per Bluebook Rule 10.
-        
+
         Law review format: Case Name, Vol. Reporter Page, Pincite (Court Year).
         Brief format: Case Name, Vol. Reporter Page, Pincite (Court Year)
         """
         if not citation.parties or len(citation.parties) < 2:
             return citation.raw_text
-        
+
+        # Validate party names are reasonable (not paragraphs of text)
+        plaintiff_raw = citation.parties[0]
+        defendant_raw = citation.parties[1]
+
+        # Party names shouldn't be too long or contain invalid words
+        invalid_indicators = ["ISSUE", "ANALYSIS", "See ", "The Court", "Whether"]
+        for indicator in invalid_indicators:
+            if indicator in plaintiff_raw or indicator in defendant_raw:
+                return citation.raw_text
+
+        # Party names should be reasonable length (under 50 chars typically)
+        if len(plaintiff_raw) > 60 or len(defendant_raw) > 60:
+            return citation.raw_text
+
         # Format case name (Rule 10.2)
-        plaintiff = abbreviate_party_name(citation.parties[0])
-        defendant = abbreviate_party_name(citation.parties[1])
+        plaintiff = abbreviate_party_name(plaintiff_raw)
+        defendant = abbreviate_party_name(defendant_raw)
         case_name = f"{plaintiff} v. {defendant}"
         
         # Build reporter citation (Rule 10.3)
