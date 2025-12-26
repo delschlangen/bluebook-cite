@@ -2,6 +2,8 @@
 Bluebook 21st Edition formatting rules engine.
 """
 
+import re
+import html
 from typing import Optional, List, Tuple
 from ..models.citation import Citation, CitationType, CitationContext
 from ..utils.bluebook_patterns import (
@@ -10,6 +12,17 @@ from ..utils.bluebook_patterns import (
     get_court_abbreviation,
     get_journal_abbreviation,
 )
+
+
+def clean_html(text: str) -> str:
+    """Remove HTML tags and decode HTML entities from text."""
+    if not text:
+        return text
+    # Decode HTML entities like &lt; &gt; &amp;
+    text = html.unescape(text)
+    # Remove HTML tags like <i>, </i>, <b>, etc.
+    text = re.sub(r'<[^>]+>', '', text)
+    return text.strip()
 
 class BluebookFormatter:
     """Formats citations according to Bluebook 21st Edition rules."""
@@ -112,12 +125,13 @@ class BluebookFormatter:
     def format_law_review(self, citation: Citation, is_law_review: bool = True) -> str:
         """Format law review article citation per Bluebook Rule 16."""
         parts = []
-        
+
         if citation.author:
-            parts.append(citation.author)
-        
+            parts.append(clean_html(citation.author))
+
         if citation.title:
-            parts.append(f"*{citation.title}*")
+            title = clean_html(citation.title)
+            parts.append(f"*{title}*")
         
         if citation.volume and citation.journal and citation.page:
             journal = get_journal_abbreviation(citation.journal)
@@ -136,35 +150,38 @@ class BluebookFormatter:
     def format_book(self, citation: Citation, is_law_review: bool = True) -> str:
         """Format book citation per Bluebook Rule 15."""
         parts = []
-        
+
         if citation.author:
-            parts.append(citation.author.upper() if not is_law_review else citation.author)
-        
+            # Author followed by comma
+            parts.append(clean_html(citation.author) + ",")
+
         if citation.title:
             # Book titles in small caps for law reviews
-            parts.append(citation.title.upper())
-        
+            title = clean_html(citation.title)
+            parts.append(title.upper())
+
         # Build parenthetical
         paren_parts = []
         if citation.edition:
             paren_parts.append(f"{citation.edition} ed.")
         if citation.year:
             paren_parts.append(str(citation.year))
-        
+
         if paren_parts:
             parts.append(f"({' '.join(paren_parts)})")
-        
+
         return " ".join(parts) + "."
     
     def format_website(self, citation: Citation, is_law_review: bool = True) -> str:
         """Format website citation per Bluebook Rule 18."""
         parts = []
-        
+
         if citation.author:
-            parts.append(citation.author)
-        
+            parts.append(clean_html(citation.author))
+
         if citation.title:
-            parts.append(f"*{citation.title}*")
+            title = clean_html(citation.title)
+            parts.append(f"*{title}*")
         
         if citation.url:
             parts.append(citation.url)
