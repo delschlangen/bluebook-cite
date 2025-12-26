@@ -56,6 +56,51 @@ export async function lookupCase(parties, citation) {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ parties, citation }),
   });
-  
+
+  return handleResponse(response);
+}
+
+export async function completeFromText(text) {
+  const response = await fetch(`${API_URL}/api/complete-from-text`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ text }),
+  });
+
+  return handleResponse(response);
+}
+
+export async function findSources(text, maxSuggestions = 3) {
+  const response = await fetch(`${API_URL}/api/find-sources`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ text, max_suggestions: maxSuggestions }),
+  });
+
+  return handleResponse(response);
+}
+
+export async function analyzeComprehensive(documentId, text, filename, findSources = true) {
+  const response = await fetch(`${API_URL}/api/analyze-comprehensive`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      document_id: documentId,
+      text,
+      filename,
+      find_sources: findSources
+    }),
+  });
+
+  return handleResponse(response);
+}
+
+export async function searchCitations(query, searchType = 'case') {
+  const response = await fetch(`${API_URL}/api/search`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ query, search_type: searchType }),
+  });
+
   return handleResponse(response);
 }
