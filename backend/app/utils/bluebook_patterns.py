@@ -9,20 +9,16 @@ from typing import Dict, List, Pattern
 # Citation detection patterns
 PATTERNS: Dict[str, Pattern] = {
     # Cases: Party v. Party, Volume Reporter Page (Court Year)
-    # Fixed to not be greedy with whitespace - party names can't span multiple lines
     "case_complete": re.compile(
-        r"([A-Z][a-zA-Z\.\'\-]+(?:\s+[A-Z][a-zA-Z\.\'\-]+)*(?:,?\s+(?:LLC|Inc\.|Corp\.|Co\.|Ltd\.))?)\s+v\.\s+"
-        r"([A-Z][a-zA-Z\.\'\-]+(?:\s+[A-Z][a-zA-Z\.\'\-]+)*(?:,?\s+(?:LLC|Inc\.|Corp\.|Co\.|Ltd\.))?),\s*"
-        r"(\d+)\s+([A-Z][a-zA-Z\.\s\d]+?)\s+(\d+)"
+        r"([A-Z][a-zA-Z\.\'\-\s]+)\s+v\.\s+([A-Z][a-zA-Z\.\'\-\s]+),\s*"
+        r"(\d+)\s+([A-Z][a-zA-Z\.\s\d]+)\s+(\d+)"
         r"(?:,\s*(\d+(?:-\d+)?))?\s*"
         r"\(([^)]+)\)"
     ),
-
+    
     # Incomplete case: just Party v. Party (missing reporter info)
-    # Fixed to not be greedy - requires capitalized words only
     "case_incomplete": re.compile(
-        r"([A-Z][a-zA-Z\.\'\-]+(?:\s+[A-Z][a-zA-Z\.\'\-]+)*)\s+v\.\s+"
-        r"([A-Z][a-zA-Z\.\'\-]+(?:\s+[A-Z][a-zA-Z\.\'\-]+)*)"
+        r"([A-Z][a-zA-Z\.\'\-\s]+)\s+v\.\s+([A-Z][a-zA-Z\.\'\-\s]+)"
         r"(?!\s*,\s*\d+\s+[A-Z])"
     ),
     
@@ -52,11 +48,10 @@ PATTERNS: Dict[str, Pattern] = {
     ),
     
     # Books: Author, Title (Edition Year)
-    # Fixed to capture full edition like "6th" not just "6"
     "book": re.compile(
         r"([A-Z][a-zA-Z\.\s]+),\s+"
         r"([A-Z][^(]+)\s*"
-        r"\((?:(\d+(?:st|nd|rd|th))\s+ed\.\s+)?(\d{4})\)"
+        r"\((?:(\d+)(?:st|nd|rd|th)\s+ed\.\s+)?(\d{4})\)"
     ),
     
     # Short forms - Id.
@@ -457,46 +452,18 @@ def get_journal_abbreviation(journal: str) -> str:
     """Get the Bluebook abbreviation for a journal."""
     return JOURNAL_ABBREVIATIONS.get(journal, journal)
 
-def abbreviate_party_name(party: str, is_state_party: bool = False) -> str:
-    """
-    Abbreviate a party name per Bluebook Table 6.
-
-    Args:
-        party: The party name to abbreviate
-        is_state_party: If True, don't abbreviate state/geographic names
-                       (per Rule 10.2.1 - states as parties keep full names)
-    """
+def abbreviate_party_name(party: str) -> str:
+    """Abbreviate a party name per Bluebook Table 6."""
     result = party
-
+    
     # Remove "The" at beginning (Rule 10.2.1(e))
     if result.lower().startswith("the "):
         result = result[4:]
-
-    # Don't abbreviate if it's a state/geographic entity as a party
-    # (e.g., "North Carolina" as defendant should stay "North Carolina")
-    if is_state_party:
-        return result.strip()
-
-    # Check if this is a pure state name - if so, don't abbreviate
-    if result.strip() in STATE_ABBREVIATIONS:
-        return result.strip()
-
-    # Words that should NOT be abbreviated in party names
-    # (only abbreviate organizational/business terms)
-    skip_abbreviations = {
-        "North", "South", "East", "West", "Eastern", "Western",
-        "Northern", "Southern", "Northeast", "Northwest",
-        "Southeast", "Southwest", "Carolina", "Dakota", "Virginia",
-        "Hampshire", "Jersey", "Mexico", "York"
-    }
-
-    # Apply abbreviations only for business/organizational terms
+    
+    # Apply abbreviations
     for full, abbrev in PARTY_ABBREVIATIONS.items():
-        # Skip geographic terms in case names
-        if full in skip_abbreviations:
-            continue
         # Use word boundaries for replacement
         pattern = re.compile(r'\b' + re.escape(full) + r'\b', re.IGNORECASE)
         result = pattern.sub(abbrev, result)
-
+    
     return result.strip()
