@@ -1,0 +1,21 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it as below."
+type: software
+title: "Bluebook Citation Generator"
+abstract: "Automated legal citation formatting, completion, and verification using Bluebook 21st Edition rules."
+authors:
+  - family-names: "Schlangen"
+    given-names: "Del"
+    orcid: "https://orcid.org/0009-0005-5116-9564"
+repository-code: "https://github.com/delschlangen/bluebook-cite"
+url: "https://delschlangen.github.io/bluebook-cite/"
+license: MIT
+keywords:
+  - legal-citation
+  - bluebook
+  - citation-generator
+  - legal-writing
+  - law-review
+  - legal-technology
+  - citation-formatting
+  - legal-research
