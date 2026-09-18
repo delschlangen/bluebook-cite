@@ -40,6 +40,12 @@ GOLDEN = [
         "Gonzalez v. Google LLC, 2 F.4th 871 (9th Cir. 2021)",
         "*Gonzalez v. Google LLC*, 2 F.4th 871 (9th Cir. 2021).",
     ),
+    # Entity suffix behind a comma. This extracted as "LLC v. Paxton" in
+    # production, so it is pinned here and in the browser suite.
+    (
+        "NetChoice, LLC v. Paxton, 49 F.4th 439 (5th Cir. 2022)",
+        "*NetChoice, LLC v. Paxton*, 49 F.4th 439 (5th Cir. 2022).",
+    ),
     # --- Statutes and regulations ---
     ("47 U.S.C. § 230", "47 U.S.C. § 230."),
     ("15 U.S.C. § 45", "15 U.S.C. § 45."),

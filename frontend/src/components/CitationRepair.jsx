@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { diagnose, repairCitation } from '../services/api';
 import { copyCitation, renderCitation } from '../utils/citationText';
+import { repairLocally } from '../utils/localCitation';
 
 const EXAMPLES = [
   'Moody v. NetChoice',
@@ -49,19 +50,34 @@ export default function CitationRepair() {
     }
 
     const id = ++requestId.current;
-    setLoading(true);
     setError(null);
 
+    // Parse and format locally first. This is instant, needs no network, and
+    // is the complete answer whenever the citation is already whole.
+    const local = repairLocally(trimmed);
+    if (id === requestId.current) setResult(local);
+
+    if (!local.needsLookup) {
+      if (id === requestId.current) setLoading(false);
+      return;
+    }
+
+    // Only a database can fill the gaps, so the server is worth calling.
+    setLoading(true);
     try {
       const response = await repairCitation(trimmed);
-      // Ignore a response that a newer request has already superseded.
       if (id === requestId.current) setResult(response);
     } catch (err) {
       if (id === requestId.current) {
-        // Say which failure this is instead of collapsing every one into
-        // "could not reach the server".
-        setError(await diagnose(err, '/api/repair'));
-        setResult(null);
+        const info = await diagnose(err, '/api/repair');
+        // The local diagnosis still stands and is still useful, so it stays
+        // on screen. The banner explains only what could not be added.
+        setError({
+          ...info,
+          detail:
+            `${info.detail} The missing fields below were worked out in your ` +
+            `browser and are still correct.`,
+        });
       }
     } finally {
       if (id === requestId.current) setLoading(false);
@@ -142,7 +158,7 @@ export default function CitationRepair() {
         </div>
       </form>
 
-      {!result && !loading && !error && (
+      {!result && !loading && (
         <div className="mt-6 border-t pt-5">
           <p className="text-xs font-medium text-gray-500 mb-2">Try one of these</p>
           <div className="flex flex-wrap gap-2">
