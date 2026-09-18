@@ -1,6 +1,12 @@
 # Models package
 from .citation import (
-    Citation, CitationType, CitationStatus, CitationContext,
-    UnsourcedClaim, DocumentAnalysis, UploadResponse,
-    AnalysisStats, AnalysisResponse
+    AnalysisResponse,
+    AnalysisStats,
+    Citation,
+    CitationContext,
+    CitationStatus,
+    CitationType,
+    DocumentAnalysis,
+    UnsourcedClaim,
+    UploadResponse,
 )

@@ -2,21 +2,48 @@
 FastAPI application for Bluebook Citation Generator.
 """
 
-from fastapi import FastAPI, UploadFile, File, HTTPException, Body
-from fastapi.middleware.cors import CORSMiddleware
-from contextlib import asynccontextmanager
+import asyncio
 import uuid
+from contextlib import asynccontextmanager
 
-from .services.parser import DocumentParser
-from .services.extractor import CitationExtractor
-from .services.bluebook_rules import BluebookFormatter, ShortFormManager
-from .services.context_analyzer import DocumentContextAnalyzer
-from .services.lookup_service import LegalLookupService, CitationCompleter
-from .services.source_finder import ClaimDetector, SourceFinder
+from fastapi import Body, FastAPI, File, HTTPException, UploadFile
+from fastapi.middleware.cors import CORSMiddleware
+
 from .models.citation import (
-    Citation, DocumentAnalysis, UploadResponse,
-    AnalysisResponse, AnalysisStats, CitationType, CitationStatus
+    AnalysisResponse,
+    AnalysisStats,
+    Citation,
+    CitationStatus,
+    CitationType,
+    DocumentAnalysis,
+    UploadResponse,
 )
+from .services.bluebook_rules import BluebookFormatter
+from .services.context_analyzer import DocumentContextAnalyzer
+from .services.extractor import CitationExtractor
+from .services.lookup_service import CitationCompleter, LegalLookupService
+from .services.parser import DocumentParser
+from .services.repair import CitationRepairer
+from .services.source_finder import ClaimDetector, SourceFinder
+
+# Cap on lookups running at once for a single document. Enough to hide network
+# latency, low enough to stay a polite client of free public APIs.
+MAX_CONCURRENT_LOOKUPS = 6
+
+# Hard ceiling on how long citation completion may take for one document.
+# Extraction and formatting still return if this is hit; only the enrichment
+# is dropped, so a slow upstream degrades the result instead of failing it.
+COMPLETION_BUDGET_SECONDS = 25.0
+
+# Uploads are unauthenticated, so the body is read with a hard cap rather than
+# pulled into memory in full. Content-Type is client-supplied and cannot be
+# trusted on its own; the parser validates the actual bytes.
+MAX_UPLOAD_BYTES = 10 * 1024 * 1024
+
+# The repair endpoint takes one citation, not a document. The cap keeps it
+# cheap and steers whole-document work to the upload path.
+MAX_REPAIR_CHARS = 2000
+REPAIR_BUDGET_SECONDS = 20.0
 
 # Global services
 parser = DocumentParser()
@@ -74,30 +101,50 @@ async def upload_document(file: UploadFile = File(...)):
         "application/vnd.openxmlformats-officedocument.wordprocessingml.document": "docx",
         "text/plain": "txt",
     }
-    
+
     if file.content_type not in allowed_types:
         raise HTTPException(
             status_code=400,
             detail=f"Unsupported file type: {file.content_type}. Supported: PDF, DOCX, TXT"
         )
-    
-    content = await file.read()
-    
+
+    content = await file.read(MAX_UPLOAD_BYTES + 1)
+    if len(content) > MAX_UPLOAD_BYTES:
+        raise HTTPException(
+            status_code=413,
+            detail=f"File is larger than the {MAX_UPLOAD_BYTES // (1024 * 1024)}MB limit.",
+        )
+    if not content:
+        raise HTTPException(status_code=400, detail="The uploaded file is empty.")
+
     try:
-        document_text = parser.parse(content, file.content_type)
+        # pdfplumber and python-docx are synchronous and CPU-bound. Calling
+        # them directly would block the event loop for the whole parse and
+        # stall every other in-flight request.
+        document_text = await asyncio.to_thread(
+            parser.parse, content, file.content_type
+        )
     except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Failed to parse document: {str(e)}")
-    
+        raise HTTPException(
+            status_code=400, detail=f"Failed to parse document: {e}"
+        ) from e
+
+    if not document_text or not document_text.strip():
+        raise HTTPException(
+            status_code=400,
+            detail="No text could be extracted. If this is a scanned PDF it needs OCR first.",
+        )
+
     doc_id = str(uuid.uuid4())
-    
+
     analyzer = DocumentContextAnalyzer()
     structure = analyzer.analyze_document_structure(document_text)
-    
+
     preview_length = 500
     preview = document_text[:preview_length]
     if len(document_text) > preview_length:
         preview += "..."
-    
+
     return UploadResponse(
         document_id=doc_id,
         filename=file.filename or "document",
@@ -109,6 +156,59 @@ async def upload_document(file: UploadFile = File(...)):
     )
 
 
+async def _complete_citations(citations):
+    """Enrich incomplete citations concurrently, under a total time budget.
+
+    Previously this ran one lookup at a time with a long per-call timeout, so a
+    document with a handful of incomplete citations could outlive any browser's
+    patience and surface as an opaque network failure. Now the lookups overlap,
+    the whole phase is bounded, and exceeding the budget degrades the response
+    instead of failing it.
+    """
+    needs_lookup = [
+        c for c in citations
+        if c.status.value in ("incomplete", "needs_verification")
+    ]
+
+    if needs_lookup:
+        completer = CitationCompleter(lookup_service)
+        semaphore = asyncio.Semaphore(MAX_CONCURRENT_LOOKUPS)
+
+        async def complete_one(citation):
+            async with semaphore:
+                try:
+                    return await completer.complete_citation(citation)
+                except Exception:
+                    # A failed enrichment must not fail the document. The
+                    # citation is still returned exactly as it was found.
+                    return citation
+
+        try:
+            enriched = await asyncio.wait_for(
+                asyncio.gather(
+                    *(complete_one(c) for c in needs_lookup),
+                    return_exceptions=True,
+                ),
+                timeout=COMPLETION_BUDGET_SECONDS,
+            )
+            replacements = {
+                id(original): result
+                for original, result in zip(needs_lookup, enriched, strict=True)
+                if not isinstance(result, Exception) and result is not None
+            }
+        except TimeoutError:
+            replacements = {}
+    else:
+        replacements = {}
+
+    completed = []
+    for citation in citations:
+        citation = replacements.get(id(citation), citation)
+        citation.suggested_correction = formatter.format_citation(citation)
+        completed.append(citation)
+    return completed
+
+
 @app.post("/api/analyze", response_model=AnalysisResponse)
 async def analyze_citations(
     document_id: str = Body(...),
@@ -118,28 +218,18 @@ async def analyze_citations(
     """Extract and analyze all citations in the document."""
     # Extract citations
     citations = extractor.extract_all(text)
-    
-    # Complete incomplete citations
-    completer = CitationCompleter(lookup_service)
-    completed_citations = []
-    
-    for citation in citations:
-        if citation.status.value in ["incomplete", "needs_verification"]:
-            citation = await completer.complete_citation(citation)
-        
-        # Generate formatted suggestion
-        citation.suggested_correction = formatter.format_citation(citation)
-        completed_citations.append(citation)
-    
+
+    completed_citations = await _complete_citations(citations)
+
     # Analyze citation sequence for short forms
     context_analyzer = DocumentContextAnalyzer()
     short_form_suggestions = context_analyzer.analyze_citation_sequence(completed_citations)
-    
+
     # Detect unsourced claims
     claim_detector = ClaimDetector()
     citation_positions = [(c.position_start, c.position_end) for c in completed_citations]
     unsourced = claim_detector.detect_unsourced_claims(text, citation_positions)
-    
+
     # Calculate stats
     stats = AnalysisStats(
         total_citations=len(completed_citations),
@@ -148,7 +238,7 @@ async def analyze_citations(
         needs_verification=sum(1 for c in completed_citations if c.status.value == "needs_verification"),
         unsourced_claims=len(unsourced),
     )
-    
+
     # Build analysis
     analysis = DocumentAnalysis(
         document_id=document_id,
@@ -157,7 +247,7 @@ async def analyze_citations(
         citations=completed_citations,
         unsourced_claims=unsourced,
     )
-    
+
     return AnalysisResponse(
         analysis=analysis,
         short_form_suggestions=short_form_suggestions,
@@ -171,14 +261,14 @@ async def format_citation(citation_data: dict):
     try:
         citation = Citation(**citation_data)
         formatted = formatter.format_citation(citation)
-        
+
         return {
             "original": citation.raw_text,
             "formatted": formatted,
             "type": citation.type.value,
         }
     except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=400, detail=str(e)) from e
 
 
 @app.post("/api/lookup")
@@ -189,7 +279,7 @@ async def lookup_citation(citation_data: dict):
         results = await lookup_service.lookup_citation(citation)
         return results
     except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=400, detail=str(e)) from e
 
 
 @app.post("/api/lookup/case")
@@ -371,6 +461,53 @@ async def search_citations(
     """
     results = await lookup_service.search_by_text(query, search_type)
     return results
+
+
+@app.post("/api/repair")
+async def repair_citation(text: str = Body(..., embed=True)):
+    """Diagnose and, where possible, complete a single pasted citation.
+
+    Returns one of four statuses:
+
+    - `resolved`    complete and formatted, with a link to verify it
+    - `ambiguous`   candidates found, none confident enough to apply
+    - `incomplete`  the gaps are identified but no record was found
+    - `unparseable` not recognizable as a citation
+
+    A formatted citation is only ever returned when it came from the user's
+    own complete input or from a matched record carrying a verification URL.
+    """
+    if len(text or "") > MAX_REPAIR_CHARS:
+        raise HTTPException(
+            status_code=413,
+            detail=(
+                f"Paste up to {MAX_REPAIR_CHARS} characters. "
+                "For a whole document, use the upload tab."
+            ),
+        )
+
+    repairer = CitationRepairer(lookup_service, extractor, formatter)
+    try:
+        result = await asyncio.wait_for(
+            repairer.repair(text), timeout=REPAIR_BUDGET_SECONDS
+        )
+    except TimeoutError:
+        # Fall back to the offline diagnosis, which is still useful.
+        result = await CitationRepairer(
+            _OfflineLookup(), extractor, formatter
+        ).repair(text)
+        result.notes.append(
+            "The lookup timed out, so only the parse is shown."
+        )
+    return result.as_dict()
+
+
+class _OfflineLookup:
+    """Stand-in used when a lookup exceeds its budget, so the endpoint can
+    still return the parse and the list of missing fields."""
+
+    async def smart_complete(self, citation):
+        return {"found": False, "data": None, "suggestions": []}
 
 
 if __name__ == "__main__":

@@ -8,9 +8,9 @@ Enhanced with:
 - Smarter hereinafter suggestions
 """
 
-from typing import List, Dict, Optional, Tuple
 from ..models.citation import Citation, CitationContext, CitationType
 from ..utils.bluebook_patterns import abbreviate_party_name
+
 
 class DocumentContextAnalyzer:
     """
@@ -24,48 +24,48 @@ class DocumentContextAnalyzer:
     """
 
     def __init__(self):
-        self.footnote_citations: Dict[int, List[str]] = {}
-        self.citation_first_use: Dict[str, int] = {}
-        self.citation_contexts: Dict[str, CitationContext] = {}
+        self.footnote_citations: dict[int, list[str]] = {}
+        self.citation_first_use: dict[str, int] = {}
+        self.citation_contexts: dict[str, CitationContext] = {}
         # Track citations within the current footnote for Id. decisions
-        self.current_footnote_cites: List[str] = []
+        self.current_footnote_cites: list[str] = []
         # Track the last citation used (for within-footnote Id.)
-        self.last_citation_key: Optional[str] = None
+        self.last_citation_key: str | None = None
         self.last_footnote: int = 0
-    
-    def analyze_document_structure(self, text: str) -> Dict:
+
+    def analyze_document_structure(self, text: str) -> dict:
         """Analyze overall document structure."""
         import re
-        
+
         analysis = {
             "has_footnotes": False,
             "citation_style": "unknown",
             "section_count": 0,
             "estimated_word_count": len(text.split()),
         }
-        
+
         # Detect footnote markers
         footnote_patterns = [
             r'\[\d+\]',
             r'(?:^|\s)\d{1,3}(?=\s+[A-Z])',
             r'(?:^|\s)\d{1,3}\.',
         ]
-        
+
         for pattern in footnote_patterns:
             if re.search(pattern, text, re.MULTILINE):
                 analysis["has_footnotes"] = True
                 break
-        
+
         # Count potential footnotes
         footnote_count = len(re.findall(r'\[\d+\]', text))
-        
+
         if footnote_count > 10:
             analysis["citation_style"] = "law_review"
         elif footnote_count > 0:
             analysis["citation_style"] = "footnotes"
         else:
             analysis["citation_style"] = "inline"
-        
+
         # Count sections
         section_patterns = [
             r'^(?:I{1,3}|IV|V|VI{0,3}|IX|X)\.',
@@ -73,14 +73,14 @@ class DocumentContextAnalyzer:
             r'^[A-Z]\.',
             r'^Section\s+\d+',
         ]
-        
+
         for pattern in section_patterns:
             matches = re.findall(pattern, text, re.MULTILINE)
             analysis["section_count"] = max(analysis["section_count"], len(matches))
-        
+
         return analysis
-    
-    def analyze_citation_sequence(self, citations: List[Citation]) -> List[Dict]:
+
+    def analyze_citation_sequence(self, citations: list[Citation]) -> list[dict]:
         """
         Analyze sequence of citations and suggest optimal short forms.
 
@@ -90,13 +90,13 @@ class DocumentContextAnalyzer:
         - Multiple citation footnotes
         """
         suggestions = []
-        seen: Dict[str, CitationContext] = {}
-        footnote_history: Dict[int, List[str]] = {}
+        seen: dict[str, CitationContext] = {}
+        footnote_history: dict[int, list[str]] = {}
         # Track last citation for within-footnote Id.
-        last_cite_key: Optional[str] = None
+        last_cite_key: str | None = None
         last_fn: int = 0
         # Track position within footnote
-        footnote_position: Dict[int, int] = {}
+        footnote_position: dict[int, int] = {}
 
         for citation in citations:
             fn = citation.footnote_number or 0
@@ -224,9 +224,9 @@ class DocumentContextAnalyzer:
 
     def _add_infra_suggestions(
         self,
-        suggestions: List[Dict],
-        seen: Dict[str, CitationContext]
-    ) -> List[Dict]:
+        suggestions: list[dict],
+        seen: dict[str, CitationContext]
+    ) -> list[dict]:
         """
         Add suggestions for infra references where appropriate.
 
@@ -254,8 +254,8 @@ class DocumentContextAnalyzer:
                             suggestion["multiple_references"] = len(later_refs)
 
         return suggestions
-    
-    def _get_citation_key(self, citation: Citation) -> Optional[str]:
+
+    def _get_citation_key(self, citation: Citation) -> str | None:
         """Generate a unique key for citation deduplication."""
         if citation.type == CitationType.CASE and citation.parties:
             return f"case:{citation.parties[0]}:{citation.parties[1] if len(citation.parties) > 1 else ''}"
@@ -268,30 +268,30 @@ class DocumentContextAnalyzer:
         elif citation.type == CitationType.BOOK:
             return f"book:{citation.author}:{citation.title}"
         return None
-    
+
     def _can_use_id(
         self,
         cite_key: str,
         current_fn: int,
-        footnote_history: Dict[int, List[str]]
+        footnote_history: dict[int, list[str]]
     ) -> bool:
         """Check if Id. can be used per Rule 4.1."""
         if current_fn <= 0:
             return False
-        
+
         # Check previous footnote
         prev_fn = current_fn - 1
         if prev_fn not in footnote_history:
             return False
-        
+
         prev_cites = footnote_history[prev_fn]
-        
+
         # Id. requires exactly one source in previous footnote
         if len(prev_cites) != 1:
             return False
-        
+
         return prev_cites[0] == cite_key
-    
+
     def _format_supra(self, citation: Citation, context: CitationContext) -> str:
         """Format supra citation."""
         if context.hereinafter_name:
@@ -300,43 +300,43 @@ class DocumentContextAnalyzer:
             prefix = citation.author.split()[-1]
         else:
             prefix = ""
-        
+
         if prefix:
             base = f"{prefix}, supra note {context.first_occurrence_footnote}"
         else:
             base = f"supra note {context.first_occurrence_footnote}"
-        
+
         if citation.pincite:
             return f"{base}, at {citation.pincite}."
         return f"{base}."
-    
+
     def _format_short_case(self, citation: Citation, context: CitationContext) -> str:
         """Format short form case citation."""
         if not citation.parties:
             return f"supra note {context.first_occurrence_footnote}."
-        
+
         short_name = citation.parties[0]
         non_distinctive = ["United States", "State", "People", "Commonwealth"]
-        
+
         if short_name in non_distinctive and len(citation.parties) > 1:
             short_name = citation.parties[1]
-        
+
         short_name = abbreviate_party_name(short_name)
-        
+
         if citation.volume and citation.reporter:
             base = f"*{short_name}*, {citation.volume} {citation.reporter}"
             if citation.pincite:
                 return f"{base} at {citation.pincite}."
             elif citation.page:
                 return f"{base} at {citation.page}."
-        
+
         return f"*{short_name}*, supra note {context.first_occurrence_footnote}."
-    
+
     def _should_use_hereinafter(self, citation: Citation) -> bool:
         """Check if hereinafter designation is appropriate."""
         return self._get_hereinafter_reason(citation) is not None
 
-    def _get_hereinafter_reason(self, citation: Citation) -> Optional[str]:
+    def _get_hereinafter_reason(self, citation: Citation) -> str | None:
         """
         Determine if hereinafter is appropriate and return reason.
 
@@ -402,7 +402,7 @@ class DocumentContextAnalyzer:
 
         return "Source"
 
-    def get_citation_summary(self, citations: List[Citation]) -> Dict:
+    def get_citation_summary(self, citations: list[Citation]) -> dict:
         """
         Generate a summary of citation usage patterns in the document.
 
@@ -424,7 +424,7 @@ class DocumentContextAnalyzer:
             "issues": [],
         }
 
-        cite_counts: Dict[str, int] = {}
+        cite_counts: dict[str, int] = {}
 
         for citation in citations:
             # Count by type

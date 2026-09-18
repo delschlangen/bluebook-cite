@@ -1,10 +1,11 @@
-import React, { useState, useCallback } from 'react';
+import React, { useState, useCallback, useEffect } from 'react';
 import FileUpload from './components/FileUpload';
 import CitationList from './components/CitationList';
 import CitationEditor from './components/CitationEditor';
+import CitationRepair from './components/CitationRepair';
 import SourceSuggestions from './components/SourceSuggestions';
 import DocumentPreview from './components/DocumentPreview';
-import { analyzeDocument, lookupCitation } from './services/api';
+import { analyzeDocument, checkHealth, lookupCitation } from './services/api';
 
 function App() {
   const [document, setDocument] = useState(null);
@@ -13,6 +14,14 @@ function App() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
   const [activeTab, setActiveTab] = useState('citations');
+  // Pasting one citation is the common case, so it is the default door.
+  const [mode, setMode] = useState('repair');
+
+  // The backend sleeps on a free tier. Wake it while the visitor is reading,
+  // so their first real request is not paying for a cold start.
+  useEffect(() => {
+    checkHealth();
+  }, []);
 
   const handleUpload = useCallback(async (uploadResult) => {
     setDocument(uploadResult);
@@ -100,16 +109,35 @@ function App() {
           </div>
         )}
 
-        {/* Upload Section */}
+        {/* Landing: repair a single citation, or analyze a whole document. */}
         {!document && !loading && (
+          <div>
+            <div className="flex gap-2 mb-5" role="tablist" aria-label="Choose a mode">
+              <ModeButton
+                active={mode === 'repair'}
+                onClick={() => setMode('repair')}
+              >
+                Fix a citation
+              </ModeButton>
+              <ModeButton
+                active={mode === 'upload'}
+                onClick={() => setMode('upload')}
+              >
+                Check a document
+              </ModeButton>
+            </div>
+
+            {mode === 'repair' && <CitationRepair />}
+
+            {mode === 'upload' && (
           <div className="bg-white rounded-lg shadow-lg p-8">
-            <h2 className="text-xl font-semibold mb-4">Upload Your Document</h2>
+            <h2 className="text-xl font-semibold mb-4">Check a whole document</h2>
             <p className="text-gray-600 mb-6">
               Upload a legal document (PDF, DOCX, or TXT) to analyze and format citations
               according to Bluebook 21st Edition rules.
             </p>
             <FileUpload onUpload={handleUpload} />
-            
+
             <div className="mt-8 border-t pt-6">
               <h3 className="font-medium text-gray-700 mb-3">Features</h3>
               <ul className="grid grid-cols-1 md:grid-cols-3 gap-4 text-sm text-gray-600">
@@ -133,6 +161,8 @@ function App() {
                 </li>
               </ul>
             </div>
+          </div>
+            )}
           </div>
         )}
 
@@ -268,6 +298,24 @@ function StatCard({ label, value, color }) {
       <div className="text-3xl font-bold">{value}</div>
       <div className="text-sm opacity-80">{label}</div>
     </div>
+  );
+}
+
+function ModeButton({ children, active, onClick }) {
+  return (
+    <button
+      type="button"
+      role="tab"
+      aria-selected={active}
+      onClick={onClick}
+      className={`px-4 py-2 rounded-lg text-sm font-medium transition-colors ${
+        active
+          ? 'bg-blue-600 text-white shadow'
+          : 'bg-white text-gray-600 border border-gray-200 hover:bg-gray-50'
+      }`}
+    >
+      {children}
+    </button>
   );
 }
 
