@@ -46,6 +46,27 @@ MAX_UPLOAD_BYTES = int(os.getenv("MAX_UPLOAD_MB", "10")) * 1024 * 1024
 MAX_REPAIR_CHARS = int(os.getenv("MAX_REPAIR_CHARS", "2000"))
 REPAIR_BUDGET_SECONDS = float(os.getenv("REPAIR_BUDGET_SECONDS", "20"))
 
+# Browser origins allowed to call this API.
+#
+# An origin is scheme + host + port only. The path is NOT part of it, so a
+# site served from https://example.com/some-project/ sends
+# "Origin: https://example.com" and must be listed as exactly that.
+#
+# Set EXTRA_ALLOWED_ORIGINS (comma separated) to add more without a deploy.
+ALLOWED_ORIGINS = [
+    "http://localhost:3000",
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
+    "https://delschlangen.github.io",
+    "https://delschlangen.com",
+    "https://www.delschlangen.com",
+]
+ALLOWED_ORIGINS += [
+    origin.strip()
+    for origin in os.getenv("EXTRA_ALLOWED_ORIGINS", "").split(",")
+    if origin.strip()
+]
+
 # Global services
 parser = DocumentParser()
 extractor = CitationExtractor()
@@ -91,15 +112,13 @@ app = FastAPI(
 # CORS configuration
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:3000",
-        "http://localhost:5173",
-        "http://127.0.0.1:5173",
-        "https://delschlangen.github.io",
-    ],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_origins=ALLOWED_ORIGINS,
+    # No cookies or auth headers are used, and allow_credentials=True forbids
+    # ever widening the origin list to a wildcard. Off is both safer and
+    # accurate about what this API does.
+    allow_credentials=False,
+    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_headers=["Content-Type"],
 )
 
 
