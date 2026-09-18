@@ -26,6 +26,10 @@ from app.utils.bluebook_patterns import (  # noqa: E402
     REPORTER_ABBREVIATIONS,
     STATE_ABBREVIATIONS,
 )
+from app.utils.field_guidance import (  # noqa: E402
+    CITATION_TEMPLATES,
+    FIELD_GUIDANCE,
+)
 
 OUTPUT = (
     Path(__file__).resolve().parent.parent.parent
@@ -51,6 +55,8 @@ def render() -> str:
         ("STATE_ABBREVIATIONS", STATE_ABBREVIATIONS),
         ("REPORTER_ABBREVIATIONS", REPORTER_ABBREVIATIONS),
         ("COURT_ABBREVIATIONS", COURT_ABBREVIATIONS),
+        ("FIELD_GUIDANCE", FIELD_GUIDANCE),
+        ("CITATION_TEMPLATES", CITATION_TEMPLATES),
     ):
         body = json.dumps(table, indent=2, ensure_ascii=False, sort_keys=True)
         parts.append(f"\nexport const {name} = {body};\n")

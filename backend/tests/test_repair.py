@@ -223,3 +223,77 @@ class TestRepairEndpoint:
             response = client.post("/api/repair", json={"text": "!!!???"})
         assert response.status_code == 200
         assert response.json()["status"] == UNPARSEABLE
+
+
+@pytest.mark.asyncio
+class TestTemplateAndGuidance:
+    """A partial citation should show its finished shape with the gaps marked,
+    and name the rule governing each gap. Listing field names teaches nothing."""
+
+    @respx.mock
+    async def test_template_marks_only_the_real_gaps(self, repairer):
+        respx.get(COURTLISTENER).mock(
+            return_value=httpx.Response(200, json={"results": []})
+        )
+        result = await repairer.repair("Brandenburg v Ohio 395 US 444")
+
+        # Volume, reporter and page were supplied and must not be called missing.
+        assert result.missing == ["year"]
+        assert result.template == "*Brandenburg v. Ohio*, 395 US 444 ([year])."
+
+    @respx.mock
+    async def test_template_marks_every_gap(self, repairer):
+        respx.get(COURTLISTENER).mock(
+            return_value=httpx.Response(200, json={"results": []})
+        )
+        result = await repairer.repair("Moody v. NetChoice")
+        assert result.template == (
+            "*Moody v. NetChoice*, [volume number] [reporter] [first page] "
+            "([court] [year])."
+        )
+
+    @respx.mock
+    async def test_every_gap_names_its_governing_rule(self, repairer):
+        respx.get(COURTLISTENER).mock(
+            return_value=httpx.Response(200, json={"results": []})
+        )
+        result = await repairer.repair("Moody v. NetChoice")
+
+        by_field = {d["field"]: d for d in result.missing_details}
+        assert by_field["volume"]["rule"] == "Rule 10.3.2"
+        assert by_field["reporter"]["rule"] == "Rule 10.3.2"
+        assert by_field["page"]["rule"] == "Rule 10.3.2"
+        assert by_field["year"]["rule"] == "Rule 10.5"
+        for detail in result.missing_details:
+            assert detail["label"] and detail["why"]
+            assert detail["rule"].startswith("Rule ")
+
+    async def test_complete_citation_has_no_gaps(self, repairer):
+        result = await repairer.repair("Brandenburg v. Ohio, 395 U.S. 444 (1969)")
+        assert result.missing_details == []
+
+    @respx.mock
+    async def test_scotus_reporter_drops_the_court_slot(self, repairer):
+        """Rule 10.4: no court identifier for the U.S. Supreme Court, so it is
+        not presented as a gap the reader must fill."""
+        respx.get(COURTLISTENER).mock(
+            return_value=httpx.Response(200, json={"results": []})
+        )
+        result = await repairer.repair("Brandenburg v Ohio 395 U.S. 444")
+        assert "[court]" not in result.template
+
+
+class TestDigitLeadingPartyNames:
+    def test_volume_is_not_absorbed_into_the_defendant(self, ):
+        from app.services.extractor import CitationExtractor
+
+        cites = CitationExtractor().extract_all("Brandenburg v Ohio 395 US 444")
+        assert cites[0].parties == ["Brandenburg", "Ohio"]
+        assert cites[0].volume == "395"
+        assert cites[0].page == "444"
+
+    def test_a_party_may_begin_with_a_digit(self):
+        from app.services.extractor import CitationExtractor
+
+        cites = CitationExtractor().extract_all("3M Company v. Browner")
+        assert "3M" in cites[0].parties[0]

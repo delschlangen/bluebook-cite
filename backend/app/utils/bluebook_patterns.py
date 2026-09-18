@@ -16,7 +16,12 @@ from re import Pattern
 
 # A single word inside a party name. Allows internal periods (abbreviations),
 # apostrophes (Ass'n), ampersands, and hyphens.
-_PARTY_WORD = r"[A-Za-z0-9][A-Za-z0-9.'&\-]*"
+#
+# A word must contain a letter. A purely numeric token is never part of a party
+# name, and allowing one let "Brandenburg v Ohio 395 US 444" absorb the volume,
+# reporter and page into the defendant, then report all three as missing.
+# "3M" and similar still match, because they are digits followed by a letter.
+_PARTY_WORD = r"(?:[A-Za-z][A-Za-z0-9.'&\-]*|[0-9]+[A-Za-z][A-Za-z0-9.'&\-]*)"
 
 # Entity suffixes that legitimately follow a comma inside a party name.
 _ENTITY_SUFFIX = (
@@ -26,8 +31,12 @@ _ENTITY_SUFFIX = (
 
 # Up to eight words, plus at most one comma-separated entity suffix. The bound
 # is what keeps a greedy match from swallowing the sentence before " v. ".
+# The first token may also begin with digits followed by a letter ("3M"),
+# but not with digits alone, so "395 US" cannot start a party name.
+_PARTY_FIRST = r"(?:[A-Z][A-Za-z0-9.'&\-]*|[0-9]+[A-Z][A-Za-z0-9.'&\-]*)"
+
 _PARTY = (
-    rf"[A-Z][A-Za-z0-9.'&\-]*"
+    rf"{_PARTY_FIRST}"
     rf"(?:\s+{_PARTY_WORD}){{0,7}}"
     rf"(?:,\s*{_ENTITY_SUFFIX})?"
 )
@@ -47,6 +56,15 @@ PATTERNS: dict[str, Pattern] = {
         r"(\d+)\s+([A-Z][a-zA-Z\.\s\d]*?[a-zA-Z\.\d])\s+(\d+)"
         r"(?:,\s*(\d+(?:-\d+)?))?\s*"
         r"\(([^)]+)\)"
+    ),
+
+    # Case with a reporter citation but no year parenthetical, e.g.
+    # "Brandenburg v Ohio 395 US 444". The volume, reporter and page are all
+    # present and must be recognised as such rather than reported missing.
+    "case_no_year": re.compile(
+        rf"({_PARTY})\s+v\.?\s+({_PARTY}),?\s+"
+        r"(\d+)\s+([A-Z][a-zA-Z\.\s\d]*?[a-zA-Z\.\d])\s+(\d+)"
+        r"(?!\s*[\d,]*\s*\()"
     ),
 
     # Incomplete case: just Party v. Party (missing reporter info)

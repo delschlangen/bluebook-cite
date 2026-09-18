@@ -20,6 +20,8 @@ from ..services.lookup_service import (
     CONFIDENT_MATCH_THRESHOLD,
     LegalLookupService,
 )
+from ..utils.bluebook_patterns import abbreviate_party_name
+from ..utils.field_guidance import CITATION_TEMPLATES, guidance_for
 
 # Fields the Bluebook requires before a citation of each type is complete.
 REQUIRED_FIELDS: dict[CitationType, tuple[str, ...]] = {
@@ -63,6 +65,8 @@ class RepairResult:
     parsed: dict[str, Any] = field(default_factory=dict)
     missing: list[str] = field(default_factory=list)
     missing_labels: list[str] = field(default_factory=list)
+    missing_details: list[dict[str, Any]] = field(default_factory=list)
+    template: str | None = None
     formatted: str | None = None
     confidence: float | None = None
     source: str | None = None
@@ -78,6 +82,8 @@ class RepairResult:
             "parsed": self.parsed,
             "missing": self.missing,
             "missing_labels": self.missing_labels,
+            "missing_details": self.missing_details,
+            "template": self.template,
             "formatted": self.formatted,
             "confidence": self.confidence,
             "source": self.source,
@@ -116,6 +122,76 @@ def _parsed_fields(citation: Citation) -> dict[str, Any]:
         if value not in (None, "", []):
             out[key] = value
     return out
+
+
+# Reporters that carry U.S. Supreme Court decisions, normalised.
+_SCOTUS_REPORTERS = {"US", "SCT", "LED", "LED2D"}
+
+
+def is_scotus_reporter(reporter: str | None) -> bool:
+    """True when this reporter publishes U.S. Supreme Court decisions."""
+    if not reporter:
+        return False
+    normalised = "".join(c for c in reporter if c.isalnum()).upper()
+    return normalised in _SCOTUS_REPORTERS
+
+
+def build_template(citation: Citation, gaps: list[str]) -> str | None:
+    """Render the citation in its finished shape, gaps marked in brackets.
+
+    Naming the missing fields tells someone what is wrong. Showing them the
+    whole citation with the holes in place tells them what it should look like,
+    which is the thing they are actually trying to produce.
+    """
+    template = CITATION_TEMPLATES.get(citation.type.value)
+    if not template:
+        return None
+
+    missing = set(gaps)
+
+    def slot(field: str, value: Any) -> str:
+        if field in missing or value in (None, "", []):
+            return f"[{guidance_for(field)['label']}]"
+        return str(value)
+
+    if citation.type == CitationType.CASE:
+        if citation.parties and len(citation.parties) >= 2:
+            parties = (
+                f"{abbreviate_party_name(citation.parties[0])} v. "
+                f"{abbreviate_party_name(citation.parties[1])}"
+            )
+        else:
+            parties = "[party names]"
+
+        # Rule 10.4: the U.S. Supreme Court takes no court identifier, so the
+        # slot is dropped rather than shown as a gap the reader must fill.
+        # Every SCOTUS reporter counts, not just U.S., and "US" without periods
+        # has to normalise to the same thing as "U.S.".
+        if is_scotus_reporter(citation.reporter):
+            court = ""
+        elif citation.court:
+            court = f"{citation.court} "
+        else:
+            court = "[court] "
+
+        return template.format(
+            parties=parties,
+            volume=slot("volume", citation.volume),
+            reporter=slot("reporter", citation.reporter),
+            page=slot("page", citation.page),
+            court=court,
+            year=slot("year", citation.year),
+        )
+
+    fields = {
+        name: slot(name, getattr(citation, name, None))
+        for name in ("title_number", "code", "section", "author", "title",
+                     "journal", "volume", "page", "year", "url")
+    }
+    try:
+        return template.format(**fields)
+    except KeyError:
+        return None
 
 
 def _candidate_url(raw: dict[str, Any]) -> str | None:
@@ -170,6 +246,8 @@ class CitationRepairer:
             parsed=_parsed_fields(citation),
             missing=gaps,
             missing_labels=[FIELD_LABELS.get(g, g) for g in gaps],
+            missing_details=[guidance_for(g) for g in gaps],
+            template=build_template(citation, gaps),
         )
 
         # Already complete. Format it and say so; no lookup is needed, and the
@@ -231,6 +309,8 @@ class CitationRepairer:
                 result.missing_labels = [
                     FIELD_LABELS.get(f, f) for f in remaining
                 ]
+                result.missing_details = [guidance_for(f) for f in remaining]
+                result.template = build_template(filled, remaining)
                 result.status = RESOLVED if not remaining else AMBIGUOUS
                 result.notes.append(
                     "Completed from a matched record. Open the source link to "

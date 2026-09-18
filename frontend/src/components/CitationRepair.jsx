@@ -3,6 +3,28 @@ import { diagnose, repairCitation } from '../services/api';
 import { copyCitation, renderCitation } from '../utils/citationText';
 import { repairLocally } from '../utils/localCitation';
 
+// Render a template: *italics* as emphasis, [gaps] as visible blanks.
+function renderTemplate(text) {
+  if (!text) return null;
+  return text.split(/(\*[^*]+\*|\[[^\]]+\])/g).map((part, i) => {
+    if (part.startsWith('*') && part.endsWith('*') && part.length > 2) {
+      return <em key={i}>{part.slice(1, -1)}</em>;
+    }
+    if (part.startsWith('[') && part.endsWith(']')) {
+      return (
+        <span
+          key={i}
+          className="px-1.5 py-0.5 mx-0.5 rounded bg-amber-100 text-amber-900
+                     text-sm font-medium border border-amber-200"
+        >
+          {part.slice(1, -1)}
+        </span>
+      );
+    }
+    return part;
+  });
+}
+
 const EXAMPLES = [
   'Moody v. NetChoice',
   'Brandenburg v Ohio 395 US 444',
@@ -236,23 +258,67 @@ export default function CitationRepair() {
             </div>
           )}
 
-          {result.missing_labels?.length > 0 && (
+          {result.template && !result.formatted && (
+            <div className="mb-4">
+              <p className="text-xs font-medium text-gray-600 mb-2">
+                What the finished citation looks like
+              </p>
+              <p className="text-base text-gray-900 leading-relaxed">
+                {renderTemplate(result.template)}
+              </p>
+              <p className="text-xs text-gray-500 mt-1.5">
+                Bracketed parts are what you still need to supply.
+              </p>
+            </div>
+          )}
+
+          {result.missing_details?.length > 0 ? (
             <div className="mb-4">
               <p className="text-xs font-medium text-gray-600 mb-2">
                 Still needs
               </p>
-              <ul className="flex flex-wrap gap-2">
-                {result.missing_labels.map((label) => (
+              <ul className="space-y-2">
+                {result.missing_details.map((detail) => (
                   <li
-                    key={label}
-                    className="px-2 py-1 bg-white/80 border border-gray-200
-                               rounded text-xs text-gray-700"
+                    key={detail.field || detail.label}
+                    className="p-3 bg-white/80 border border-gray-200 rounded"
                   >
-                    {label}
+                    <div className="flex items-baseline justify-between gap-3">
+                      <span className="text-sm font-medium text-gray-900">
+                        {detail.label}
+                      </span>
+                      {detail.rule && (
+                        <span className="text-xs font-mono text-blue-700 whitespace-nowrap">
+                          {detail.rule}
+                        </span>
+                      )}
+                    </div>
+                    {detail.why && (
+                      <p className="text-xs text-gray-600 mt-1 leading-relaxed">
+                        {detail.why}
+                      </p>
+                    )}
                   </li>
                 ))}
               </ul>
             </div>
+          ) : (
+            result.missing_labels?.length > 0 && (
+              <div className="mb-4">
+                <p className="text-xs font-medium text-gray-600 mb-2">Still needs</p>
+                <ul className="flex flex-wrap gap-2">
+                  {result.missing_labels.map((label) => (
+                    <li
+                      key={label}
+                      className="px-2 py-1 bg-white/80 border border-gray-200
+                                 rounded text-xs text-gray-700"
+                    >
+                      {label}
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )
           )}
 
           {result.candidates?.length > 0 && (

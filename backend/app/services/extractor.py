@@ -159,6 +159,30 @@ class CitationExtractor:
                 year=year,
             ))
 
+        # Then cases carrying a reporter citation but no year parenthetical.
+        # These are mostly complete and must not be reported as though the
+        # volume, reporter and page were absent.
+        for match in PATTERNS["case_no_year"].finditer(text):
+            if self._overlaps(match.start(), match.end(), spans):
+                continue
+
+            spans.append((match.start(), match.end()))
+
+            citations.append(Citation(
+                type=CitationType.CASE,
+                status=CitationStatus.INCOMPLETE,
+                raw_text=match.group(0),
+                position_start=match.start(),
+                position_end=match.end(),
+                parties=[
+                    self._clean_party_name(match.group(1)),
+                    self._clean_party_name(match.group(2)),
+                ],
+                volume=match.group(3),
+                reporter=match.group(4).strip(),
+                page=match.group(5),
+            ))
+
         # Then, incomplete case citations (just party names)
         for match in PATTERNS["case_incomplete"].finditer(text):
             if self._overlaps(match.start(), match.end(), spans):
