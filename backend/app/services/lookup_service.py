@@ -17,6 +17,7 @@ from urllib.parse import urlparse
 import httpx
 
 from ..models.citation import Citation, CitationStatus, CitationType
+from ..utils.safe_fetch import UnsafeURLError, safe_get
 
 # Per-call read timeout. Several lookups can run for one citation, so this
 # must stay small enough that the worst case still fits inside a request.
@@ -409,7 +410,11 @@ class LegalLookupService:
 
         try:
             client = await self._get_client()
-            response = await client.get(citation.url, follow_redirects=True)
+            # The URL comes from the visitor. safe_get rejects private,
+            # loopback, link-local and metadata addresses, and re-validates
+            # every redirect hop rather than letting httpx chase one into the
+            # internal network.
+            response = await safe_get(client, citation.url)
 
             if response.status_code == 200:
                 html = response.text
@@ -452,6 +457,11 @@ class LegalLookupService:
                     "site_name": site_name,
                     "url": citation.url,
                 }
+        except UnsafeURLError as e:
+            # Say plainly that the URL was refused, rather than reporting a
+            # generic not-found that looks like the page simply was not there.
+            results["error"] = str(e)
+            results["blocked"] = True
         except Exception as e:
             results["error"] = str(e)
 
