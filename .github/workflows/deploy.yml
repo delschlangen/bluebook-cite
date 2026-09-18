@@ -62,7 +62,12 @@ jobs:
       - name: Build
         working-directory: frontend
         env:
-          VITE_API_URL: https://pleasing-insight-production.up.railway.app
+          # Set a repository variable named API_URL (Settings > Secrets and
+          # variables > Actions > Variables) to point the site at a different
+          # backend. It must be a REPOSITORY variable, not an environment one:
+          # an environment variable would need `environment:` on this job.
+          # With no variable set, the Railway backend is used.
+          VITE_API_URL: ${{ vars.API_URL || 'https://pleasing-insight-production.up.railway.app' }}
         run: npm run build
 
       - name: Upload artifact

@@ -10,6 +10,7 @@ Enhanced with:
 """
 
 import difflib
+import os
 import re
 from typing import Any
 from urllib.parse import urlparse
@@ -21,7 +22,7 @@ from ..utils.safe_fetch import UnsafeURLError, safe_get
 
 # Per-call read timeout. Several lookups can run for one citation, so this
 # must stay small enough that the worst case still fits inside a request.
-LOOKUP_READ_TIMEOUT = 8.0
+LOOKUP_READ_TIMEOUT = float(os.getenv("LOOKUP_READ_TIMEOUT", "8"))
 
 # A candidate below this similarity to the query is never reported as a match.
 # Search APIs rank by relevance and almost always return *something*, so

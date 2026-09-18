@@ -34,31 +34,52 @@ MAX_CONCURRENT_LOOKUPS = 6
 # Hard ceiling on how long citation completion may take for one document.
 # Extraction and formatting still return if this is hit; only the enrichment
 # is dropped, so a slow upstream degrades the result instead of failing it.
-COMPLETION_BUDGET_SECONDS = 25.0
+COMPLETION_BUDGET_SECONDS = float(os.getenv("COMPLETION_BUDGET_SECONDS", "25"))
 
 # Uploads are unauthenticated, so the body is read with a hard cap rather than
 # pulled into memory in full. Content-Type is client-supplied and cannot be
 # trusted on its own; the parser validates the actual bytes.
-MAX_UPLOAD_BYTES = 10 * 1024 * 1024
+MAX_UPLOAD_BYTES = int(os.getenv("MAX_UPLOAD_MB", "10")) * 1024 * 1024
 
 # The repair endpoint takes one citation, not a document. The cap keeps it
 # cheap and steers whole-document work to the upload path.
-MAX_REPAIR_CHARS = 2000
-REPAIR_BUDGET_SECONDS = 20.0
+MAX_REPAIR_CHARS = int(os.getenv("MAX_REPAIR_CHARS", "2000"))
+REPAIR_BUDGET_SECONDS = float(os.getenv("REPAIR_BUDGET_SECONDS", "20"))
 
 # Global services
 parser = DocumentParser()
 extractor = CitationExtractor()
 formatter = BluebookFormatter()
-lookup_service: LegalLookupService = None
+_lookup_service: LegalLookupService | None = None
+
+
+def get_lookup_service() -> LegalLookupService:
+    """Return the shared lookup service, creating it on first use.
+
+    Creating this in the lifespan hook alone is not safe everywhere: some
+    serverless runtimes do not run ASGI lifespan events, which would leave the
+    service as None and fail every request that needs a lookup. Creating it
+    lazily works under uvicorn and under a serverless runtime alike.
+    """
+    global _lookup_service
+    if _lookup_service is None or _lookup_service.client is None:
+        _lookup_service = LegalLookupService()
+    return _lookup_service
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Manage application lifespan."""
-    global lookup_service
-    lookup_service = LegalLookupService()
+    """Warm the lookup service on startup and close it cleanly on shutdown.
+
+    Only runs on hosts that dispatch lifespan events. The lazy accessor above
+    covers the hosts that do not.
+    """
+    get_lookup_service()
     yield
-    await lookup_service.close()
+    global _lookup_service
+    if _lookup_service is not None:
+        await _lookup_service.close()
+        _lookup_service = None
 
 app = FastAPI(
     title="Bluebook Citation Generator",
@@ -100,7 +121,14 @@ async def health_check():
     return {
         "status": "healthy",
         "version": "1.0.0",
-        "commit": os.getenv("RAILWAY_GIT_COMMIT_SHA", "unknown")[:7],
+        "commit": (
+            os.getenv("VERCEL_GIT_COMMIT_SHA")
+            or os.getenv("RAILWAY_GIT_COMMIT_SHA")
+            or "unknown"
+        )[:7],
+        "host": "vercel" if os.getenv("VERCEL") else (
+            "railway" if os.getenv("RAILWAY_ENVIRONMENT") else "local"
+        ),
         "endpoints": sorted(
             route.path for route in app.routes
             if getattr(route, "path", "").startswith("/api")
@@ -186,7 +214,7 @@ async def _complete_citations(citations):
     ]
 
     if needs_lookup:
-        completer = CitationCompleter(lookup_service)
+        completer = CitationCompleter(get_lookup_service())
         semaphore = asyncio.Semaphore(MAX_CONCURRENT_LOOKUPS)
 
         async def complete_one(citation):
@@ -291,7 +319,7 @@ async def lookup_citation(citation_data: dict):
     """Look up a citation in legal databases."""
     try:
         citation = Citation(**citation_data)
-        results = await lookup_service.lookup_citation(citation)
+        results = await get_lookup_service().lookup_citation(citation)
         return results
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
@@ -326,7 +354,7 @@ async def lookup_case(
             search_citation.reporter = match.group(2).strip()
             search_citation.page = match.group(3)
 
-    results = await lookup_service.lookup_citation(search_citation)
+    results = await get_lookup_service().lookup_citation(search_citation)
     return results
 
 
@@ -344,7 +372,7 @@ async def complete_from_text(text: str = Body(..., embed=True)):
 
     Returns a completed citation with all available information.
     """
-    completer = CitationCompleter(lookup_service)
+    completer = CitationCompleter(get_lookup_service())
     citation, results = await completer.complete_from_text(text)
 
     # Format the completed citation
@@ -371,7 +399,7 @@ async def find_sources(
     Analyzes the text for claims that need citations and
     searches legal databases for relevant sources.
     """
-    source_finder = SourceFinder(lookup_service)
+    source_finder = SourceFinder(get_lookup_service())
 
     # First detect claims
     claim_detector = ClaimDetector()
@@ -407,7 +435,7 @@ async def analyze_comprehensive(
     citations = extractor.extract_all(text)
 
     # Complete incomplete citations using smart lookup
-    completer = CitationCompleter(lookup_service)
+    completer = CitationCompleter(get_lookup_service())
     completed_citations = []
 
     for citation in citations:
@@ -428,7 +456,7 @@ async def analyze_comprehensive(
     # Detect and find sources for unsourced claims
     unsourced_analysis = None
     if find_sources:
-        source_finder = SourceFinder(lookup_service)
+        source_finder = SourceFinder(get_lookup_service())
         citation_positions = [(c.position_start, c.position_end) for c in completed_citations]
         unsourced_analysis = await source_finder.analyze_document_for_sources(
             text, citation_positions
@@ -474,7 +502,7 @@ async def search_citations(
     - "article": Search for law review articles
     - "statute": Parse and lookup statutes
     """
-    results = await lookup_service.search_by_text(query, search_type)
+    results = await get_lookup_service().search_by_text(query, search_type)
     return results
 
 
@@ -501,7 +529,7 @@ async def repair_citation(text: str = Body(..., embed=True)):
             ),
         )
 
-    repairer = CitationRepairer(lookup_service, extractor, formatter)
+    repairer = CitationRepairer(get_lookup_service(), extractor, formatter)
     try:
         result = await asyncio.wait_for(
             repairer.repair(text), timeout=REPAIR_BUDGET_SECONDS

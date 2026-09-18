@@ -1,0 +1,10 @@
+# Nothing here is needed to serve requests. Keeping it out of the bundle
+# shortens cold starts and keeps the function under the size limit.
+tests/
+pytest.ini
+ruff.toml
+requirements-dev.txt
+Dockerfile
+railway.json
+**/__pycache__/
+**/*.pyc
