@@ -104,11 +104,17 @@ export async function diagnose(err, endpoint) {
   const health = await checkHealth(10000);
 
   if (!health) {
+    // A browser reports a blocked cross-origin response and an unreachable
+    // host identically: both reject with a TypeError and no detail. The health
+    // probe fails the same way, so it cannot separate them either. Name both
+    // rather than asserting an outage that may not be happening.
     return {
-      message: 'The citation server is not responding.',
+      message: 'No response from the citation server.',
       detail:
-        'It is asleep, restarting, or its deployment is down. Wait a few ' +
-        'seconds and try again.',
+        `Either it is asleep or down, or it is running but not accepting ` +
+        `requests from ${window.location.origin}. Its allowed-origins list ` +
+        `has to contain that exact value.`,
+      unreachable: true,
     };
   }
 
