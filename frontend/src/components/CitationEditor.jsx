@@ -1,16 +1,5 @@
 import React, { useState, useEffect } from 'react';
-
-// Render markdown-style *italics* as actual italics
-function renderCitation(text) {
-  if (!text) return null;
-  const parts = text.split(/(\*[^*]+\*)/g);
-  return parts.map((part, i) => {
-    if (part.startsWith('*') && part.endsWith('*')) {
-      return <em key={i}>{part.slice(1, -1)}</em>;
-    }
-    return part;
-  });
-}
+import { renderCitation } from '../utils/citationText';
 
 export default function CitationEditor({ citation, suggestion, onSave, onLookup, onCancel }) {
   const [formData, setFormData] = useState({});

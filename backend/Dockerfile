@@ -20,4 +20,8 @@ USER appuser
 
 EXPOSE 8000
 
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+# Shell form so ${PORT} expands. Railway assigns the port at runtime; the exec
+# form hardcoded 8000, so if this Dockerfile were ever built without the
+# matching railway.json startCommand the container would listen on the wrong
+# port and every health check would fail.
+CMD uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000}

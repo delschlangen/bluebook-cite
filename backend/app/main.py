@@ -23,6 +23,7 @@ from .services.context_analyzer import DocumentContextAnalyzer
 from .services.extractor import CitationExtractor
 from .services.lookup_service import CitationCompleter, LegalLookupService
 from .services.parser import DocumentParser
+from .services.repair import CitationRepairer
 from .services.source_finder import ClaimDetector, SourceFinder
 
 # Cap on lookups running at once for a single document. Enough to hide network
@@ -38,6 +39,11 @@ COMPLETION_BUDGET_SECONDS = 25.0
 # pulled into memory in full. Content-Type is client-supplied and cannot be
 # trusted on its own; the parser validates the actual bytes.
 MAX_UPLOAD_BYTES = 10 * 1024 * 1024
+
+# The repair endpoint takes one citation, not a document. The cap keeps it
+# cheap and steers whole-document work to the upload path.
+MAX_REPAIR_CHARS = 2000
+REPAIR_BUDGET_SECONDS = 20.0
 
 # Global services
 parser = DocumentParser()
@@ -455,6 +461,53 @@ async def search_citations(
     """
     results = await lookup_service.search_by_text(query, search_type)
     return results
+
+
+@app.post("/api/repair")
+async def repair_citation(text: str = Body(..., embed=True)):
+    """Diagnose and, where possible, complete a single pasted citation.
+
+    Returns one of four statuses:
+
+    - `resolved`    complete and formatted, with a link to verify it
+    - `ambiguous`   candidates found, none confident enough to apply
+    - `incomplete`  the gaps are identified but no record was found
+    - `unparseable` not recognizable as a citation
+
+    A formatted citation is only ever returned when it came from the user's
+    own complete input or from a matched record carrying a verification URL.
+    """
+    if len(text or "") > MAX_REPAIR_CHARS:
+        raise HTTPException(
+            status_code=413,
+            detail=(
+                f"Paste up to {MAX_REPAIR_CHARS} characters. "
+                "For a whole document, use the upload tab."
+            ),
+        )
+
+    repairer = CitationRepairer(lookup_service, extractor, formatter)
+    try:
+        result = await asyncio.wait_for(
+            repairer.repair(text), timeout=REPAIR_BUDGET_SECONDS
+        )
+    except TimeoutError:
+        # Fall back to the offline diagnosis, which is still useful.
+        result = await CitationRepairer(
+            _OfflineLookup(), extractor, formatter
+        ).repair(text)
+        result.notes.append(
+            "The lookup timed out, so only the parse is shown."
+        )
+    return result.as_dict()
+
+
+class _OfflineLookup:
+    """Stand-in used when a lookup exceeds its budget, so the endpoint can
+    still return the parse and the list of missing fields."""
+
+    async def smart_complete(self, citation):
+        return {"found": False, "data": None, "suggestions": []}
 
 
 if __name__ == "__main__":
