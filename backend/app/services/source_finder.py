@@ -8,13 +8,15 @@ Enhanced with:
 """
 
 import re
-from typing import List, Tuple, Optional, Dict, Any
-from ..models.citation import UnsourcedClaim, Citation, CitationType, CitationStatus
+from typing import Any
+
+from ..models.citation import UnsourcedClaim
+
 
 class ClaimDetector:
     """
     Detects statements that require citations in legal writing.
-    
+
     Types of claims needing citations:
     1. Legal rules and holdings
     2. Statistical claims
@@ -22,7 +24,7 @@ class ClaimDetector:
     4. Quotations
     5. Descriptions of other sources' arguments
     """
-    
+
     LEGAL_PATTERNS = [
         r"(?:The|A)\s+(?:Supreme )?[Cc]ourt\s+(?:has\s+)?(?:held|ruled|found|determined|concluded|stated)",
         r"(?:Under|According to|Pursuant to)\s+(?:the\s+)?(?:\w+\s+)?(?:law|statute|regulation|rule|doctrine)",
@@ -32,7 +34,7 @@ class ClaimDetector:
         r"(?:Courts|Judges|The judiciary)\s+(?:have|has)\s+(?:consistently|uniformly|generally)",
         r"[Ii]t is (?:well[- ])?(?:established|settled)\s+(?:law\s+)?that",
     ]
-    
+
     STATISTICAL_PATTERNS = [
         r"\d+(?:\.\d+)?%",
         r"\d+(?:,\d{3})*(?:\.\d+)?\s+(?:people|individuals|cases|incidents|dollars)",
@@ -40,7 +42,7 @@ class ClaimDetector:
         r"(?:majority|minority|plurality)\s+of",
         r"(?:[Ss]tudies|[Rr]esearch|[Dd]ata|[Ee]vidence)\s+(?:show|indicate|suggest|demonstrate)",
     ]
-    
+
     FACTUAL_PATTERNS = [
         r"[Ii]t is (?:a\s+)?(?:well[- ])?(?:known|established|documented)\s+(?:fact\s+)?that",
         r"[Aa]s a matter of fact",
@@ -49,58 +51,58 @@ class ClaimDetector:
         r"[Gg]enerally(?:,)?\s+(?:speaking)?",
         r"[Ii]t is (?:commonly|widely|generally)\s+(?:accepted|believed|understood)",
     ]
-    
+
     QUOTATION_PATTERN = r'"[^"]{15,}"'
-    
+
     def __init__(self):
         self.legal_patterns = [re.compile(p, re.IGNORECASE) for p in self.LEGAL_PATTERNS]
         self.stat_patterns = [re.compile(p) for p in self.STATISTICAL_PATTERNS]
         self.fact_patterns = [re.compile(p, re.IGNORECASE) for p in self.FACTUAL_PATTERNS]
         self.quote_pattern = re.compile(self.QUOTATION_PATTERN)
-    
+
     def detect_unsourced_claims(
         self,
         text: str,
-        existing_citations: List[Tuple[int, int]]
-    ) -> List[UnsourcedClaim]:
+        existing_citations: list[tuple[int, int]]
+    ) -> list[UnsourcedClaim]:
         """Scan text for claims that need citations but don't have them."""
         claims = []
         sentences = self._split_sentences(text)
-        
+
         for sent_start, sent_end, sent_text in sentences:
             if self._has_nearby_citation(sent_start, sent_end, existing_citations):
                 continue
-            
+
             claim = self._analyze_sentence(sent_text, sent_start, sent_end)
             if claim:
                 claims.append(claim)
-        
+
         return claims
-    
-    def _split_sentences(self, text: str) -> List[Tuple[int, int, str]]:
+
+    def _split_sentences(self, text: str) -> list[tuple[int, int, str]]:
         """Split text into sentences with position tracking."""
         sentence_enders = re.compile(r'(?<=[.!?])\s+(?=[A-Z])')
         sentences = []
         last_end = 0
-        
+
         for match in sentence_enders.finditer(text):
             sentence_text = text[last_end:match.start() + 1]
             sentences.append((last_end, match.start() + 1, sentence_text))
             last_end = match.end()
-        
+
         if last_end < len(text):
             sentences.append((last_end, len(text), text[last_end:]))
-        
+
         return sentences
-    
+
     def _has_nearby_citation(
         self,
         start: int,
         end: int,
-        citations: List[Tuple[int, int]]
+        citations: list[tuple[int, int]]
     ) -> bool:
         """Check if there's a citation within or near the text span."""
-        for cite_start, cite_end in citations:
+        for cite_start, _cite_end in citations:
             # Citation within span
             if start <= cite_start <= end:
                 return True
@@ -108,18 +110,18 @@ class ClaimDetector:
             if 0 <= cite_start - end <= 30:
                 return True
         return False
-    
+
     def _analyze_sentence(
         self,
         sentence: str,
         start: int,
         end: int
-    ) -> Optional[UnsourcedClaim]:
+    ) -> UnsourcedClaim | None:
         """Analyze a sentence for citation-worthy claims."""
         # Skip very short sentences
         if len(sentence.strip()) < 20:
             return None
-        
+
         # Check for quotations first
         if self.quote_pattern.search(sentence):
             return UnsourcedClaim(
@@ -130,7 +132,7 @@ class ClaimDetector:
                 confidence=0.95,
                 suggested_search_terms=self._extract_quote_terms(sentence),
             )
-        
+
         # Check for legal claims
         for pattern in self.legal_patterns:
             if pattern.search(sentence):
@@ -142,7 +144,7 @@ class ClaimDetector:
                     confidence=0.85,
                     suggested_search_terms=self._extract_legal_terms(sentence),
                 )
-        
+
         # Check for statistical claims
         for pattern in self.stat_patterns:
             if pattern.search(sentence):
@@ -154,7 +156,7 @@ class ClaimDetector:
                     confidence=0.90,
                     suggested_search_terms=self._extract_general_terms(sentence),
                 )
-        
+
         # Check for factual claims
         for pattern in self.fact_patterns:
             if pattern.search(sentence):
@@ -166,10 +168,10 @@ class ClaimDetector:
                     confidence=0.70,
                     suggested_search_terms=self._extract_general_terms(sentence),
                 )
-        
+
         return None
-    
-    def _extract_quote_terms(self, sentence: str) -> List[str]:
+
+    def _extract_quote_terms(self, sentence: str) -> list[str]:
         """Extract search terms from a quotation."""
         match = self.quote_pattern.search(sentence)
         if match:
@@ -178,16 +180,16 @@ class ClaimDetector:
             words = quote.split()[:6]
             return [" ".join(words)]
         return []
-    
-    def _extract_legal_terms(self, sentence: str) -> List[str]:
+
+    def _extract_legal_terms(self, sentence: str) -> list[str]:
         """Extract legal search terms."""
         terms = []
-        
+
         # Look for case names
         case_pattern = r'([A-Z][a-zA-Z]+)\s+v\.\s+([A-Z][a-zA-Z]+)'
         for match in re.finditer(case_pattern, sentence):
             terms.append(f"{match.group(1)} v. {match.group(2)}")
-        
+
         # Legal concepts
         legal_concepts = [
             "due process", "equal protection", "free speech", "establishment clause",
@@ -195,15 +197,15 @@ class ClaimDetector:
             "standing", "mootness", "ripeness", "sovereign immunity", "qualified immunity",
             "probable cause", "reasonable suspicion", "exigent circumstances",
         ]
-        
+
         sentence_lower = sentence.lower()
         for concept in legal_concepts:
             if concept in sentence_lower:
                 terms.append(concept)
-        
+
         return terms if terms else self._extract_general_terms(sentence)[:3]
-    
-    def _extract_general_terms(self, sentence: str) -> List[str]:
+
+    def _extract_general_terms(self, sentence: str) -> list[str]:
         """Extract general search terms."""
         stop_words = {
             'the', 'a', 'an', 'is', 'are', 'was', 'were', 'it', 'that', 'this',
@@ -239,9 +241,9 @@ class SourceFinder:
 
     async def find_sources_for_claims(
         self,
-        claims: List[UnsourcedClaim],
+        claims: list[UnsourcedClaim],
         max_suggestions: int = 3
-    ) -> List[Dict[str, Any]]:
+    ) -> list[dict[str, Any]]:
         """
         Find potential sources for a list of unsourced claims.
 
@@ -259,7 +261,7 @@ class SourceFinder:
         self,
         claim: UnsourcedClaim,
         max_suggestions: int = 3
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """
         Find potential sources for a single unsourced claim.
 
@@ -296,7 +298,7 @@ class SourceFinder:
         self,
         claim: UnsourcedClaim,
         max_suggestions: int
-    ) -> List[Dict]:
+    ) -> list[dict]:
         """Find case law and statutory sources for legal claims."""
         sources = []
 
@@ -341,7 +343,7 @@ class SourceFinder:
 
         return sources[:max_suggestions]
 
-    async def _find_quotation_source(self, claim: UnsourcedClaim) -> List[Dict]:
+    async def _find_quotation_source(self, claim: UnsourcedClaim) -> list[dict]:
         """Find the source of a quotation."""
         sources = []
 
@@ -380,7 +382,7 @@ class SourceFinder:
         self,
         claim: UnsourcedClaim,
         max_suggestions: int
-    ) -> List[Dict]:
+    ) -> list[dict]:
         """Find sources for statistical claims."""
         sources = []
 
@@ -407,7 +409,7 @@ class SourceFinder:
         self,
         claim: UnsourcedClaim,
         max_suggestions: int
-    ) -> List[Dict]:
+    ) -> list[dict]:
         """Find sources for general factual claims."""
         sources = []
 
@@ -437,7 +439,7 @@ class SourceFinder:
 
         return sources[:max_suggestions]
 
-    def _format_suggested_citations(self, sources: List[Dict]) -> List[str]:
+    def _format_suggested_citations(self, sources: list[dict]) -> list[str]:
         """Format found sources as Bluebook citations."""
         citations = []
 
@@ -480,8 +482,8 @@ class SourceFinder:
     async def analyze_document_for_sources(
         self,
         text: str,
-        existing_citations: List[Tuple[int, int]]
-    ) -> Dict[str, Any]:
+        existing_citations: list[tuple[int, int]]
+    ) -> dict[str, Any]:
         """
         Comprehensive analysis of a document's unsourced claims
         with automatic source suggestions.

@@ -4,40 +4,73 @@ Based on Bluebook 21st Edition.
 """
 
 import re
-from typing import Dict, List, Pattern
+from re import Pattern
+
+# --- Building blocks for party names -----------------------------------------
+#
+# A party name is a bounded run of words, optionally ending in a corporate
+# suffix that sits behind a comma. The comma matters: without it,
+# "NetChoice, LLC v. Paxton" extracts as "LLC v. Paxton" and
+# "Students for Fair Admissions, Inc. v. Harvard" becomes "Inc. v. Harvard",
+# because matching restarts after the comma it cannot cross.
+
+# A single word inside a party name. Allows internal periods (abbreviations),
+# apostrophes (Ass'n), ampersands, and hyphens.
+_PARTY_WORD = r"[A-Za-z0-9][A-Za-z0-9.'&\-]*"
+
+# Entity suffixes that legitimately follow a comma inside a party name.
+_ENTITY_SUFFIX = (
+    r"(?:Inc|LLC|L\.L\.C|Corp|Co|Ltd|L\.P|LP|LLP|PLLC|P\.C|N\.A|S\.A|PLC|"
+    r"Ass'n|Assn|Found|Univ)\.?"
+)
+
+# Up to eight words, plus at most one comma-separated entity suffix. The bound
+# is what keeps a greedy match from swallowing the sentence before " v. ".
+_PARTY = (
+    rf"[A-Z][A-Za-z0-9.'&\-]*"
+    rf"(?:\s+{_PARTY_WORD}){{0,7}}"
+    rf"(?:,\s*{_ENTITY_SUFFIX})?"
+)
+
+# Reporter abbreviations that must never be mistaken for a footnote marker.
+_REPORTER_LOOKAHEAD = (
+    r"(?:U\.\s?S\.|S\.\s?Ct\.|L\.\s?Ed\.|F\.\s?(?:Supp\.|App'x|\dd|\dth)|F\.|"
+    r"N\.\s?E\.|N\.\s?W\.|S\.\s?E\.|S\.\s?W\.|So\.|P\.\s?\dd|P\.|A\.\s?\dd|A\.|"
+    r"Cal\.|N\.\s?Y\.|U\.\s?S\.\s?C|C\.\s?F\.\s?R|Stat\.|Fed\.)"
+)
 
 # Citation detection patterns
-PATTERNS: Dict[str, Pattern] = {
+PATTERNS: dict[str, Pattern] = {
     # Cases: Party v. Party, Volume Reporter Page (Court Year)
     "case_complete": re.compile(
-        r"([A-Z][a-zA-Z\.\'\-\s]+)\s+v\.\s+([A-Z][a-zA-Z\.\'\-\s]+),\s*"
-        r"(\d+)\s+([A-Z][a-zA-Z\.\s\d]+)\s+(\d+)"
+        rf"({_PARTY})\s+v\.?\s+({_PARTY}),\s*"
+        r"(\d+)\s+([A-Z][a-zA-Z\.\s\d]*?[a-zA-Z\.\d])\s+(\d+)"
         r"(?:,\s*(\d+(?:-\d+)?))?\s*"
         r"\(([^)]+)\)"
     ),
-    
+
     # Incomplete case: just Party v. Party (missing reporter info)
     "case_incomplete": re.compile(
-        r"([A-Z][a-zA-Z\.\'\-\s]+)\s+v\.\s+([A-Z][a-zA-Z\.\'\-\s]+)"
+        rf"({_PARTY})\s+v\.?\s+({_PARTY})"
         r"(?!\s*,\s*\d+\s+[A-Z])"
     ),
-    
+
     # Federal statutes: Title U.S.C. § Section
     "statute_usc": re.compile(
         r"(\d+)\s+U\.?S\.?C\.?\s*§+\s*(\d+[a-z]?)(?:\(([^)]+)\))?"
     ),
-    
+
     # State statutes (generic pattern)
     "statute_state": re.compile(
         r"([A-Z][a-z]+\.?\s+(?:Rev\.?\s+)?(?:Code|Stat)\.?\s*(?:Ann\.?)?\s*)"
         r"§+\s*(\d+(?:[-.]\d+)*)"
     ),
-    
+
     # Federal regulations: Title C.F.R. § Section
     "regulation_cfr": re.compile(
         r"(\d+)\s+C\.?F\.?R\.?\s*§+\s*(\d+(?:\.\d+)?)"
     ),
-    
+
     # Law review articles: Author, Title, Volume Journal Page (Year)
     "law_review": re.compile(
         r"([A-Z][a-zA-Z\.\s]+),\s+"
@@ -46,47 +79,55 @@ PATTERNS: Dict[str, Pattern] = {
         r"(\d+)(?:,\s*(\d+(?:-\d+)?))?\s*"
         r"\((\d{4})\)"
     ),
-    
+
     # Books: Author, Title (Edition Year) - captures full ordinal like "6th"
     "book": re.compile(
         r"([A-Z][a-zA-Z\.\s]+),\s+"
         r"([A-Z][^(]+)\s*"
-        r"\((?:(\d+(?:st|nd|rd|th))\s+ed\.\s+)?(\d{4})\)"
+        # Bluebook ordinals are "2d" and "3d", not "2nd" and "3rd"
+        # (Rule 6.2(b)), so both spellings must be accepted.
+        r"\((?:(\d+(?:st|nd|rd|th|d))\s+ed\.\s+)?(\d{4})\)"
     ),
-    
+
     # Short forms - Id.
     "id_citation": re.compile(
         r"\bId\.(?:\s+at\s+(\d+(?:-\d+)?))?"
     ),
-    
+
     # Short forms - Supra
     "supra_citation": re.compile(
         r"([A-Za-z]+),?\s+supra\s+note\s+(\d+)(?:,\s+at\s+(\d+(?:-\d+)?))?"
     ),
-    
+
     # Hereinafter designation
     "hereinafter": re.compile(
         r"\[hereinafter\s+([^\]]+)\]"
     ),
-    
+
     # URL citations
     "url": re.compile(
         r"https?://[^\s<>\"\'\)]+(?:\([^\s<>\"\'\)]*\))?[^\s<>\"\'\)\.,;:]*"
     ),
-    
+
     # Pincites
     "pincite": re.compile(
         r"at\s+(\d+)(?:-(\d+))?"
     ),
-    
-    # Footnote markers
+
+    # Footnote markers.
+    #
+    # Anchored to the start of a line. The old pattern matched any 1-3 digit
+    # number followed by a capital anywhere in the text, so reporter volumes
+    # and statute titles were read as footnote numbers: "47 U.S.C. § 230" was
+    # labelled "Note 47" and "395 U.S. 444" became "Note 395". The reporter
+    # lookahead is a second guard for numbered lines that begin a citation.
     "footnote_marker": re.compile(
-        r"(?:^|\s)(\d{1,3})(?=\s+[A-Z]|\s*$)"
+        rf"(?m)^[ \t]*(\d{{1,3}})[.)]?[ \t]+(?!{_REPORTER_LOOKAHEAD})(?=[A-Z\"'])"
     ),
 }
 
 # Reporter abbreviations (Bluebook Table 1)
-REPORTER_ABBREVIATIONS: Dict[str, str] = {
+REPORTER_ABBREVIATIONS: dict[str, str] = {
     "United States Reports": "U.S.",
     "Supreme Court Reporter": "S. Ct.",
     "Lawyers Edition": "L. Ed.",
@@ -131,7 +172,7 @@ REPORTER_ABBREVIATIONS: Dict[str, str] = {
 }
 
 # Court abbreviations (Bluebook Table 7)
-COURT_ABBREVIATIONS: Dict[str, str] = {
+COURT_ABBREVIATIONS: dict[str, str] = {
     "Supreme Court of the United States": "",
     "Supreme Court": "",
     "United States Court of Appeals for the First Circuit": "1st Cir.",
@@ -173,7 +214,7 @@ COURT_ABBREVIATIONS: Dict[str, str] = {
 }
 
 # Journal abbreviations (Bluebook Table 13)
-JOURNAL_ABBREVIATIONS: Dict[str, str] = {
+JOURNAL_ABBREVIATIONS: dict[str, str] = {
     "Harvard Law Review": "Harv. L. Rev.",
     "Yale Law Journal": "Yale L.J.",
     "Stanford Law Review": "Stan. L. Rev.",
@@ -206,7 +247,7 @@ JOURNAL_ABBREVIATIONS: Dict[str, str] = {
 }
 
 # State abbreviations (Bluebook Table 10)
-STATE_ABBREVIATIONS: Dict[str, str] = {
+STATE_ABBREVIATIONS: dict[str, str] = {
     "Alabama": "Ala.",
     "Alaska": "Alaska",
     "Arizona": "Ariz.",
@@ -261,7 +302,7 @@ STATE_ABBREVIATIONS: Dict[str, str] = {
 }
 
 # Party name abbreviations (Bluebook Table 6)
-PARTY_ABBREVIATIONS: Dict[str, str] = {
+PARTY_ABBREVIATIONS: dict[str, str] = {
     "Administration": "Admin.",
     "Administrative": "Admin.",
     "Administrator": "Adm'r",
@@ -464,11 +505,15 @@ def abbreviate_party_name(party: str) -> str:
     if result.lower().startswith("the "):
         result = result[4:]
 
-    # Protect state names from being abbreviated
-    # Replace them with placeholders, then restore after other abbreviations
+    # Protect state names from being abbreviated.
+    # Replace them with placeholders, then restore after other abbreviations.
+    #
+    # Longest first: "Virginia" is itself a state, so protecting it before
+    # "West Virginia" leaves a bare "West" for Table 6 to turn into "W.",
+    # yielding "W. Virginia".
     protected = {}
     placeholder_idx = 0
-    for state_name in STATE_ABBREVIATIONS.keys():
+    for state_name in sorted(STATE_ABBREVIATIONS, key=len, reverse=True):
         if state_name in result:
             placeholder = f"__STATE_{placeholder_idx}__"
             result = result.replace(state_name, placeholder)

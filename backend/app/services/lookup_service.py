@@ -9,17 +9,70 @@ Enhanced with:
 - Multiple fallback sources
 """
 
-import httpx
-import asyncio
+import difflib
 import re
-from typing import Optional, List, Dict, Any, Tuple
+from typing import Any
 from urllib.parse import urlparse
-from ..models.citation import Citation, CitationType, CitationStatus
+
+import httpx
+
+from ..models.citation import Citation, CitationStatus, CitationType
+
+# Per-call read timeout. Several lookups can run for one citation, so this
+# must stay small enough that the worst case still fits inside a request.
+LOOKUP_READ_TIMEOUT = 8.0
+
+# A candidate below this similarity to the query is never reported as a match.
+# Search APIs rank by relevance and almost always return *something*, so
+# "the API returned a row" is not evidence that the row is the right source.
+# Without this floor a case name silently becomes an unrelated journal article.
+MATCH_THRESHOLD = 0.55
+
+# Above this, a single candidate is good enough to present as resolved.
+CONFIDENT_MATCH_THRESHOLD = 0.80
+
+_STOPWORDS = {
+    "the", "a", "an", "of", "and", "in", "on", "for", "to", "v", "vs",
+    "see", "also", "but", "cf", "id", "at", "no", "inc", "llc", "co",
+}
+
+
+def _tokenize(text: str) -> list[str]:
+    """Lowercase alphanumeric tokens, stopwords removed."""
+    if not text:
+        return []
+    tokens = re.findall(r"[a-z0-9]+", text.lower())
+    return [t for t in tokens if t not in _STOPWORDS and len(t) > 1]
+
+
+def match_score(query: str, candidate: str) -> float:
+    """Similarity between a user's query and a candidate record, 0.0 to 1.0.
+
+    Combines token recall (how much of the query the candidate accounts for)
+    with sequence similarity (guards against a bag-of-words coincidence).
+    Returns 0.0 when either side has no usable tokens, so an empty or
+    stopword-only query can never clear the threshold.
+    """
+    q_tokens = _tokenize(query)
+    c_tokens = _tokenize(candidate)
+    if not q_tokens or not c_tokens:
+        return 0.0
+
+    c_set = set(c_tokens)
+    overlap = sum(1 for t in q_tokens if t in c_set)
+    recall = overlap / len(q_tokens)
+
+    ratio = difflib.SequenceMatcher(
+        None, " ".join(q_tokens), " ".join(c_tokens)
+    ).ratio()
+
+    return round((recall * 0.7) + (ratio * 0.3), 4)
+
 
 class LegalLookupService:
     """
     Integrates with free legal databases to look up and verify citations.
-    
+
     Sources (all free, no auth required):
     - CourtListener API: Comprehensive case law
     - CrossRef API: Academic articles
@@ -27,27 +80,42 @@ class LegalLookupService:
     - eCFR API: Federal regulations
     - U.S. Code (Cornell Law): Federal statutes
     """
-    
+
     def __init__(self):
         self.courtlistener_base = "https://www.courtlistener.com/api/rest/v3"
         self.crossref_base = "https://api.crossref.org/works"
         self.openlibrary_base = "https://openlibrary.org"
         self.ecfr_base = "https://www.ecfr.gov/api/versioner/v1"
-        
-        self.client: Optional[httpx.AsyncClient] = None
-    
+
+        self.client: httpx.AsyncClient | None = None
+
     async def _get_client(self) -> httpx.AsyncClient:
-        """Get or create HTTP client."""
+        """Get or create HTTP client.
+
+        Timeouts are deliberately short. A single citation can trigger several
+        sequential lookups, so a long per-call timeout multiplies into a request
+        that outlives the browser's patience and surfaces as an opaque network
+        error. Better to fail one lookup fast and report it honestly.
+        """
         if self.client is None or self.client.is_closed:
             self.client = httpx.AsyncClient(
-                timeout=30.0,
+                timeout=httpx.Timeout(
+                    connect=5.0,
+                    read=LOOKUP_READ_TIMEOUT,
+                    write=5.0,
+                    pool=5.0,
+                ),
+                limits=httpx.Limits(
+                    max_connections=20,
+                    max_keepalive_connections=10,
+                ),
                 headers={
                     "User-Agent": "BluebookCitationGenerator/1.0 (Legal Research Tool)"
-                }
+                },
             )
         return self.client
-    
-    async def lookup_citation(self, citation: Citation) -> Dict[str, Any]:
+
+    async def lookup_citation(self, citation: Citation) -> dict[str, Any]:
         """Route to appropriate lookup based on citation type."""
         lookup_methods = {
             CitationType.CASE: self._lookup_case,
@@ -56,52 +124,79 @@ class LegalLookupService:
             CitationType.LAW_REVIEW: self._lookup_article,
             CitationType.BOOK: self._lookup_book,
         }
-        
+
         method = lookup_methods.get(citation.type, self._no_lookup)
         return await method(citation)
-    
-    async def _lookup_case(self, citation: Citation) -> Dict[str, Any]:
+
+    async def _lookup_case(self, citation: Citation) -> dict[str, Any]:
         """Look up case in CourtListener."""
         results = {"found": False, "data": None, "suggestions": [], "source": "CourtListener"}
-        
+
         try:
             client = await self._get_client()
-            
+
             # Build search query
             search_params = {"type": "o", "order_by": "score desc"}
-            
-            # Try citation string first
-            if citation.volume and citation.reporter and citation.page:
-                cite_string = f"{citation.volume} {citation.reporter} {citation.page}"
-                search_params["citation"] = cite_string
+
+            # An exact volume/reporter/page lookup addresses one specific
+            # record, so a hit can be trusted. A case-name lookup is fuzzy and
+            # must clear the relevance floor before it is reported as found.
+            exact_citation_lookup = bool(
+                citation.volume and citation.reporter and citation.page
+            )
+            query_text = ""
+
+            if exact_citation_lookup:
+                search_params["citation"] = (
+                    f"{citation.volume} {citation.reporter} {citation.page}"
+                )
             elif citation.parties and len(citation.parties) >= 2:
-                # Fallback to case name
-                case_name = f"{citation.parties[0]} v. {citation.parties[1]}"
-                search_params["case_name"] = case_name
+                query_text = f"{citation.parties[0]} v. {citation.parties[1]}"
+                search_params["case_name"] = query_text
             else:
                 return results
-            
+
             response = await client.get(
                 f"{self.courtlistener_base}/search/",
                 params=search_params
             )
-            
+
             if response.status_code == 200:
                 data = response.json()
-                if data.get("results"):
-                    for result in data["results"][:5]:
-                        parsed = self._parse_courtlistener_result(result)
-                        results["suggestions"].append(parsed)
-                    
-                    results["found"] = True
-                    results["data"] = results["suggestions"][0]
-        
+                for result in data.get("results", [])[:5]:
+                    parsed = self._parse_courtlistener_result(result)
+                    parsed["match_score"] = (
+                        1.0 if exact_citation_lookup
+                        else match_score(query_text, parsed.get("case_name", ""))
+                    )
+                    results["suggestions"].append(parsed)
+
+                results["suggestions"].sort(
+                    key=lambda s: s["match_score"], reverse=True
+                )
+                results["rejected_count"] = sum(
+                    1 for s in results["suggestions"]
+                    if s["match_score"] < MATCH_THRESHOLD
+                )
+                results["suggestions"] = [
+                    s for s in results["suggestions"]
+                    if s["match_score"] >= MATCH_THRESHOLD
+                ]
+
+                if results["suggestions"]:
+                    best = results["suggestions"][0]
+                    results["confidence"] = best["match_score"]
+                    if best["match_score"] >= CONFIDENT_MATCH_THRESHOLD:
+                        results["found"] = True
+                        results["data"] = best
+
+
         except Exception as e:
             results["error"] = str(e)
-        
+
         return results
-    
-    def _parse_courtlistener_result(self, result: dict) -> Dict[str, Any]:
+
+    def _parse_courtlistener_result(self, result: dict) -> dict[str, Any]:
         """Parse CourtListener API result."""
         return {
             "case_name": result.get("caseName", ""),
@@ -114,11 +209,11 @@ class LegalLookupService:
             "snippet": result.get("snippet", ""),
             "judge": result.get("judge", ""),
         }
-    
-    async def _lookup_statute(self, citation: Citation) -> Dict[str, Any]:
+
+    async def _lookup_statute(self, citation: Citation) -> dict[str, Any]:
         """Look up federal statute."""
         results = {"found": False, "data": None, "suggestions": [], "source": "Cornell Law"}
-        
+
         if citation.title_number and citation.section:
             # Cornell Law School has reliable U.S. Code links
             results["found"] = True
@@ -129,22 +224,22 @@ class LegalLookupService:
                 "url": f"https://www.law.cornell.edu/uscode/text/{citation.title_number}/{citation.section}",
                 "govinfo_url": f"https://uscode.house.gov/view.xhtml?req=granuleid:USC-prelim-title{citation.title_number}-section{citation.section}",
             }
-        
+
         return results
-    
-    async def _lookup_regulation(self, citation: Citation) -> Dict[str, Any]:
+
+    async def _lookup_regulation(self, citation: Citation) -> dict[str, Any]:
         """Look up federal regulation in eCFR."""
         results = {"found": False, "data": None, "suggestions": [], "source": "eCFR"}
-        
+
         if citation.title_number and citation.section:
             try:
                 client = await self._get_client()
-                
+
                 # Try eCFR API
                 response = await client.get(
                     f"{self.ecfr_base}/full/{citation.title_number}/section-{citation.section}.json"
                 )
-                
+
                 if response.status_code == 200:
                     results["found"] = True
                     results["data"] = response.json()
@@ -157,8 +252,8 @@ class LegalLookupService:
                         "ecfr_url": f"https://www.ecfr.gov/current/title-{citation.title_number}/section-{citation.section}",
                         "cornell_url": f"https://www.law.cornell.edu/cfr/text/{citation.title_number}/{citation.section}",
                     }
-            
-            except Exception as e:
+
+            except Exception:
                 results["found"] = True
                 results["data"] = {
                     "title": citation.title_number,
@@ -166,25 +261,25 @@ class LegalLookupService:
                     "ecfr_url": f"https://www.ecfr.gov/current/title-{citation.title_number}/section-{citation.section}",
                     "cornell_url": f"https://www.law.cornell.edu/cfr/text/{citation.title_number}/{citation.section}",
                 }
-        
+
         return results
-    
-    async def _lookup_article(self, citation: Citation) -> Dict[str, Any]:
+
+    async def _lookup_article(self, citation: Citation) -> dict[str, Any]:
         """Look up law review article via CrossRef."""
         results = {"found": False, "data": None, "suggestions": [], "source": "CrossRef"}
-        
+
         query_parts = []
         if citation.author:
             query_parts.append(citation.author)
         if citation.title:
             query_parts.append(citation.title)
-        
+
         if not query_parts:
             return results
-        
+
         try:
             client = await self._get_client()
-            
+
             response = await client.get(
                 self.crossref_base,
                 params={
@@ -193,11 +288,11 @@ class LegalLookupService:
                     "select": "title,author,container-title,volume,page,published,DOI,URL",
                 }
             )
-            
+
             if response.status_code == 200:
                 data = response.json()
                 items = data.get("message", {}).get("items", [])
-                
+
                 for item in items:
                     suggestion = {
                         "title": item.get("title", [""])[0] if item.get("title") else "",
@@ -210,21 +305,21 @@ class LegalLookupService:
                         "url": item.get("URL", ""),
                     }
                     results["suggestions"].append(suggestion)
-                
+
                 if results["suggestions"]:
                     results["found"] = True
                     results["data"] = results["suggestions"][0]
-        
+
         except Exception as e:
             results["error"] = str(e)
-        
+
         return results
-    
-    def _format_crossref_authors(self, authors: List[dict]) -> str:
+
+    def _format_crossref_authors(self, authors: list[dict]) -> str:
         """Format CrossRef author list to Bluebook style."""
         if not authors:
             return ""
-        
+
         formatted = []
         for author in authors[:3]:  # Limit to first 3 authors
             given = author.get("given", "")
@@ -233,7 +328,7 @@ class LegalLookupService:
                 formatted.append(f"{given} {family}")
             elif family:
                 formatted.append(family)
-        
+
         if len(formatted) == 1:
             return formatted[0]
         elif len(formatted) == 2:
@@ -243,30 +338,30 @@ class LegalLookupService:
                 return f"{formatted[0]} et al."
             return f"{', '.join(formatted[:-1])} & {formatted[-1]}"
         return ""
-    
-    def _extract_crossref_year(self, published: dict) -> Optional[int]:
+
+    def _extract_crossref_year(self, published: dict) -> int | None:
         """Extract year from CrossRef date format."""
         date_parts = published.get("date-parts", [[]])
         if date_parts and date_parts[0]:
             return date_parts[0][0]
         return None
-    
-    async def _lookup_book(self, citation: Citation) -> Dict[str, Any]:
+
+    async def _lookup_book(self, citation: Citation) -> dict[str, Any]:
         """Look up book via Open Library."""
         results = {"found": False, "data": None, "suggestions": [], "source": "Open Library"}
-        
+
         query_parts = []
         if citation.author:
             query_parts.append(f"author:{citation.author}")
         if citation.title:
             query_parts.append(f"title:{citation.title}")
-        
+
         if not query_parts:
             return results
-        
+
         try:
             client = await self._get_client()
-            
+
             response = await client.get(
                 f"{self.openlibrary_base}/search.json",
                 params={
@@ -275,11 +370,11 @@ class LegalLookupService:
                     "fields": "title,author_name,publisher,first_publish_year,isbn,key",
                 }
             )
-            
+
             if response.status_code == 200:
                 data = response.json()
                 docs = data.get("docs", [])
-                
+
                 for doc in docs:
                     suggestion = {
                         "title": doc.get("title", ""),
@@ -291,21 +386,21 @@ class LegalLookupService:
                         "url": f"https://openlibrary.org{doc.get('key', '')}" if doc.get("key") else "",
                     }
                     results["suggestions"].append(suggestion)
-                
+
                 if results["suggestions"]:
                     results["found"] = True
                     results["data"] = results["suggestions"][0]
-        
+
         except Exception as e:
             results["error"] = str(e)
-        
+
         return results
-    
-    async def _no_lookup(self, citation: Citation) -> Dict[str, Any]:
+
+    async def _no_lookup(self, citation: Citation) -> dict[str, Any]:
         """Fallback for unsupported citation types."""
         return {"found": False, "data": None, "suggestions": [], "source": None}
 
-    async def lookup_website(self, citation: Citation) -> Dict[str, Any]:
+    async def lookup_website(self, citation: Citation) -> dict[str, Any]:
         """Extract metadata from a URL to complete website citations."""
         results = {"found": False, "data": None, "suggestions": [], "source": "URL Metadata"}
 
@@ -362,7 +457,7 @@ class LegalLookupService:
 
         return results
 
-    async def search_by_text(self, search_text: str, search_type: str = "case") -> Dict[str, Any]:
+    async def search_by_text(self, search_text: str, search_type: str = "case") -> dict[str, Any]:
         """
         Search for citations using free-form text.
         Useful when user just has a title, quote, or partial info.
@@ -383,7 +478,7 @@ class LegalLookupService:
 
         return results
 
-    async def _search_case_by_text(self, text: str) -> Dict[str, Any]:
+    async def _search_case_by_text(self, text: str) -> dict[str, Any]:
         """Search CourtListener with free-form text."""
         results = {"found": False, "data": None, "suggestions": [], "source": "CourtListener"}
 
@@ -401,23 +496,49 @@ class LegalLookupService:
 
                 if response.status_code == 200:
                     data = response.json()
-                    if data.get("results"):
-                        for result in data["results"][:5]:
-                            parsed = self._parse_courtlistener_result(result)
-                            if parsed not in results["suggestions"]:
-                                results["suggestions"].append(parsed)
+                    for result in data.get("results", [])[:5]:
+                        parsed = self._parse_courtlistener_result(result)
+                        # Score against the ORIGINAL text, not the derived
+                        # query, so a broadened fallback query cannot inflate
+                        # the apparent quality of its own match.
+                        parsed["match_score"] = match_score(
+                            text, parsed.get("case_name", "")
+                        )
+                        if parsed not in results["suggestions"]:
+                            results["suggestions"].append(parsed)
 
-                        if results["suggestions"]:
-                            results["found"] = True
-                            results["data"] = results["suggestions"][0]
-                            break
+                    if any(
+                        s["match_score"] >= CONFIDENT_MATCH_THRESHOLD
+                        for s in results["suggestions"]
+                    ):
+                        break
+
+            results["suggestions"].sort(
+                key=lambda s: s.get("match_score", 0.0), reverse=True
+            )
+            results["rejected_count"] = sum(
+                1 for s in results["suggestions"]
+                if s.get("match_score", 0.0) < MATCH_THRESHOLD
+            )
+            results["suggestions"] = [
+                s for s in results["suggestions"]
+                if s.get("match_score", 0.0) >= MATCH_THRESHOLD
+            ]
+
+            # `found` means "we can stand behind this", not "the API replied".
+            if results["suggestions"]:
+                best = results["suggestions"][0]
+                results["confidence"] = best["match_score"]
+                if best["match_score"] >= CONFIDENT_MATCH_THRESHOLD:
+                    results["found"] = True
+                    results["data"] = best
 
         except Exception as e:
             results["error"] = str(e)
 
         return results
 
-    def _generate_case_search_queries(self, text: str) -> List[str]:
+    def _generate_case_search_queries(self, text: str) -> list[str]:
         """Generate multiple search query variations for better matching."""
         queries = [text]
 
@@ -445,7 +566,7 @@ class LegalLookupService:
 
         return queries
 
-    async def _search_article_by_text(self, text: str) -> Dict[str, Any]:
+    async def _search_article_by_text(self, text: str) -> dict[str, Any]:
         """Search CrossRef with free-form text."""
         results = {"found": False, "data": None, "suggestions": [], "source": "CrossRef"}
 
@@ -479,8 +600,9 @@ class LegalLookupService:
                         other_items.append(item)
 
                 for item in (law_items + other_items)[:5]:
+                    title = item.get("title", [""])[0] if item.get("title") else ""
                     suggestion = {
-                        "title": item.get("title", [""])[0] if item.get("title") else "",
+                        "title": title,
                         "author": self._format_crossref_authors(item.get("author", [])),
                         "container_title": item.get("container-title", [""])[0] if item.get("container-title") else "",
                         "volume": item.get("volume", ""),
@@ -488,19 +610,38 @@ class LegalLookupService:
                         "year": self._extract_crossref_year(item.get("published", {})),
                         "doi": item.get("DOI", ""),
                         "url": item.get("URL", ""),
+                        "match_score": match_score(text, title),
                     }
                     results["suggestions"].append(suggestion)
 
+                results["suggestions"].sort(
+                    key=lambda s: s["match_score"], reverse=True
+                )
+                results["rejected_count"] = sum(
+                    1 for s in results["suggestions"]
+                    if s["match_score"] < MATCH_THRESHOLD
+                )
+                # CrossRef ranks by relevance and returns its best guess for
+                # ANY string. Without this filter, prose or a case name comes
+                # back as a real but entirely unrelated journal article.
+                results["suggestions"] = [
+                    s for s in results["suggestions"]
+                    if s["match_score"] >= MATCH_THRESHOLD
+                ]
+
                 if results["suggestions"]:
-                    results["found"] = True
-                    results["data"] = results["suggestions"][0]
+                    best = results["suggestions"][0]
+                    results["confidence"] = best["match_score"]
+                    if best["match_score"] >= CONFIDENT_MATCH_THRESHOLD:
+                        results["found"] = True
+                        results["data"] = best
 
         except Exception as e:
             results["error"] = str(e)
 
         return results
 
-    async def _parse_statute_from_text(self, text: str) -> Dict[str, Any]:
+    async def _parse_statute_from_text(self, text: str) -> dict[str, Any]:
         """Try to parse statute info from free-form text."""
         results = {"found": False, "data": None, "suggestions": [], "source": "Cornell Law"}
 
@@ -536,7 +677,7 @@ class LegalLookupService:
 
         return results
 
-    async def smart_complete(self, citation: Citation) -> Dict[str, Any]:
+    async def smart_complete(self, citation: Citation) -> dict[str, Any]:
         """
         Intelligently complete a citation using multiple strategies.
         Tries different approaches based on what info is available.
@@ -557,38 +698,53 @@ class LegalLookupService:
             if url_result.get("found"):
                 return url_result
 
-        # Strategy 3: Search by raw text
+        # Strategy 3: Search by raw text.
+        #
+        # The shape of the input decides which source is consulted, and a
+        # shape that matches is NOT retried against other source types. A
+        # case name searched against a journal index will always return some
+        # article, and returning it would mean answering a question the user
+        # did not ask with a source they did not cite.
         if citation.raw_text:
             raw_text = citation.raw_text.strip()
 
-            # Check if it looks like a case
-            if " v. " in raw_text or " v " in raw_text:
+            looks_like_case = bool(re.search(r"\sv\.?\s", raw_text))
+            looks_like_statute = bool(
+                re.search(r"\b(U\.?S\.?C|C\.?F\.?R|§)", raw_text, re.IGNORECASE)
+            )
+
+            if looks_like_case:
                 case_result = await self.search_by_text(raw_text, "case")
                 results["strategies_tried"].append("case_text_search")
-                if case_result.get("found"):
-                    case_result["inferred_type"] = "case"
-                    return case_result
+                case_result["inferred_type"] = "case"
+                return case_result
 
-            # Check if it looks like a statute
-            if re.search(r'\b(U\.?S\.?C|C\.?F\.?R|Code|§)', raw_text, re.IGNORECASE):
+            if looks_like_statute:
                 statute_result = await self.search_by_text(raw_text, "statute")
                 results["strategies_tried"].append("statute_text_search")
-                if statute_result.get("found"):
-                    statute_result["inferred_type"] = "statute"
-                    return statute_result
+                statute_result["inferred_type"] = "statute"
+                return statute_result
 
-            # Try as article
+            # Ambiguous shape. Try article, then case, and report whichever
+            # clears the confidence bar. If neither does, say so.
             article_result = await self.search_by_text(raw_text, "article")
             results["strategies_tried"].append("article_text_search")
             if article_result.get("found"):
                 article_result["inferred_type"] = "law_review"
                 return article_result
 
-            # Last resort: generic case search
             case_result = await self.search_by_text(raw_text, "case")
             results["strategies_tried"].append("fallback_case_search")
             if case_result.get("found"):
+                case_result["inferred_type"] = "case"
                 return case_result
+
+            # Nothing verifiable. Surface the near-misses as suggestions so the
+            # user can judge them, but never as a completed citation.
+            results["suggestions"] = (
+                article_result.get("suggestions", [])
+                + case_result.get("suggestions", [])
+            )
 
         return results
 
@@ -632,7 +788,7 @@ class CitationCompleter:
 
         return citation
 
-    async def complete_from_text(self, text: str) -> Tuple[Optional[Citation], Dict[str, Any]]:
+    async def complete_from_text(self, text: str) -> tuple[Citation | None, dict[str, Any]]:
         """
         Create and complete a citation from raw text input.
         Useful when user just pastes a case name, title, or URL.
@@ -668,7 +824,7 @@ class CitationCompleter:
                 citation.status = CitationStatus.NEEDS_VERIFICATION
 
         return citation, results
-    
+
     def _merge_lookup_data(self, citation: Citation, data: dict) -> Citation:
         """Merge lookup data into citation, filling gaps."""
         if citation.type == CitationType.CASE:
@@ -676,7 +832,7 @@ class CitationCompleter:
                 parts = data["case_name"].split(" v. ")
                 if len(parts) == 2:
                     citation.parties = [p.strip() for p in parts]
-            
+
             if data.get("citation") and isinstance(data["citation"], list):
                 for cite in data["citation"]:
                     if isinstance(cite, str):
@@ -691,16 +847,16 @@ class CitationCompleter:
                             if not citation.page:
                                 citation.page = match.group(3)
                             break
-            
+
             if not citation.year and data.get("date_filed"):
                 try:
                     citation.year = int(data["date_filed"][:4])
                 except (ValueError, TypeError):
                     pass
-            
+
             if not citation.court and data.get("court"):
                 citation.court = data["court"]
-        
+
         elif citation.type == CitationType.LAW_REVIEW:
             if not citation.author and data.get("author"):
                 citation.author = data["author"]
@@ -718,7 +874,7 @@ class CitationCompleter:
                     citation.page = str(page)
             if not citation.year and data.get("year"):
                 citation.year = data["year"]
-        
+
         elif citation.type == CitationType.BOOK:
             if not citation.author and data.get("author"):
                 citation.author = data["author"]
@@ -740,7 +896,7 @@ class CitationCompleter:
                 citation.access_date = data["publication_date"]
 
         return citation
-    
+
     def _calculate_confidence(self, citation: Citation, results: dict) -> float:
         """Calculate confidence score for completed citation."""
         required_fields = {
@@ -750,16 +906,16 @@ class CitationCompleter:
             CitationType.REGULATION: ["title_number", "section"],
             CitationType.BOOK: ["author", "title", "year"],
         }
-        
+
         fields = required_fields.get(citation.type, [])
         if not fields:
             return 0.5
-        
+
         filled = sum(1 for f in fields if getattr(citation, f, None))
         score = filled / len(fields)
-        
+
         # Boost if lookup found results
         if results.get("found"):
             score = min(1.0, score + 0.15)
-        
+
         return score
