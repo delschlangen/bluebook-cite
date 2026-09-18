@@ -1,29 +1,65 @@
 # Deployment
 
-## Backend (Railway)
+The frontend and backend deploy separately. `/health` reports which build and
+which host answered, so a mismatch is diagnosable rather than guessable:
 
-There are two Docker build contexts in this repository and they are not
-interchangeable. Pick one and leave the other alone.
+```bash
+curl -s https://<backend>/health
+# {"status":"healthy","commit":"aa95432","host":"vercel","endpoints":[...]}
+```
 
-| Railway root directory | Uses | Build context |
+If the page calls an endpoint missing from that `endpoints` list, the backend
+is behind the frontend and needs to redeploy. The UI says so in those words.
+
+## Backend on Vercel
+
+The project root directory must be set to `backend` in the Vercel project
+settings. Everything else is in the repository:
+
+| File | Role |
+|---|---|
+| `backend/api/index.py` | exports the ASGI `app` that Vercel serves |
+| `backend/vercel.json` | rewrites every path to that function, bundles `app/**` |
+| `backend/.vercelignore` | keeps tests and container files out of the bundle |
+| `backend/requirements.txt` | installed at build time |
+
+Two things to know. The function does not assume ASGI lifespan events fire,
+because some serverless runtimes never send them; the lookup service is created
+on first use instead. And `maxDuration` is set to 60 seconds, which needs Fluid
+compute enabled. On a plan capped lower, reduce the budgets below to match, or
+requests will be cut off mid-lookup.
+
+Optional environment variables, all with working defaults:
+
+| Variable | Default | Purpose |
 |---|---|---|
-| `/` (repository root) | `Dockerfile` + `railway.json` | copies `backend/requirements.txt` and `backend/app` |
+| `LOOKUP_READ_TIMEOUT` | `8` | seconds per outbound lookup |
+| `COMPLETION_BUDGET_SECONDS` | `25` | total lookup budget for one document |
+| `REPAIR_BUDGET_SECONDS` | `20` | total budget for one `/api/repair` call |
+| `MAX_UPLOAD_MB` | `10` | upload size cap |
+| `MAX_REPAIR_CHARS` | `2000` | paste size cap |
+
+## Backend on a container host (Railway)
+
+Still supported and unchanged. There are two Docker build contexts and they are
+not interchangeable, so pick one:
+
+| Root directory | Uses | Build context |
+|---|---|---|
+| `/` | `Dockerfile` + `railway.json` | copies `backend/requirements.txt` and `backend/app` |
 | `/backend` | `backend/Dockerfile` + `backend/railway.json` | copies `requirements.txt` and `app` |
 
-The root pair is the one currently deployed. Both now bind to `${PORT:-8000}`,
-so a mismatch no longer produces a container that listens on the wrong port and
-fails every health check.
+Both bind `${PORT:-8000}`, so a mismatched pair can no longer produce a
+container listening on the wrong port. Health check is `GET /health`.
 
-Health check: `GET /health`.
+## Pointing the frontend at a backend
 
-## Frontend (GitHub Pages)
+Set a **repository** variable named `API_URL` under Settings, Secrets and
+variables, Actions, Variables. Not an environment variable: an environment
+variable needs `environment:` on the build job, which is what silently broke
+this before. With nothing set, the Railway URL is used.
 
-Built and published by `.github/workflows/deploy.yml` on every push to `main`,
-gated behind the backend test job.
-
-The backend URL is set at build time via the `VITE_API_URL` environment
-variable in that workflow. A fork pointing at its own backend needs to change
-that one value.
+The next push to `main` rebuilds the site against it.
 
 ## Running locally
 
@@ -39,9 +75,9 @@ npm install
 npm run dev
 ```
 
-With the backend on `localhost:8000`, set `VITE_API_URL=http://localhost:8000`
-in `frontend/.env.local`. Both `localhost:5173` and `localhost:3000` are already
-in the backend's CORS allowlist.
+Put `VITE_API_URL=http://localhost:8000` in `frontend/.env.local`. Both
+`localhost:5173` and `localhost:3000` are already in the backend's CORS
+allowlist.
 
 ## Before pushing
 
@@ -49,4 +85,5 @@ in the backend's CORS allowlist.
 cd backend && ruff check app tests && pytest
 ```
 
-CI runs exactly this on every pull request.
+CI runs exactly this on every pull request, and the Pages deploy is gated
+behind it.
