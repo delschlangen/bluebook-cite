@@ -76,12 +76,56 @@ function postJson(path, body, options = {}) {
 }
 
 /** Wake a sleeping backend. Short timeout; failure is not fatal. */
-export async function checkHealth() {
+export async function checkHealth(timeoutMs = 8000) {
   try {
-    return await request('/health', { timeoutMs: 8000 });
+    return await request('/health', { timeoutMs });
   } catch {
     return null;
   }
+}
+
+/**
+ * Work out WHY a request failed, rather than reporting every failure as an
+ * unreachable server.
+ *
+ * The frontend and backend deploy independently, so a frontend calling an
+ * endpoint that an older backend does not have looks identical to the backend
+ * being down. Probing /health separates the two, and /health lists its own
+ * routes so a stale backend can be named as such.
+ */
+export async function diagnose(err, endpoint) {
+  if (err?.timeout) {
+    return {
+      message: err.message,
+      detail: 'The backend may be waking from idle. Trying again usually works.',
+    };
+  }
+
+  const health = await checkHealth(10000);
+
+  if (!health) {
+    return {
+      message: 'The citation server is not responding.',
+      detail:
+        'It is asleep, restarting, or its deployment is down. Wait a few ' +
+        'seconds and try again.',
+    };
+  }
+
+  if (endpoint && Array.isArray(health.endpoints) && !health.endpoints.includes(endpoint)) {
+    return {
+      message: 'This page is newer than the server it is talking to.',
+      detail:
+        `The server is running build ${health.commit || 'unknown'}, which does ` +
+        `not have ${endpoint} yet. The backend needs to redeploy.`,
+      staleBackend: true,
+    };
+  }
+
+  return {
+    message: err?.message || 'The request failed.',
+    detail: 'The server is up, so this is likely a transient error.',
+  };
 }
 
 export async function uploadDocument(file) {

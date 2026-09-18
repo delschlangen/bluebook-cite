@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { repairCitation } from '../services/api';
+import { diagnose, repairCitation } from '../services/api';
 import { copyCitation, renderCitation } from '../utils/citationText';
 
 const EXAMPLES = [
@@ -58,7 +58,9 @@ export default function CitationRepair() {
       if (id === requestId.current) setResult(response);
     } catch (err) {
       if (id === requestId.current) {
-        setError(err.message);
+        // Say which failure this is instead of collapsing every one into
+        // "could not reach the server".
+        setError(await diagnose(err, '/api/repair'));
         setResult(null);
       }
     } finally {
@@ -76,7 +78,10 @@ export default function CitationRepair() {
     if (ok) {
       setCopied(true);
     } else {
-      setError('Could not copy. Select the citation and copy it manually.');
+      setError({
+        message: 'Could not copy.',
+        detail: 'Select the citation and copy it manually.',
+      });
     }
   };
 
@@ -159,7 +164,18 @@ export default function CitationRepair() {
 
       {error && (
         <div className="mt-5 p-4 bg-red-50 border border-red-200 rounded-lg" role="alert">
-          <p className="text-sm text-red-800">{error}</p>
+          <p className="text-sm font-medium text-red-900">{error.message}</p>
+          {error.detail && (
+            <p className="text-xs text-red-700 mt-1 leading-relaxed">{error.detail}</p>
+          )}
+          <button
+            type="button"
+            onClick={() => run(text)}
+            className="mt-3 px-3 py-1.5 bg-white border border-red-200 rounded-lg
+                       text-xs font-medium text-red-800 hover:bg-red-50"
+          >
+            Try again
+          </button>
         </div>
       )}
 

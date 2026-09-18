@@ -3,6 +3,7 @@ FastAPI application for Bluebook Citation Generator.
 """
 
 import asyncio
+import os
 import uuid
 from contextlib import asynccontextmanager
 
@@ -89,8 +90,22 @@ async def root():
 
 @app.get("/health")
 async def health_check():
-    """Health check endpoint."""
-    return {"status": "healthy", "version": "1.0.0"}
+    """Health check, and enough build detail to answer "which build is live?".
+
+    When the frontend and backend deploy separately, a frontend calling an
+    endpoint an older backend does not have is indistinguishable from the
+    backend being down. Listing the routes makes that answerable without
+    guessing.
+    """
+    return {
+        "status": "healthy",
+        "version": "1.0.0",
+        "commit": os.getenv("RAILWAY_GIT_COMMIT_SHA", "unknown")[:7],
+        "endpoints": sorted(
+            route.path for route in app.routes
+            if getattr(route, "path", "").startswith("/api")
+        ),
+    }
 
 
 @app.post("/api/upload", response_model=UploadResponse)

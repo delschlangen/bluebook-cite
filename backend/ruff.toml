@@ -1,8 +1,10 @@
-[tool.ruff]
+# Kept in ruff.toml rather than pyproject.toml on purpose: a pyproject.toml
+# inside the Docker build context can change how a platform auto-detects the
+# build (poetry/pdm/nixpacks). This file is only ever read by ruff.
 line-length = 100
 target-version = "py311"
 
-[tool.ruff.lint]
+[lint]
 select = ["E", "F", "W", "I", "B", "UP"]
 ignore = [
     "E501",  # line length is handled by the formatter, not enforced here
@@ -10,7 +12,7 @@ ignore = [
     "UP042", # str+Enum is deliberate: .value is relied on across the API
 ]
 
-[tool.ruff.lint.per-file-ignores]
+[lint.per-file-ignores]
 # Package re-exports are the point of these files.
 "app/models/__init__.py" = ["F401"]
 "app/**/__init__.py" = ["F401"]
