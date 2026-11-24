@@ -147,7 +147,7 @@ def _run(out: int, header: dict, data: bytes) -> int:
     max_text = int(header.get("max_text_chars") or limits.MAX_TEXT_CHARS)
 
     try:
-        parsed = parser_module.DocumentParser().parse_document(data, header.get("filename"))
+        parsed = parser_module.DocumentParser(max_text_chars=max_text).parse_document(data, header.get("filename"))
     except parser_module.DocumentTooComplexError as exc:
         _fail(out, "complex", str(exc))
     except parser_module.DocumentTooLongError as exc:
