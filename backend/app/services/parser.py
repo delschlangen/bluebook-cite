@@ -48,6 +48,11 @@ class DocumentTooLongError(UnsupportedDocumentError):
     """Over the page or text limit. The server answers 413 so the page can state the limit."""
 
 
+class DocumentTooComplexError(DocumentTooLongError):
+    """Within the size limits, but it needs more memory, time or nesting than one upload may
+    use. Also a 413; the message (see limits.complex_message) says why and what to do."""
+
+
 @dataclass
 class ParsedDocument:
     text: str

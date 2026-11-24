@@ -139,11 +139,49 @@ and a file over the size limit is refused in the browser before anything is sent
 | Citations returned | 2,000 | The true total is still reported |
 | Unsourced claims returned | 500 | The most likely ones; the true total is still reported |
 | Time for one analysis | 90 seconds | Then a readable 504; one analysis runs at a time and two may wait |
+| Time and memory to read one document | 35 seconds, 1 GB | The reader is stopped and the page is told the document is too complex to read within the server's limits (413) |
+| Documents read at once | 2, with 3 waiting | Beyond that a 503 "busy" with `Retry-After`, never a file-type error |
 
 Each can be changed per environment without a code change (`MAX_UPLOAD_MB`, `MAX_TEXT_CHARS`,
 `MAX_PDF_PAGES`, `MAX_CITATIONS_RETURNED`, `MAX_CLAIMS_RETURNED`, `ANALYSIS_DEADLINE_SECONDS`,
-`MAX_QUEUED_ANALYSES`; see [`backend/app/limits.py`](backend/app/limits.py)), and `/health`
-publishes the values in force so a client can show the number that is actually enforced.
+`MAX_QUEUED_ANALYSES`, and the document-reading limits below; see
+[`backend/app/limits.py`](backend/app/limits.py)), and `/health` publishes the values in force so
+a client can show the number that is actually enforced.
+
+**Reading documents in a child process.** Every upload (PDF, Word and text) is read by a
+short-lived child process, never by the server itself. A PDF can make the native library behind
+the reader abort or allocate gigabytes (an 862-byte file did), and a long unbroken run of
+letters or digits can hold a regular expression for minutes; neither a thread, a deadline nor a
+timeout inside the server can stop either, but a child can be killed. The child starts with a
+reduced environment (no API keys), sets its own limits before it imports anything or sees the
+file, and answers with one JSON object. The server waits for it without using a worker thread,
+kills it (and its process group) at the wall-clock limit, caps what it may write back, and turns
+how it ended into a message: too many pages or too much text is a 413 with the limit stated;
+a document that needed more memory, processor time or wall-clock time than allowed is a 413
+"too complex to read within this server's limits ... export it again or split it"; a damaged,
+encrypted or unsupported file keeps its 415 or 400; and a full queue is a 503 with `Retry-After`.
+Measured cost: about 50 ms for a short document and 0.3 to 0.5 s more than reading in the server
+for a 273-page PDF. The server's own memory stays flat across uploads.
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `PARSE_CHILD_MEM_MB` | `1024` | address-space ceiling for one child (RLIMIT_AS: virtual memory, not resident) |
+| `PARSE_CHILD_CPU_S` | `40` | processor-time ceiling for one child (RLIMIT_CPU) |
+| `PARSE_WALL_S` | `35` | wall-clock limit; the server kills the child at this point |
+| `PARSE_MAX_CONCURRENT` | `2` | children running at once; with the memory ceiling this is the most the server can be asked to hold for uploads |
+| `PARSE_MAX_QUEUE` | `3` | uploads allowed to wait for a child, then a 503 |
+| `PARSE_QUEUE_WAIT_S` | `20` | longest an upload waits for a child; waiting does not count against the reading limits |
+| `PARSE_RETRY_AFTER_S` | `5` | the `Retry-After` value on a 503 |
+| `PDF_MAX_PAGE_CHARS` | `60000` | a PDF page with more characters is read without layout analysis |
+| `PDF_SECOND_OPINION_MAX_CHARS` | `30000` | largest page the second PDF reader will be tried on |
+| `PDF_SECOND_OPINION_BUDGET_S` | `10` | total time the second PDF reader may take |
+| `DOCX_MAX_ELEMENTS` | `4000000` | XML elements in one Word part |
+| `DOCX_MAX_DEPTH` | `200` | nesting depth of one Word part |
+
+The memory ceiling is on each child's address space, and the host's own limit applies to the
+server and its children together, so `PARSE_MAX_CONCURRENT` times `PARSE_CHILD_MEM_MB` should stay
+well under it. The child is a guard against crashes and exhaustion, not a security boundary: it
+runs as the same user, outside any container of its own.
 
 **Reading PDFs.** PDFs are read with pypdfium2 one page at a time, so memory stays flat (about
 25 MB) however long the file is, and 273 dense pages take about 4 seconds. This replaced

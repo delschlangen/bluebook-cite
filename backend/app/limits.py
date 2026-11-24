@@ -62,13 +62,18 @@ def approx_pages(chars: int) -> int:
     return max(1, chars // CHARS_PER_PAGE)
 
 
-def too_long_message(chars: int, limit: int) -> str:
+def too_long_message(chars: int, limit: int, exact: bool = True) -> str:
     """The sentence shown when a document's text is over the limit.
 
     The limit is passed in, not read from here, so the number in the message is always the one
-    the caller actually enforced."""
+    the caller actually enforced. `exact=False` is for a reader that stopped as soon as the
+    limit was passed and so does not know the true size."""
+    if exact:
+        size = f"about {approx_words(chars):,} words ({chars:,} characters)"
+    else:
+        size = f"more than {limit:,} characters"
     return (
-        f"This document has about {approx_words(chars):,} words ({chars:,} characters). "
+        f"This document has {size}. "
         f"The limit is {limit:,} characters, roughly {approx_words(limit):,} "
         f"words or {approx_pages(limit):,} pages. Split it at a chapter or section "
         "boundary and check the parts one at a time."
@@ -84,3 +89,63 @@ def as_dict() -> dict:
         "approx_max_words": approx_words(MAX_TEXT_CHARS),
         "approx_max_pages": approx_pages(MAX_TEXT_CHARS),
     }
+
+
+# =====================================================================================
+# Reading documents in a child process, and the bounds inside the readers
+# (services/sandbox.py, services/parse_worker.py, services/pdf_text.py, services/parser.py)
+#
+# Every upload is parsed in a short-lived child process, because the two things that took the
+# server down cannot be stopped from inside it: native code (pdfium aborts on an allocation
+# failure instead of raising) and a regular expression that holds the interpreter lock (no
+# deadline, thread or timeout can interrupt it). A child can be killed. Each of these can be
+# changed per environment without a code change.
+#
+# What the memory limit is: RLIMIT_AS bounds the child's ADDRESS SPACE (virtual memory,
+# including mapped libraries and reserved-but-unused ranges), not its resident memory, and it
+# is set by the child on itself. It is a ceiling on one upload, not a guarantee about the
+# container: the host's own memory limit still applies to the sum of the server and its
+# children, so PARSE_MAX_CONCURRENT x PARSE_CHILD_MEM_MB should stay well under it.
+# =====================================================================================
+
+# Address-space ceiling, CPU-seconds ceiling and wall-clock ceiling for one parse. The wall
+# clock is the one the parent enforces (it kills and reaps the child); the CPU ceiling is a
+# second, independent stop, and the child also arms an alarm so it ends itself if the parent
+# is gone. PDF_TIME_BUDGET_S (above) is the polite stop inside the reader and is shorter than
+# all three, so an ordinary slow PDF gets a readable message before any kill.
+PARSE_CHILD_MEM_MB = _number("PARSE_CHILD_MEM_MB", "1024")
+PARSE_CHILD_CPU_S = _number("PARSE_CHILD_CPU_S", "40")
+PARSE_WALL_S = _number("PARSE_WALL_S", "35", float)
+
+# Children running at once, and uploads allowed to wait for one. Beyond that the server says
+# it is busy (503 with Retry-After) instead of stacking up work. Waiting is bounded in time as
+# well, and it is not part of the child's own budget.
+PARSE_MAX_CONCURRENT = _number("PARSE_MAX_CONCURRENT", "2")
+PARSE_MAX_QUEUE = _number("PARSE_MAX_QUEUE", "3")
+PARSE_QUEUE_WAIT_S = _number("PARSE_QUEUE_WAIT_S", "20", float)
+PARSE_RETRY_AFTER_S = _number("PARSE_RETRY_AFTER_S", "5")
+
+# PDF: a page with more characters than this is read without layout analysis (its text is
+# kept; footnote markers and pleading-number removal are skipped for that page). Layout costs
+# about 800 bytes per character, and no real page holds anything like this much text.
+PDF_MAX_PAGE_CHARS = _number("PDF_MAX_PAGE_CHARS", "60000")
+# The second PDF reader (pdfminer) is quadratic or worse in the number of text boxes. It is
+# tried only on a page whose text shows real garbling, only if the page is not larger than
+# this, and for no longer than this in total.
+PDF_SECOND_OPINION_MAX_CHARS = _number("PDF_SECOND_OPINION_MAX_CHARS", "30000")
+PDF_SECOND_OPINION_BUDGET_S = _number("PDF_SECOND_OPINION_BUDGET_S", "10", float)
+
+# Word: an XML part is read as a stream, so memory does not grow with its size, but its
+# element count and nesting depth are bounded. A 250,000-word document written by Word has
+# well under a million elements and nests about 30 levels deep; 4 million and 200 leave room
+# and still stop a 40 MB part of "<w:p/>" or an unclosed "<w:b>" repeated ten million times.
+DOCX_MAX_ELEMENTS = _number("DOCX_MAX_ELEMENTS", "4000000")
+DOCX_MAX_DEPTH = _number("DOCX_MAX_DEPTH", "200")
+
+
+def complex_message(reason: str) -> str:
+    """The sentence shown when a document needs more than one upload is allowed to use."""
+    return (
+        f"This document is too complex to read within this server's limits ({reason}). "
+        "Export it again or split it."
+    )

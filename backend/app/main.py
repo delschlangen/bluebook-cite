@@ -41,6 +41,7 @@ from .services.extractor import CitationExtractor
 from .services.lookup_service import CitationCompleter, LegalLookupService
 from .services.parser import DocumentParser, DocumentTooLongError, UnsupportedDocumentError
 from .services.repair import CitationRepairer
+from .services.sandbox import ParseBusyError, ParseUnavailableError, parse_isolated
 from .services.source_finder import ClaimDetector, SourceFinder
 from .services.spec_engine import STYLES
 
@@ -316,12 +317,22 @@ async def upload_document(file: UploadFile = File(...)):
         raise HTTPException(status_code=400, detail="The uploaded file is empty.")
 
     try:
-        # pdfplumber and zip/XML parsing are synchronous and CPU-bound. Calling
-        # them directly would block the event loop for the whole parse and
-        # stall every other in-flight request.
-        parsed = await asyncio.to_thread(
-            parser.parse_document, content, file.filename
-        )
+        # The file is read in a short-lived child process (services/sandbox.py), never in
+        # this one: a hostile or merely unlucky PDF can abort native code or hold the
+        # interpreter lock in a regular expression, and neither a thread nor a deadline can
+        # stop that. A child can be killed, and costs the server nothing but the wait.
+        parsed = await parse_isolated(content, file.filename, max_text_chars=MAX_TEXT_CHARS)
+    except ParseBusyError as e:
+        # Not a problem with the file, and not 415: say the server is busy and when to retry.
+        raise HTTPException(
+            status_code=503, detail=str(e), headers={"Retry-After": str(e.retry_after)}
+        ) from e
+    except ParseUnavailableError as e:
+        raise HTTPException(
+            status_code=503,
+            detail="The server could not start its document reader. Please try again in a minute.",
+            headers={"Retry-After": "30"},
+        ) from e
     except DocumentTooLongError as e:
         # 413, not 415: the file is a kind we read, it is just too long. The message
         # states the limit and what to do.
