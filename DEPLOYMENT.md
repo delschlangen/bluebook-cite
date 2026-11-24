@@ -52,6 +52,13 @@ Optional environment variables, all with working defaults:
 | `MAX_CITATIONS_RETURNED` | `2000` | citations in one response (the true total is still reported) |
 | `MAX_CLAIMS_RETURNED` | `500` | unsourced claims in one response |
 | `MAX_REPAIR_CHARS` | `2000` | paste size cap |
+| `PARSE_CHILD_MEM_MB` | `1024` | address-space ceiling for the child process that reads one upload |
+| `PARSE_CHILD_CPU_S` | `40` | processor-time ceiling for that child |
+| `PARSE_WALL_S` | `35` | wall-clock limit for that child, then it is killed and the page is told the document is too complex |
+| `PARSE_MAX_CONCURRENT` / `PARSE_MAX_QUEUE` | `2` / `3` | uploads read at once / allowed to wait, then a 503 with `Retry-After` |
+
+The upload endpoint starts `python -m app.services.parse_worker` as a child process, so the host
+must allow the server to start processes (a container host does; check it on a serverless one).
 
 ## Backend on a container host (Railway)
 

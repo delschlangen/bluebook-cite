@@ -18,7 +18,9 @@ from pathlib import Path
 import pytest
 
 import app.services.pdf_text as P
+from app.services.parser import DocumentParser, DocumentTooComplexError
 from tests.docfactory import make_pdf_pages
+from tests.hostile import cid_scattered_pdf, one_page_pdf, pages_pdf
 
 FIXTURES = Path(__file__).parent / "fixtures" / "pdf"
 
@@ -331,10 +333,12 @@ def test_an_unrecoverable_text_layer_is_a_clear_error_not_garbage():
     assert "text layer is unreadable" in str(caught.value)
 
 
-def test_a_pdf_that_lies_about_its_page_count_skips_the_missing_pages_and_warns():
+def test_a_pdf_that_claims_more_pages_than_it_has_is_read_whole_and_says_so():
+    """A /Count of 9 on a 7-page file. The two pages that do not exist are not 'skipped' and not
+    'scanned pages that need OCR': there is nothing to skip or to scan."""
     result = P.read_pdf(load("i_count_lies_9_for_7"))
-    assert result.pages == 9
-    assert any("could not be read" in w for w in result.warnings)
+    assert result.pages == 7
+    assert result.warnings == ["This PDF says it has 9 pages but the file holds 7. All 7 were read."]
     assert found_rate("a_lawreview_chromium", result.text) > 0.9
 
 
@@ -423,3 +427,234 @@ class TestFallbackReaderHasTheSameCeilings:
         with pytest.raises(P.PdfReadError) as caught:
             P.read_pdf(b"%PDF-1.4 whatever")
         assert "damaged or incomplete" in str(caught.value)
+
+    def test_a_slow_page_is_interrupted_inside_the_page_not_only_between_pages(self, pdfium_refuses, monkeypatch):
+        """pdfminer's layout of one page can take minutes. The deadline check between pages never
+        runs during it; the interval timer does. The stand-in spins in Python (as pdfminer does)
+        for at most 10 s, so a regression is a slow failing test, not a hang."""
+        def spin(content, page_numbers=None):
+            end = time.monotonic() + 10
+            while time.monotonic() < end:
+                sum(range(1000))
+            yield "never reached"
+
+        monkeypatch.setattr(P, "_pdfminer_pages", spin)
+        started = time.monotonic()
+        with pytest.raises(P.PdfReadError, match="took too long"):
+            P.read_pdf(b"%PDF-1.4 whatever", time_budget=0.5)
+        assert time.monotonic() - started < 4
+
+
+# --- the page count in the file is a claim ------------------------------------------------------
+
+
+class TestPageCountIsCrossChecked:
+    """pdfium trusts /Count. A /Count that is too small silently dropped the rest of a document
+    (a 401-page file that said 5 gave a clean analysis of 5 pages); one that is too large refused a
+    small file with 'this PDF has 450 pages' or told the person to OCR pages that do not exist."""
+
+    def test_too_small_a_count_reads_the_rest_with_the_second_reader_and_says_so(self):
+        result = P.read_pdf(pages_pdf(12, declared=5), max_pages=40)
+        assert result.pages == 12
+        assert result.engine == "pdfium+pdfminer"
+        assert result.warnings == [
+            "This PDF says it has 5 pages but the file holds 12. All of them were read, the extra ones with a slower reader."
+        ]
+        assert result.text.count("A page of ordinary text") == 12
+
+    def test_too_small_a_count_cannot_get_a_long_file_past_the_page_limit(self):
+        with pytest.raises(P.PdfTooLongError) as caught:
+            P.read_pdf(pages_pdf(60, declared=5), max_pages=40)
+        assert "more than 40 pages" in str(caught.value)
+
+    @pytest.mark.parametrize("declared", [450, 100_000])
+    def test_too_large_a_count_is_not_a_reason_to_refuse_a_small_file(self, declared):
+        result = P.read_pdf(pages_pdf(3, declared=declared), max_pages=400)
+        assert result.pages == 3
+        assert result.warnings == [f"This PDF says it has {declared} pages but the file holds 3. All 3 were read."]
+
+    def test_pages_that_do_not_exist_are_never_called_scanned(self):
+        result = P.read_pdf(pages_pdf(3, declared=300), max_pages=400)
+        assert not any("OCR" in w or "skipped" in w or "no readable text" in w for w in result.warnings)
+
+    def test_a_count_that_is_right_costs_nothing_and_says_nothing(self, monkeypatch):
+        monkeypatch.setattr(P, "_pdfminer_page_total", lambda *a, **k: pytest.fail("the second reader was asked"))
+        result = P.read_pdf(pages_pdf(7, declared=7))
+        assert result.pages == 7 and result.warnings == []
+
+    def test_a_file_that_is_over_the_limit_says_how_many_pages_it_has(self):
+        with pytest.raises(P.PdfTooLongError) as caught:
+            P.read_pdf(pages_pdf(60, declared=60), max_pages=40)
+        assert "60 pages" in str(caught.value)
+
+    def test_a_count_that_is_too_large_and_over_the_limit_is_judged_by_the_pages_that_load(self):
+        with pytest.raises(P.PdfTooLongError) as caught:
+            P.read_pdf(pages_pdf(60, declared=5000), max_pages=40)
+        assert "60 pages" in str(caught.value)
+
+
+# --- a second opinion only when there is real evidence of garbling --------------------------------
+
+
+class TestSecondOpinion:
+    def test_a_page_that_merely_contains_the_text_cid_is_not_sent_to_the_slow_reader(self, monkeypatch):
+        """A reviewer's page: 2,000 scattered words and the literal text '(cid:12)'. pdfminer's layout
+        of it took two minutes, and a page that quotes the string is not garbled."""
+        monkeypatch.setattr(P, "_pdfminer_pages", lambda *a, **k: pytest.fail("the second reader ran"))
+        started = time.monotonic()
+        result = P.read_pdf(cid_scattered_pdf(2000))
+        assert time.monotonic() - started < 10
+        assert result.engine == "pdfium" and "(cid:12)" in result.text
+
+    def test_codes_that_make_up_the_page_are_evidence(self):
+        leaking = "The court held. " + "(cid:12)(cid:45)(cid:7)" * 40
+        assert P._garble_evidence(leaking) == "strong"
+        assert P._quality(leaking)[2] is True
+
+    def test_two_codes_in_a_page_of_text_are_not(self):
+        page = ("The court held that the statute does not apply to the conduct at issue in this case. " * 30) + " (cid:12) (cid:13)"
+        assert P._garble_evidence(page) is None
+        assert P._quality(page)[2] is False
+
+    def test_one_code_is_never_evidence(self):
+        assert P._quality("x" * 500 + " (cid:12)")[2] is False
+        assert P._quality("(cid:12)")[2] is False
+
+    def test_the_second_reader_never_runs_while_the_pdfium_lock_is_held(self, monkeypatch):
+        seen = []
+
+        def spy(content, page_numbers=None):
+            seen.append(P._PDFIUM_LOCK.locked())
+            return iter(())
+
+        monkeypatch.setattr(P, "_pdfminer_pages", spy)
+        with pytest.raises(P.PdfReadError):          # the stand-in returns nothing, so the text stays unreadable
+            P.read_pdf(load("i_no_tounicode_chromium"))
+        assert seen and not any(seen), "pdfminer ran with the pdfium lock held, so every other upload waited for it"
+
+    def test_a_page_larger_than_the_limit_is_not_given_a_second_opinion(self, monkeypatch):
+        monkeypatch.setattr(P, "PDF_SECOND_OPINION_MAX_CHARS", 100)
+        monkeypatch.setattr(P, "_pdfminer_pages", lambda *a, **k: pytest.fail("the second reader ran"))
+        with pytest.raises(P.PdfReadError, match="text layer is unreadable"):
+            P.read_pdf(load("i_no_tounicode_chromium"))
+
+    def test_a_second_opinion_that_runs_on_is_cut_off_and_the_first_text_is_kept(self, monkeypatch):
+        def spin(content, page_numbers=None):
+            end = time.monotonic() + 10
+            while time.monotonic() < end:
+                sum(range(1000))
+            yield "never reached"
+
+        monkeypatch.setattr(P, "_pdfminer_pages", spin)
+        monkeypatch.setattr(P, "PDF_SECOND_OPINION_BUDGET_S", 0.3)
+        started = time.monotonic()
+        with pytest.raises(P.PdfReadError, match="text layer is unreadable"):
+            P.read_pdf(load("i_no_tounicode_chromium"))
+        assert time.monotonic() - started < 5, "the second reader was not interrupted"
+
+    def test_the_second_readers_total_time_is_bounded_across_pages(self, monkeypatch):
+        calls = []
+
+        def slow(content, page_numbers=None):
+            calls.append(page_numbers)
+            time.sleep(0.2)
+            return iter(())
+
+        monkeypatch.setattr(P, "_pdfminer_pages", slow)
+        monkeypatch.setattr(P, "PDF_SECOND_OPINION_BUDGET_S", 0.5)
+        with pytest.raises(P.PdfReadError):
+            P.read_pdf(load("i_no_tounicode_chromium"))
+        assert 1 <= len(calls) <= 4, f"{len(calls)} second opinions in a half-second budget"
+
+
+# --- time and size are checked inside a page ------------------------------------------------------
+
+
+class TestBoundsInsideAPage:
+    def test_a_page_with_more_text_than_the_budget_has_left_is_refused_before_any_layout(self, monkeypatch):
+        """50,000 characters is under the layout limit, so layout WOULD be built for it; it must not
+        be, because the page cannot fit in the 20,000 the text budget allows."""
+        monkeypatch.setattr(P, "_build_lines", lambda *a, **k: pytest.fail("layout was built for a page that cannot fit"))
+        with pytest.raises(P.PdfTooLongError, match=r"20,000-character limit"):
+            P.read_pdf(one_page_pdf(50_000), max_chars=20_000)
+        with pytest.raises(P.PdfTooLongError, match=r"100,000-character limit"):
+            P.read_pdf(one_page_pdf(300_000), max_chars=100_000)
+
+    def test_a_page_over_the_layout_limit_is_read_without_layout_and_the_person_is_told(self, monkeypatch):
+        monkeypatch.setattr(P, "_build_lines", lambda *a, **k: pytest.fail("layout was built for an enormous page"))
+        result = P.read_pdf(one_page_pdf(120_000))
+        assert len(result.text) > 119_000
+        assert result.warnings == [
+            "1 page(s) hold an unusually large amount of text and were read without layout analysis, so footnote marks may be missing there."
+        ]
+
+    def test_an_ordinary_page_still_gets_its_layout(self):
+        result = P.read_pdf(load("a2_lawreview_reportlab"))
+        assert "[^1]" in result.text and not result.warnings
+
+    def test_the_layout_loop_checks_the_deadline_every_couple_of_thousand_characters(self):
+        import pypdfium2 as pdfium
+
+        pdf = pdfium.PdfDocument(one_page_pdf(50_000))
+        try:
+            page = pdf[0]
+            tp = page.get_textpage()
+            whole = tp.get_text_range()
+            width, height = page.get_size()
+            with pytest.raises(P.PdfReadError, match="took too long"):
+                P._build_lines(tp, whole, width, height, deadline=time.monotonic() - 1)
+            lines = P._build_lines(tp, whole, width, height, deadline=time.monotonic() + 60)
+            assert lines
+            tp.close()
+            page.close()
+        finally:
+            pdf.close()
+
+    def test_a_page_that_takes_longer_than_the_budget_stops_the_read(self, monkeypatch):
+        """The budget is enforced in the middle of a page, not after it: a page whose layout never
+        ends must not hold the read for ever. The stand-in stops only when the deadline passes."""
+        def endless(tp, whole, w, h, deadline=None):
+            end = time.monotonic() + 10
+            while time.monotonic() < end:
+                if deadline is not None and time.monotonic() > deadline:
+                    raise P.PdfReadError(P._TOO_SLOW)
+            return []
+
+        monkeypatch.setattr(P, "_build_lines", endless)
+        started = time.monotonic()
+        with pytest.raises(P.PdfReadError, match="took too long"):
+            P.read_pdf(load("a_lawreview_chromium"), time_budget=0.3)
+        assert time.monotonic() - started < 5
+
+
+def test_the_time_budget_starts_when_the_reader_lock_is_held_not_when_the_upload_arrives(monkeypatch):
+    """A fine file queued behind another read used to fail with 'took too long': its 25 seconds
+    began before it had the lock. Here the lock is held for 0.8 s and the budget is 0.5 s."""
+    import threading
+
+    data = text_pdf(3)
+    P._PDFIUM_LOCK.acquire()
+    outcome = {}
+
+    def reader():
+        try:
+            outcome["result"] = P.read_pdf(data, time_budget=0.5)
+        except Exception as exc:  # pragma: no cover - only on failure
+            outcome["error"] = exc
+
+    thread = threading.Thread(target=reader)
+    thread.start()
+    time.sleep(0.8)
+    P._PDFIUM_LOCK.release()
+    thread.join(timeout=20)
+    assert not thread.is_alive()
+    assert "error" not in outcome, outcome.get("error")
+    assert outcome["result"].pages == 3
+
+
+def test_the_readers_time_budget_is_answered_like_any_other_limit_the_document_exceeds(monkeypatch):
+    """Run out of time inside the reader and run out of time in the child are the same answer for the
+    person: 413, too complex to read within this server's limits, with the time stated."""
+    monkeypatch.setattr(P, "PDF_TIME_BUDGET_S", 0.0)
+    with pytest.raises(DocumentTooComplexError, match=r"too complex to read within this server's limits \(reading it took longer than the 0 seconds"):
+        DocumentParser().parse_document(text_pdf(5), "a.pdf")

@@ -7,9 +7,11 @@ repeats: "Id." recurring as the last footnote of every page, or the same statute
 page, is content.
 """
 
+import pytest
+
 from app.services.pdf_text import strip_running_lines
 
-URL = "https://orionpolicy.org/how-congress-should-regulate-autonomous-agentic-ai-cyber-risk/"
+URL ="https://orionpolicy.org/how-congress-should-regulate-autonomous-agentic-ai-cyber-risk/"
 TITLE = "How Congress Should Regulate Autonomous Agentic AI Cyber Risk - Orion Policy"
 
 
@@ -195,3 +197,197 @@ def test_pleading_line_numbers_are_not_mistaken_for_page_numbers():
     pages = [page for _ in range(8)]
     out = strip_running_lines(pages)
     assert sum(len(p.split()) for p in out) >= 8 * 26       # at most a page-number-like line per page is touched, never the column
+
+
+# --- lines that differ from page to page are not one running line ------------------------------
+#
+# Lines are grouped with their digits blanked out so that "Page 3 of 90" and "Page 4 of 90" are
+# one line. Before the digits of a group were checked, any lines of one shape were taken for a
+# running footer and ALL removed: one footnote per page citing congress.gov/bill/.../house-bill/N, or
+# a different regulations.gov docket id on each page, vanished without a trace.
+
+
+def _footnote_pages(make_line, n=8):
+    return [f"{body(i)}\n{make_line(i)}" for i in range(1, n + 1)]
+
+
+@pytest.mark.parametrize(
+    "make_line",
+    [
+        lambda i: f"https://www.congress.gov/bill/117th-congress/house-bill/{i}",
+        lambda i: f"https://www.congress.gov/bill/117th-congress/house-bill/{[4021, 17, 988, 2503, 61, 3340, 725, 1198][i - 1]}",
+        lambda i: f"{i} See https://www.congress.gov/bill/117th-congress/house-bill/{i}",
+        lambda i: f"https://www.regulations.gov/document/EPA-HQ-OAR-2021-0317-{i:04d}",
+        lambda i: f"https://www.regulations.gov/docket/EPA-HQ-OAR-2021-{[317, 52, 4410, 9, 871, 23, 640, 112][i - 1]:04d}",
+        lambda i: f"https://papers.ssrn.com/sol3/papers.cfm?abstract_id={3000000 + i * 7}",
+        lambda i: f"www.example.gov/report/{i}/summary",
+    ],
+    ids=["bill climbing", "bill unrelated", "numbered footnote", "docket document", "docket random", "ssrn", "www"],
+)
+def test_footnote_urls_that_differ_only_in_a_number_are_all_kept(make_line):
+    pages = _footnote_pages(make_line)
+    assert strip_running_lines(pages) == pages
+
+
+def test_the_same_url_on_every_page_is_still_a_footer_but_a_different_one_beside_it_is_kept():
+    pages = [f"{body(i)}\n{i} See https://www.congress.gov/bill/117th-congress/house-bill/{i}\n{URL} {i}/8" for i in range(1, 9)]
+    out = strip_running_lines(pages)
+    assert all(URL not in p for p in out)
+    assert all(f"house-bill/{i}" in p for i, p in enumerate(out, 1))
+
+
+def test_a_boilerplate_line_must_be_on_four_fifths_of_the_pages_to_go():
+    """boilerplate_fraction: 8 of 10 pages is a footer, 7 of 10 or 4 of 10 is a footnote that recurs."""
+    for count, removed in [(10, True), (8, True), (7, False), (4, False), (3, False)]:
+        pages = [(f"{body(i)}\n{URL}" if i <= count else body(i)) for i in range(1, 11)]
+        out = strip_running_lines(pages)
+        assert (sum(URL in p for p in out) == 0) is removed, count
+
+
+def test_digits_that_do_not_count_pages_keep_a_line():
+    """Same shape, numbers that are not a page counter: a recurring heading with other numbers."""
+    figures = [37, 12, 58, 91, 5, 63, 29, 84]
+    pages = [f"Annual figures {figures[i - 1]}\n{body(i)}" for i in range(1, 9)]
+    assert strip_running_lines(pages) == pages
+
+
+def test_a_court_header_with_a_page_counter_and_constant_numbers_is_removed():
+    header = "Case 1:20-cv-01234-ABC Document 56 Filed 01/02/21 Page {i} of 25"
+    pages = [f"{header.format(i=i)}\n{body(i)}" for i in range(1, 9)]
+    out = strip_running_lines(pages)
+    assert all("Case 1:20" not in p for p in out)
+    # the same header, but the document number is not constant: those are different docket entries
+    pages = [f"Case 1:20-cv-01234-ABC Document {[56, 3, 71, 8, 12, 40, 99, 21][i - 1]} Filed 01/02/21 Page {i} of 25\n{body(i)}" for i in range(1, 9)]
+    assert strip_running_lines(pages) == pages
+
+
+def test_bates_numbers_that_climb_are_removed():
+    pages = [f"{body(i)}\nDEF-{i + 4100:06d}" for i in range(1, 9)]
+    assert all("DEF-" not in p for p in strip_running_lines(pages))
+
+
+def test_a_running_head_with_the_page_number_in_it_is_removed():
+    pages = [f"{body(i)}\nTHE LAW OF THINGS {i + 120}" for i in range(1, 11)]
+    assert all("THE LAW OF THINGS" not in p for p in strip_running_lines(pages))
+
+
+# --- lines that are too long, and numbers that are too long, are never candidates ----------------
+
+
+def test_a_long_line_is_never_a_running_line():
+    long_line = "This sentence is repeated at the foot of every page, word for word. " * 6
+    assert len(long_line) > 300
+    pages = [f"{body(i)}\n{long_line.strip()}" for i in range(1, 9)]
+    assert strip_running_lines(pages) == pages
+
+
+@pytest.mark.parametrize("digits", [5000, 30_000])
+def test_a_line_of_digits_beyond_python_integer_limit_is_not_a_page_number_and_not_an_error(digits):
+    """int() refuses more than 4,300 digits: this used to raise ValueError (a 415 'could not be read')."""
+    pages = [f"{body(i)}\n{'7' * digits}" for i in range(1, 9)]
+    assert strip_running_lines(pages) == pages
+    short = [f"{body(i)}\n{'7' * 9}{i}" for i in range(1, 9)]       # ten digits: also too long to be a page number
+    assert strip_running_lines(short) == short
+
+
+def test_long_numbers_that_climb_with_the_page_are_not_page_numbers_either():
+    pages = [f"{body(i)}\n{10**11 + i}" for i in range(1, 9)]
+    assert strip_running_lines(pages) == pages
+
+
+# --- nothing that holds a citation is removed -------------------------------------------------
+
+
+def _golden_citation_lines():
+    import json
+    from pathlib import Path
+
+    gold = json.loads((Path(__file__).resolve().parents[2] / "shared" / "spec_golden.json").read_text())
+    lines = [c["input"] for c in gold["cases"] if c["type_id"] is not None]
+    lines += [d["input"] for d in gold["document_cases"]]
+    from app.services.extractor import CitationExtractor
+
+    extractor = CitationExtractor()
+    return [
+        ln for ln in dict.fromkeys(lines)
+        if len(ln) <= 300 and "\n" not in ln and any(c.type.value != "website" for c in extractor.extract_all(ln))
+    ]
+
+
+GOLDEN_LINES = _golden_citation_lines()
+
+
+def test_there_are_real_citations_to_check_against():
+    assert len(GOLDEN_LINES) >= 40
+
+
+@pytest.mark.parametrize("line", GOLDEN_LINES, ids=[ln[:50] for ln in GOLDEN_LINES])
+def test_a_citation_repeated_on_every_page_is_never_removed_when_the_extractor_is_the_veto(line):
+    from app.services.pdf_text import _citation_veto
+
+    pages = [f"{body(i)}\n{line}" for i in range(1, 9)]
+    assert strip_running_lines(pages, veto=_citation_veto) == pages
+
+
+def test_the_extractor_veto_does_not_protect_a_footer_that_is_only_a_web_address():
+    from app.services.pdf_text import _citation_veto
+
+    assert _citation_veto(URL) is False
+    assert _citation_veto("Orion Policy | Page 3") is False
+    assert _citation_veto("47 CFR 54.101") is True
+
+
+def test_read_pdf_protects_unusual_citations_that_repeat_at_the_foot_of_every_page():
+    """The wiring: read_pdf asks the extractor, which knows forms (47 CFR 54.101) the quick patterns do not."""
+    from app.services.pdf_text import read_pdf
+    from tests.docfactory import make_pdf_pages
+
+    pages = [
+        [(720 - 14 * k, f"Para {i} line {k}: the {_W[(i * 5 + k) % 26]} panel held that the {_W[(i + k * 3) % 26]} rule applies to the {_W[(i * 2 + k) % 26]} claim.")
+         for k in range(12)] + [(40, "47 CFR 54.101")]
+        for i in range(8)
+    ]
+    text = read_pdf(make_pdf_pages(pages)).text
+    assert text.count("47 CFR 54.101") == 8
+
+
+def _random_document(rng):
+    """Random pages: unique body lines, with lines drawn from a pool at the top and bottom of each
+    page. Pool lines are boilerplate, citations (some with numbers that vary) and short words."""
+    n = rng.randint(3, 12)
+    cites = rng.sample(GOLDEN_LINES, 6)
+    pool = [URL, TITLE, "Confidential", "Id.", "Smith Report", *cites,
+            "See {n} U.S.C. § 1983.", "Brandenburg v. Ohio, 395 U.S. {n}, 447 (1969).", "Page {n} of 40", "Doc. {n}", "{n}"]
+    chosen = rng.sample(pool, rng.randint(1, 5))
+    pages = []
+    for i in range(1, n + 1):
+        top, bottom = [], []
+        for line in chosen:
+            if rng.random() < 0.9:
+                num = i if rng.random() < 0.6 else rng.randint(1, 900)
+                (top if rng.random() < 0.4 else bottom).append(line.replace("{n}", str(num)))
+        pages.append("\n".join([*top, body(i, rng.randint(2, 6)), *bottom]))
+    return pages
+
+
+def test_no_line_with_a_citation_is_ever_removed_from_a_random_document():
+    """The property that matters most: whatever repeats, whatever the numbers do, a line the
+    extractor reads as a citation (a web address aside) survives."""
+    import random
+
+    from app.services.pdf_text import _citation_veto
+
+    rng = random.Random(20260301)
+    removed_any = 0
+    for _ in range(300):
+        pages = _random_document(rng)
+        out = strip_running_lines(pages, veto=_citation_veto)
+        for before, after in zip(pages, out, strict=True):
+            remaining = after.split("\n")
+            for line in before.split("\n"):
+                if line in remaining:
+                    remaining.remove(line)
+                elif line.strip():
+                    removed_any += 1
+                    assert not _citation_veto(line), f"removed a citation: {line!r}"
+    assert removed_any > 50, "the generator never made anything removable, so the property proved nothing"

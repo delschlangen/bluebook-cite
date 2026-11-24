@@ -139,11 +139,52 @@ and a file over the size limit is refused in the browser before anything is sent
 | Citations returned | 2,000 | The true total is still reported |
 | Unsourced claims returned | 500 | The most likely ones; the true total is still reported |
 | Time for one analysis | 90 seconds | Then a readable 504; one analysis runs at a time and two may wait |
+| Time and memory to read one document | 35 seconds, 1 GB | The reader is stopped and the page is told the document is too complex to read within the server's limits (413) |
+| Documents read at once | 2, with 3 waiting | Beyond that a 503 "busy" with `Retry-After`, never a file-type error |
 
 Each can be changed per environment without a code change (`MAX_UPLOAD_MB`, `MAX_TEXT_CHARS`,
 `MAX_PDF_PAGES`, `MAX_CITATIONS_RETURNED`, `MAX_CLAIMS_RETURNED`, `ANALYSIS_DEADLINE_SECONDS`,
-`MAX_QUEUED_ANALYSES`; see [`backend/app/limits.py`](backend/app/limits.py)), and `/health`
-publishes the values in force so a client can show the number that is actually enforced.
+`MAX_QUEUED_ANALYSES`, and the document-reading limits below; see
+[`backend/app/limits.py`](backend/app/limits.py)), and `/health` publishes the values in force so
+a client can show the number that is actually enforced.
+
+**Reading documents in a child process.** Every upload (PDF, Word and text) is read by a
+short-lived child process, not by the server itself. A PDF can make the native library behind
+the reader abort or allocate gigabytes (an 862-byte file did), and a long unbroken run of
+letters or digits can hold a regular expression for minutes; neither a thread, a deadline nor a
+timeout inside the server can stop either, but a child can be killed. The child starts with a
+reduced environment (no API keys), sets its own limits before it imports anything or sees the
+file, and answers with one JSON object. The server waits for it without using a worker thread,
+kills it (and its process group) at the wall-clock limit, caps what it may write back, and turns
+how it ended into a message: too many pages or too much text is a 413 with the limit stated;
+a document that needed more memory, processor time or wall-clock time than allowed is a 413
+"too complex to read within this server's limits ... export it again or split it"; a damaged,
+encrypted or unsupported file keeps its 415 or 400; and a full queue is a 503 with `Retry-After`.
+Measured cost over reading in the server itself (medians, 4 CPUs): 46 ms for a short text or
+Word document, 170 to 200 ms for a PDF (it imports pdfium, and the citation extractor when the PDF
+has running headers), 56 ms for a 300-page Word document, and 0.29 s (at most 0.47 s) for the
+273-page PDF, 3.65 s to 3.94 s. The server's own memory stays flat across uploads (62.6 MB before
+50 mixed uploads to a live server, 60.7 MB after); the child peaks at 41 MB on the 273-page PDF.
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `PARSE_CHILD_MEM_MB` | `1024` | address-space ceiling for one child (RLIMIT_AS: virtual memory, not resident) |
+| `PARSE_CHILD_CPU_S` | `40` | processor-time ceiling for one child (RLIMIT_CPU) |
+| `PARSE_WALL_S` | `35` | wall-clock limit; the server kills the child at this point |
+| `PARSE_MAX_CONCURRENT` | `2` | children running at once; with the memory ceiling this is the most the server can be asked to hold for uploads |
+| `PARSE_MAX_QUEUE` | `3` | uploads allowed to wait for a child, then a 503 |
+| `PARSE_QUEUE_WAIT_S` | `20` | longest an upload waits for a child; waiting does not count against the reading limits |
+| `PARSE_RETRY_AFTER_S` | `5` | the `Retry-After` value on a 503 |
+| `PDF_MAX_PAGE_CHARS` | `60000` | a PDF page with more characters is read without layout analysis |
+| `PDF_SECOND_OPINION_MAX_CHARS` | `30000` | largest page the second PDF reader will be tried on |
+| `PDF_SECOND_OPINION_BUDGET_S` | `10` | total time the second PDF reader may take |
+| `DOCX_MAX_ELEMENTS` | `4000000` | XML elements in one Word part |
+| `DOCX_MAX_DEPTH` | `200` | nesting depth of one Word part |
+
+The memory ceiling is on each child's address space, and the host's own limit applies to the
+server and its children together, so `PARSE_MAX_CONCURRENT` times `PARSE_CHILD_MEM_MB` should stay
+well under it. The child is a guard against crashes and exhaustion, not a security boundary: it
+runs as the same user, outside any container of its own.
 
 **Reading PDFs.** PDFs are read with pypdfium2 one page at a time, so memory stays flat (about
 25 MB) however long the file is, and 273 dense pages take about 4 seconds. This replaced
@@ -153,6 +194,23 @@ drops pleading-paper line numbers, repairs ligatures and hyphenation, removes ru
 footers and page numbers that repeat on most pages, and marks footnotes the same way the Word
 reader does. On 17 realistic PDFs this raised citation recall from 97.3% to 99.96% and footnote
 numbers from 92.6% to 98.7%.
+
+Inside the child the reader is bounded before the child's own limits have to stop it: a page's
+character count is read before any layout is built (a page that cannot fit in the text limit is
+refused at once, an enormous one is read as plain text and the person is told), the time limit is
+checked inside the page as well as between pages, and the slow second reader (pdfminer) is tried
+only on a page with real garble evidence (control characters, or "(cid:N)" codes making up 2% of
+the page; the text "(cid:12)" in a sentence is not evidence), never while the first reader's lock
+is held, and for at most `PDF_SECOND_OPINION_BUDGET_S` in all. The page count in a PDF is treated
+as a claim and checked against the file: a count that is too large no longer refuses a small file
+with "this PDF has 450 pages", a count that is too small no longer drops the rest of the document
+without a word, and either mismatch is reported in the warnings. Running lines are removed only if
+they really run: a URL is compared exactly (a different regulations.gov docket on every page is
+five citations, not a footer), digits that differ between pages must count pages, and nothing the
+citation extractor reads as a citation is removed. A line-end hyphen is dropped only when it
+is the typesetter's (regu-/lation) and kept when it may be part of the spelling
+(state-/of-the-art, GAO-/16-552), and not across a blank line; the rule is written in
+`pdf_text.py` next to the code and pinned by a table of right and wrong cases.
 
 What it cannot do: a scanned PDF has no text to read (run OCR first), and a PDF whose fonts carry
 no text map comes out as codes, which is reported rather than passed on as text. The test
