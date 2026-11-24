@@ -1,0 +1,793 @@
+{
+  "_comment": "Engine conformance corpus. Read by BOTH backend/tests/test_spec_engine.py and frontend/src/utils/__tests__/citationEngine.test.js. A miniature spec, so the engine's behaviour is pinned independent of the real Bluebook data. If the two engines ever disagree, one of those suites fails.",
+  "spec": {
+    "types": [
+      {
+        "id": "demo_report",
+        "label": "Demo report",
+        "priority": 5,
+        "patterns": [
+          {
+            "regex": "(?P<author>[A-Z][A-Za-z.' ]+?),\\s*(?P<number>GAO-\\d{2}-\\d+),\\s*(?P<title>[^()]+?)\\s*\\((?P<year>\\d{4})\\)",
+            "flags": ""
+          },
+          {
+            "regex": "(?P<author>[A-Z][A-Za-z.' ]+?),\\s*(?P<number>GAO-\\d{2}-\\d+),\\s*(?P<title>[A-Za-z][^()]+)",
+            "flags": ""
+          },
+          {
+            "regex": "(?P<number>GAO-\\d{2}-\\d+)",
+            "flags": ""
+          }
+        ],
+        "fields": [
+          {
+            "name": "author",
+            "label": "author",
+            "rule": "R1",
+            "why": "who wrote it",
+            "required": true
+          },
+          {
+            "name": "number",
+            "label": "report number",
+            "rule": "R2",
+            "why": "the number",
+            "required": true
+          },
+          {
+            "name": "title",
+            "label": "title",
+            "rule": "R3",
+            "why": "the title",
+            "required": true
+          },
+          {
+            "name": "year",
+            "label": "year",
+            "rule": "R4",
+            "why": "the year",
+            "required": true
+          }
+        ],
+        "templates": {
+          "law_review": "{author|smallcaps}, {number}, {title|smallcaps} ({year}).",
+          "practitioner": "{author}, {number}, {title|italic} ({year})."
+        }
+      },
+      {
+        "id": "demo_amendment",
+        "label": "Demo amendment",
+        "priority": 5,
+        "patterns": [
+          {
+            "regex": "U\\.?S\\.? Const\\.? amend\\.? (?P<amendment>[IVXLC]+)(?:,?\\s*§\\s*(?P<section>\\d+))?(?:,?\\s*cl\\.\\s*(?P<clause>\\d+))?",
+            "flags": "i"
+          }
+        ],
+        "fields": [
+          {
+            "name": "amendment",
+            "label": "amendment number",
+            "rule": "R5",
+            "why": "which amendment",
+            "required": true
+          },
+          {
+            "name": "section",
+            "label": "section",
+            "rule": "R6",
+            "why": "which section",
+            "required": false
+          },
+          {
+            "name": "clause",
+            "label": "clause",
+            "rule": "R7",
+            "why": "which clause",
+            "required": false
+          }
+        ],
+        "templates": {
+          "law_review": "U.S. Const. amend. {amendment|roman}<<, § {section}>><<, cl. {clause}>>."
+        }
+      },
+      {
+        "id": "demo_seam",
+        "label": "Demo seam",
+        "priority": 1,
+        "patterns": [
+          {
+            "regex": "(?P<a>S\\d)(?:-(?P<b>T\\d))?-(?P<c>U\\d)",
+            "flags": ""
+          }
+        ],
+        "fields": [
+          {
+            "name": "a",
+            "label": "a",
+            "rule": "",
+            "why": "",
+            "required": true
+          },
+          {
+            "name": "b",
+            "label": "b",
+            "rule": "",
+            "why": "",
+            "required": false
+          },
+          {
+            "name": "c",
+            "label": "c",
+            "rule": "",
+            "why": "",
+            "required": true
+          }
+        ],
+        "templates": {
+          "law_review": "{a}<< ({b})>> {c} <<[{b}]>>."
+        }
+      }
+    ]
+  },
+  "match_cases": [
+    {
+      "name": "a complete report, law review style",
+      "input": "U.S. Gov't Accountability Off., GAO-16-552, Firearms Data (2016)",
+      "style": "law_review",
+      "type_id": "demo_report",
+      "missing": [],
+      "formatted": "U.S. GOV'T ACCOUNTABILITY OFF., GAO-16-552, FIREARMS DATA (2016).",
+      "template": "U.S. GOV'T ACCOUNTABILITY OFF., GAO-16-552, FIREARMS DATA (2016)."
+    },
+    {
+      "name": "the same report, practitioner style",
+      "input": "U.S. Gov't Accountability Off., GAO-16-552, Firearms Data (2016)",
+      "style": "practitioner",
+      "type_id": "demo_report",
+      "missing": [],
+      "formatted": "U.S. Gov't Accountability Off., GAO-16-552, *Firearms Data* (2016).",
+      "template": "U.S. Gov't Accountability Off., GAO-16-552, *Firearms Data* (2016)."
+    },
+    {
+      "name": "a report with no year is not formatted, and the gap is marked",
+      "input": "U.S. Gov't Accountability Off., GAO-16-552, Firearms Data",
+      "style": "law_review",
+      "type_id": "demo_report",
+      "missing": [
+        "year"
+      ],
+      "formatted": null,
+      "template": "U.S. GOV'T ACCOUNTABILITY OFF., GAO-16-552, FIREARMS DATA ([year])."
+    },
+    {
+      "name": "only a report number is known: everything else is a gap",
+      "input": "GAO-16-552",
+      "style": "law_review",
+      "type_id": "demo_report",
+      "missing": [
+        "author",
+        "title",
+        "year"
+      ],
+      "formatted": null,
+      "template": "[author], GAO-16-552, [title] ([year])."
+    },
+    {
+      "name": "optional blocks are dropped when their field is absent",
+      "input": "U.S. Const. amend. XIV",
+      "style": "law_review",
+      "type_id": "demo_amendment",
+      "missing": [],
+      "formatted": "U.S. Const. amend. XIV.",
+      "template": "U.S. Const. amend. XIV."
+    },
+    {
+      "name": "optional blocks are included when present, in order",
+      "input": "U.S. Const. amend. XIV, § 1",
+      "style": "law_review",
+      "type_id": "demo_amendment",
+      "missing": [],
+      "formatted": "U.S. Const. amend. XIV, § 1.",
+      "template": "U.S. Const. amend. XIV, § 1."
+    },
+    {
+      "name": "two optional blocks together",
+      "input": "US Const amend xiv, § 2, cl. 3",
+      "style": "law_review",
+      "type_id": "demo_amendment",
+      "missing": [],
+      "formatted": "U.S. Const. amend. XIV, § 2, cl. 3.",
+      "template": "U.S. Const. amend. XIV, § 2, cl. 3."
+    },
+    {
+      "name": "a style with no template of its own falls back to law review",
+      "input": "U.S. Const. amend. I",
+      "style": "practitioner",
+      "type_id": "demo_amendment",
+      "missing": [],
+      "formatted": "U.S. Const. amend. I.",
+      "template": "U.S. Const. amend. I."
+    },
+    {
+      "name": "prose that merely contains a fragment is not a citation",
+      "input": "Please explain why the report numbered GAO-16-552 matters to the argument in the second section of the brief",
+      "style": "law_review",
+      "type_id": null,
+      "missing": null,
+      "formatted": null,
+      "template": null
+    },
+    {
+      "name": "nothing recognisable",
+      "input": "hello world",
+      "style": "law_review",
+      "type_id": null,
+      "missing": null,
+      "formatted": null,
+      "template": null
+    },
+    {
+      "name": "dropping optional blocks leaves no stray spaces or doubled spaces",
+      "input": "S1-U3",
+      "style": "law_review",
+      "type_id": "demo_seam",
+      "missing": [],
+      "formatted": "S1 U3.",
+      "template": "S1 U3."
+    },
+    {
+      "name": "present optional blocks keep their own spacing",
+      "input": "S1-T2-U3",
+      "style": "law_review",
+      "type_id": "demo_seam",
+      "missing": [],
+      "formatted": "S1 (T2) U3 [T2].",
+      "template": "S1 (T2) U3 [T2]."
+    }
+  ],
+  "find_all_cases": [
+    {
+      "name": "two citations of different types in running text, in document order",
+      "input": "As held in U.S. Const. amend. XIV, § 1 and reported in U.S. Gov't Accountability Off., GAO-16-552, Firearms Data (2016), the rule is settled.",
+      "expected": [
+        {
+          "type_id": "demo_amendment",
+          "text": "U.S. Const. amend. XIV, § 1"
+        },
+        {
+          "type_id": "demo_report",
+          "text": "U.S. Gov't Accountability Off., GAO-16-552, Firearms Data (2016)"
+        }
+      ]
+    },
+    {
+      "name": "a longer match swallows the shorter fragment inside it",
+      "input": "U.S. Gov't Accountability Off., GAO-16-552, Firearms Data (2016)",
+      "expected": [
+        {
+          "type_id": "demo_report",
+          "text": "U.S. Gov't Accountability Off., GAO-16-552, Firearms Data (2016)"
+        }
+      ]
+    },
+    {
+      "name": "no citations",
+      "input": "Nothing to see here.",
+      "expected": []
+    }
+  ],
+  "transform_cases": [
+    {
+      "transform": "roman",
+      "input": "XIV",
+      "expected": "XIV"
+    },
+    {
+      "transform": "roman",
+      "input": "xiv",
+      "expected": "XIV"
+    },
+    {
+      "transform": "roman",
+      "input": "14",
+      "expected": "XIV"
+    },
+    {
+      "transform": "roman",
+      "input": "1",
+      "expected": "I"
+    },
+    {
+      "transform": "roman",
+      "input": "9",
+      "expected": "IX"
+    },
+    {
+      "transform": "roman",
+      "input": "39",
+      "expected": "XXXIX"
+    },
+    {
+      "transform": "roman",
+      "input": "0",
+      "expected": "0"
+    },
+    {
+      "transform": "roman",
+      "input": "4000",
+      "expected": "4000"
+    },
+    {
+      "transform": "thousands",
+      "input": "8977",
+      "expected": "8977"
+    },
+    {
+      "transform": "thousands",
+      "input": "50379",
+      "expected": "50,379"
+    },
+    {
+      "transform": "thousands",
+      "input": "50,379",
+      "expected": "50,379"
+    },
+    {
+      "transform": "thousands",
+      "input": "1234567",
+      "expected": "1,234,567"
+    },
+    {
+      "transform": "thousands",
+      "input": "H3",
+      "expected": "H3"
+    },
+    {
+      "transform": "thousands",
+      "input": "H12455",
+      "expected": "H12,455"
+    },
+    {
+      "transform": "thousands",
+      "input": "12345-47",
+      "expected": "12,345-47"
+    },
+    {
+      "transform": "thousands",
+      "input": "abc",
+      "expected": "abc"
+    },
+    {
+      "transform": "thousands",
+      "input": "00123456",
+      "expected": "00,123,456"
+    },
+    {
+      "transform": "thousands",
+      "input": "123456789012345678901",
+      "expected": "123,456,789,012,345,678,901"
+    },
+    {
+      "transform": "ordinal",
+      "input": "117",
+      "expected": "117th"
+    },
+    {
+      "transform": "ordinal",
+      "input": "117th",
+      "expected": "117th"
+    },
+    {
+      "transform": "ordinal",
+      "input": "102",
+      "expected": "102d"
+    },
+    {
+      "transform": "ordinal",
+      "input": "103",
+      "expected": "103d"
+    },
+    {
+      "transform": "ordinal",
+      "input": "101",
+      "expected": "101st"
+    },
+    {
+      "transform": "ordinal",
+      "input": "111",
+      "expected": "111th"
+    },
+    {
+      "transform": "ordinal",
+      "input": "112",
+      "expected": "112th"
+    },
+    {
+      "transform": "ordinal",
+      "input": "113",
+      "expected": "113th"
+    },
+    {
+      "transform": "ordinal",
+      "input": "2nd",
+      "expected": "2d"
+    },
+    {
+      "transform": "ordinal",
+      "input": "3rd",
+      "expected": "3d"
+    },
+    {
+      "transform": "ordinal",
+      "input": "22",
+      "expected": "22d"
+    },
+    {
+      "transform": "ordinal",
+      "input": "23",
+      "expected": "23d"
+    },
+    {
+      "transform": "ordinal",
+      "input": "11",
+      "expected": "11th"
+    },
+    {
+      "transform": "ordinal",
+      "input": "1",
+      "expected": "1st"
+    },
+    {
+      "transform": "ordinal",
+      "input": "abc",
+      "expected": "abc"
+    },
+    {
+      "transform": "bbdate",
+      "input": "March 1, 2022",
+      "expected": "Mar. 1, 2022"
+    },
+    {
+      "transform": "bbdate",
+      "input": "Mar 1 2022",
+      "expected": "Mar. 1, 2022"
+    },
+    {
+      "transform": "bbdate",
+      "input": "sept. 29, 1995",
+      "expected": "Sept. 29, 1995"
+    },
+    {
+      "transform": "bbdate",
+      "input": "September 29, 1995",
+      "expected": "Sept. 29, 1995"
+    },
+    {
+      "transform": "bbdate",
+      "input": "Sep 3, 2020",
+      "expected": "Sept. 3, 2020"
+    },
+    {
+      "transform": "bbdate",
+      "input": "May 5, 2020",
+      "expected": "May 5, 2020"
+    },
+    {
+      "transform": "bbdate",
+      "input": "June 3, 2019",
+      "expected": "June 3, 2019"
+    },
+    {
+      "transform": "bbdate",
+      "input": "July 4, 1976",
+      "expected": "July 4, 1976"
+    },
+    {
+      "transform": "bbdate",
+      "input": "2022-03-01",
+      "expected": "Mar. 1, 2022"
+    },
+    {
+      "transform": "bbdate",
+      "input": "1 March 2022",
+      "expected": "Mar. 1, 2022"
+    },
+    {
+      "transform": "bbdate",
+      "input": "March 2016",
+      "expected": "Mar. 2016"
+    },
+    {
+      "transform": "bbdate",
+      "input": "2016",
+      "expected": "2016"
+    },
+    {
+      "transform": "bbdate",
+      "input": "Dec. 14, 2017",
+      "expected": "Dec. 14, 2017"
+    },
+    {
+      "transform": "bbdate",
+      "input": "February 29, 2020",
+      "expected": "Feb. 29, 2020"
+    },
+    {
+      "transform": "bbdate",
+      "input": "garbage",
+      "expected": "garbage"
+    },
+    {
+      "transform": "bbdate",
+      "input": "2022-13-01",
+      "expected": "2022-13-01"
+    },
+    {
+      "transform": "bbdate",
+      "input": "Jan. 6, 2022",
+      "expected": "Jan. 6, 2022"
+    },
+    {
+      "transform": "bbdate",
+      "input": "MARCH 1, 2022",
+      "expected": "Mar. 1, 2022"
+    },
+    {
+      "transform": "chamber",
+      "input": "HR",
+      "expected": "H.R."
+    },
+    {
+      "transform": "chamber",
+      "input": "H.R.",
+      "expected": "H.R."
+    },
+    {
+      "transform": "chamber",
+      "input": "h.r",
+      "expected": "H.R."
+    },
+    {
+      "transform": "chamber",
+      "input": "H. R.",
+      "expected": "H.R."
+    },
+    {
+      "transform": "chamber",
+      "input": "S",
+      "expected": "S."
+    },
+    {
+      "transform": "chamber",
+      "input": "s.",
+      "expected": "S."
+    },
+    {
+      "transform": "chamber",
+      "input": "Senate",
+      "expected": "Senate"
+    },
+    {
+      "transform": "institution",
+      "input": "Government Accountability Office",
+      "expected": "Gov't Accountability Off."
+    },
+    {
+      "transform": "institution",
+      "input": "Congressional Research Service",
+      "expected": "Cong. Rsch. Serv."
+    },
+    {
+      "transform": "institution",
+      "input": "U.S. Gov't Accountability Off.",
+      "expected": "U.S. Gov't Accountability Off."
+    },
+    {
+      "transform": "institution",
+      "input": "Department of Justice",
+      "expected": "Dep't of Justice"
+    },
+    {
+      "transform": "institution",
+      "input": "The Brookings Institution",
+      "expected": "Brookings Inst."
+    },
+    {
+      "transform": "paper",
+      "input": "New York Times",
+      "expected": "N.Y. Times"
+    },
+    {
+      "transform": "paper",
+      "input": "NY Times",
+      "expected": "N.Y. Times"
+    },
+    {
+      "transform": "paper",
+      "input": "The Washington Post",
+      "expected": "Wash. Post"
+    },
+    {
+      "transform": "paper",
+      "input": "wall street journal",
+      "expected": "Wall St. J."
+    },
+    {
+      "transform": "paper",
+      "input": "LA Times",
+      "expected": "L.A. Times"
+    },
+    {
+      "transform": "paper",
+      "input": "USA Today",
+      "expected": "USA Today"
+    },
+    {
+      "transform": "paper",
+      "input": "The Daily Gazette",
+      "expected": "The Daily Gazette"
+    },
+    {
+      "transform": "state_abbr",
+      "input": "Washington",
+      "expected": "Wash."
+    },
+    {
+      "transform": "state_abbr",
+      "input": "north carolina",
+      "expected": "N.C."
+    },
+    {
+      "transform": "state_abbr",
+      "input": "Wash.",
+      "expected": "Wash."
+    },
+    {
+      "transform": "state_abbr",
+      "input": "West Virginia",
+      "expected": "W. Va."
+    },
+    {
+      "transform": "state_abbr",
+      "input": "Narnia",
+      "expected": "Narnia"
+    },
+    {
+      "transform": "titlecase",
+      "input": "Firearms Data: ATF Did Not Always Comply With The Appropriations Act Restrictions",
+      "expected": "Firearms Data: ATF Did Not Always Comply with the Appropriations Act Restrictions"
+    },
+    {
+      "transform": "titlecase",
+      "input": "the rise and fall of the roman empire",
+      "expected": "The Rise and Fall of the Roman Empire"
+    },
+    {
+      "transform": "titlecase",
+      "input": "Free Speech in the Algorithmic Society",
+      "expected": "Free Speech in the Algorithmic Society"
+    },
+    {
+      "transform": "titlecase",
+      "input": "law and order: a history of the united states",
+      "expected": "Law and Order: A History of the United States"
+    },
+    {
+      "transform": "titlecase",
+      "input": "FIREARMS DATA: ATF DID NOT ALWAYS COMPLY",
+      "expected": "FIREARMS DATA: ATF DID NOT ALWAYS COMPLY"
+    },
+    {
+      "transform": "titlecase",
+      "input": "Beyond the Editorial Analogy: First Amendment Protections for Platform Content Moderation",
+      "expected": "Beyond the Editorial Analogy: First Amendment Protections for Platform Content Moderation"
+    },
+    {
+      "transform": "titlecase",
+      "input": "what is to be done",
+      "expected": "What Is to Be Done"
+    },
+    {
+      "transform": "titlecase",
+      "input": "on the origin of species",
+      "expected": "On the Origin of Species"
+    },
+    {
+      "transform": "titlecase",
+      "input": "iPhone privacy and the fourth amendment",
+      "expected": "iPhone Privacy and the Fourth Amendment"
+    },
+    {
+      "transform": "titlecase",
+      "input": "self-determination in international law",
+      "expected": "Self-Determination in International Law"
+    },
+    {
+      "transform": "titlecase",
+      "input": "Between Facts and Norms",
+      "expected": "Between Facts and Norms"
+    },
+    {
+      "transform": "titlecase",
+      "input": "a theory of justice",
+      "expected": "A Theory of Justice"
+    },
+    {
+      "transform": "titlecase",
+      "input": "Comply With: The Rules",
+      "expected": "Comply with: The Rules"
+    },
+    {
+      "transform": "titlecase",
+      "input": "IN RE A LAW: A STUDY",
+      "expected": "IN RE A LAW: A STUDY"
+    },
+    {
+      "transform": "titlecase",
+      "input": "",
+      "expected": ""
+    },
+    {
+      "transform": "decaps",
+      "input": "U.S. GOV'T ACCOUNTABILITY OFF.",
+      "expected": "U.S. Gov't Accountability Off."
+    },
+    {
+      "transform": "decaps",
+      "input": "U.S. Gov't Accountability Off.",
+      "expected": "U.S. Gov't Accountability Off."
+    },
+    {
+      "transform": "decaps",
+      "input": "CONGRESSIONAL RESEARCH SERVICE",
+      "expected": "Congressional Research Service"
+    },
+    {
+      "transform": "decaps",
+      "input": "GAO",
+      "expected": "GAO"
+    },
+    {
+      "transform": "decaps",
+      "input": "RAND CORP.",
+      "expected": "RAND Corp."
+    },
+    {
+      "transform": "decaps",
+      "input": "DEPARTMENT OF JUSTICE",
+      "expected": "Department of Justice"
+    },
+    {
+      "transform": "decaps",
+      "input": "FIREARMS DATA: ATF DID NOT ALWAYS COMPLY WITH THE APPROPRIATIONS ACT RESTRICTIONS",
+      "expected": "Firearms Data: ATF Did Not Always Comply with the Appropriations Act Restrictions"
+    },
+    {
+      "transform": "decaps",
+      "input": "Firearms Data: ATF Did Not",
+      "expected": "Firearms Data: ATF Did Not"
+    },
+    {
+      "transform": "decaps",
+      "input": "",
+      "expected": ""
+    },
+    {
+      "transform": "titlecase_mid",
+      "input": "of the law governing lawyers",
+      "expected": "of the Law Governing Lawyers"
+    },
+    {
+      "transform": "titlecase_mid",
+      "input": "torts",
+      "expected": "Torts"
+    },
+    {
+      "transform": "titlecase_mid",
+      "input": "the Law of Agency",
+      "expected": "the Law of Agency"
+    }
+  ]
+}

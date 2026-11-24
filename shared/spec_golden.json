@@ -1,0 +1,544 @@
+{
+  "_comment": "Golden corpus for the REAL citation spec. Read by backend/tests/test_spec_golden.py and frontend/src/utils/__tests__/specGolden.test.js, so the Python and JavaScript engines are held to the same answers. Expected outputs follow the examples in the cited guides (AALL 2025, Suffolk, Georgetown, UNC) and the 21st edition. Inputs are normalised (curly quotes, en dashes) before matching, as the application does.",
+  "cases": [
+    {
+      "name": "Const art. with section and clause",
+      "input": "U.S. Const. art. I, § 8, cl. 3",
+      "type_id": "us_const_article",
+      "missing": [],
+      "formatted": "U.S. Const. art. I, § 8, cl. 3."
+    },
+    {
+      "name": "Const art. typed loosely with arabic numerals",
+      "input": "US Const art 1 sec 8 cl 3",
+      "type_id": "us_const_article",
+      "missing": [],
+      "formatted": "U.S. Const. art. I, § 8, cl. 3."
+    },
+    {
+      "name": "Const article spelled out",
+      "input": "U.S. Constitution, Article II, Section 2",
+      "type_id": "us_const_article",
+      "missing": [],
+      "formatted": "U.S. Const. art. II, § 2."
+    },
+    {
+      "name": "amendment with section",
+      "input": "U.S. Const. amend. XIV, § 1",
+      "type_id": "us_const_amendment",
+      "missing": [],
+      "formatted": "U.S. Const. amend. XIV, § 1."
+    },
+    {
+      "name": "amendment typed loosely, arabic numeral",
+      "input": "us const amend 14 sec 1",
+      "type_id": "us_const_amendment",
+      "missing": [],
+      "formatted": "U.S. Const. amend. XIV, § 1."
+    },
+    {
+      "name": "amendment alone",
+      "input": "U.S. Const. amend. I",
+      "type_id": "us_const_amendment",
+      "missing": [],
+      "formatted": "U.S. Const. amend. I."
+    },
+    {
+      "name": "state constitution, abbreviated",
+      "input": "Wash. Const. art. I, § 7",
+      "type_id": "state_const",
+      "missing": [],
+      "formatted": "Wash. Const. art. I, § 7."
+    },
+    {
+      "name": "state constitution, spelled out",
+      "input": "Washington Constitution article 1 section 7",
+      "type_id": "state_const",
+      "missing": [],
+      "formatted": "Wash. Const. art. I, § 7."
+    },
+    {
+      "name": "state constitution, multi-word state",
+      "input": "North Carolina Const. art. I",
+      "type_id": "state_const",
+      "missing": [],
+      "formatted": "N.C. Const. art. I."
+    },
+    {
+      "name": "Civil Procedure rule",
+      "input": "Fed. R. Civ. P. 12(b)(6)",
+      "type_id": "fed_r_civ_p",
+      "missing": [],
+      "formatted": "Fed. R. Civ. P. 12(b)(6)."
+    },
+    {
+      "name": "Civil Procedure by initialism",
+      "input": "FRCP 12(b)(6)",
+      "type_id": "fed_r_civ_p",
+      "missing": [],
+      "formatted": "Fed. R. Civ. P. 12(b)(6)."
+    },
+    {
+      "name": "Civil Procedure spelled out",
+      "input": "Federal Rule of Civil Procedure 56",
+      "type_id": "fed_r_civ_p",
+      "missing": [],
+      "formatted": "Fed. R. Civ. P. 56."
+    },
+    {
+      "name": "Criminal Procedure rule",
+      "input": "Fed. R. Crim. P. 7(b)",
+      "type_id": "fed_r_crim_p",
+      "missing": [],
+      "formatted": "Fed. R. Crim. P. 7(b)."
+    },
+    {
+      "name": "Evidence rule",
+      "input": "Fed. R. Evid. 801(d)(2)",
+      "type_id": "fed_r_evid",
+      "missing": [],
+      "formatted": "Fed. R. Evid. 801(d)(2)."
+    },
+    {
+      "name": "Appellate Procedure rule",
+      "input": "Fed. R. App. P. 4(a)(1)",
+      "type_id": "fed_r_app_p",
+      "missing": [],
+      "formatted": "Fed. R. App. P. 4(a)(1)."
+    },
+    {
+      "name": "Public Law with Statutes at Large and year",
+      "input": "Pub. L. No. 111-148, 124 Stat. 119 (2010)",
+      "type_id": "public_law",
+      "missing": [],
+      "formatted": "Pub. L. No. 111-148, 124 Stat. 119 (2010)."
+    },
+    {
+      "name": "Public Law with the Act's name",
+      "input": "Department of Transportation Act, Pub. L. No. 89-670, 80 Stat. 931 (1966)",
+      "type_id": "public_law",
+      "missing": [],
+      "formatted": "Department of Transportation Act, Pub. L. No. 89-670, 80 Stat. 931 (1966)."
+    },
+    {
+      "name": "Public Law typed loosely, no year",
+      "input": "Public Law 111-148, 124 Stat. 119",
+      "type_id": "public_law",
+      "missing": [],
+      "formatted": "Pub. L. No. 111-148, 124 Stat. 119."
+    },
+    {
+      "name": "C.F.R. complete",
+      "input": "47 C.F.R. § 54.101 (2022)",
+      "type_id": "cfr",
+      "missing": [],
+      "formatted": "47 C.F.R. § 54.101 (2022)."
+    },
+    {
+      "name": "C.F.R. with subdivision",
+      "input": "40 C.F.R. § 261.4(b) (2021)",
+      "type_id": "cfr",
+      "missing": [],
+      "formatted": "40 C.F.R. § 261.4(b) (2021)."
+    },
+    {
+      "name": "C.F.R. without the year is incomplete, unlike the U.S. Code",
+      "input": "47 CFR 54.101",
+      "type_id": "cfr",
+      "missing": [
+        "year"
+      ],
+      "formatted": null,
+      "template": "47 C.F.R. § 54.101 ([year])."
+    },
+    {
+      "name": "Federal Register, month spelled out",
+      "input": "60 Fed. Reg. 50379 (September 29, 1995)",
+      "type_id": "federal_register",
+      "missing": [],
+      "formatted": "60 Fed. Reg. 50,379 (Sept. 29, 1995)."
+    },
+    {
+      "name": "Federal Register with rule name and pinpoint",
+      "input": "Importation of Fruits and Vegetables, 60 Fed. Reg. 50,379, 50,381 (Sept. 29, 1995)",
+      "type_id": "federal_register",
+      "missing": [],
+      "formatted": "Importation of Fruits and Vegetables, 60 Fed. Reg. 50,379, 50,381 (Sept. 29, 1995)."
+    },
+    {
+      "name": "Federal Register with no date is incomplete",
+      "input": "82 Fed. Reg. 8977",
+      "type_id": "federal_register",
+      "missing": [
+        "date"
+      ],
+      "formatted": null,
+      "template": "82 Fed. Reg. 8977 ([full date])."
+    },
+    {
+      "name": "Federal Register with only a year is incomplete",
+      "input": "60 Fed. Reg. 50379 (1995)",
+      "type_id": "federal_register",
+      "missing": [
+        "date"
+      ],
+      "formatted": null,
+      "template": "60 Fed. Reg. 50,379 ([full date])."
+    },
+    {
+      "name": "executive order, complete",
+      "input": "Exec. Order No. 13,769, 82 Fed. Reg. 8977 (Feb. 1, 2017)",
+      "type_id": "executive_order",
+      "missing": [],
+      "formatted": "Exec. Order No. 13,769, 82 Fed. Reg. 8977 (Feb. 1, 2017)."
+    },
+    {
+      "name": "executive order, number only",
+      "input": "Executive Order 13769",
+      "type_id": "executive_order",
+      "missing": [
+        "volume",
+        "page",
+        "date"
+      ],
+      "formatted": null,
+      "template": "Exec. Order No. 13,769, [Federal Register volume] Fed. Reg. [Federal Register page] ([full date])."
+    },
+    {
+      "name": "House bill",
+      "input": "H.R. 1234, 117th Cong. (2021)",
+      "type_id": "bill",
+      "missing": [],
+      "formatted": "H.R. 1234, 117th Cong. (2021)."
+    },
+    {
+      "name": "House bill typed loosely",
+      "input": "HR 1234, 117th Cong. (2021)",
+      "type_id": "bill",
+      "missing": [],
+      "formatted": "H.R. 1234, 117th Cong. (2021)."
+    },
+    {
+      "name": "Senate bill with section",
+      "input": "S. 516, 105th Cong. § 2 (1997)",
+      "type_id": "bill",
+      "missing": [],
+      "formatted": "S. 516, 105th Cong. § 2 (1997)."
+    },
+    {
+      "name": "bill with no year is incomplete",
+      "input": "H.R. 1234, 117th Cong.",
+      "type_id": "bill",
+      "missing": [
+        "year"
+      ],
+      "formatted": null,
+      "template": "H.R. 1234, 117th Cong. ([year])."
+    },
+    {
+      "name": "bill in a Congress that takes the d ordinal",
+      "input": "H.R. 5, 102 Cong. (1991)",
+      "type_id": "bill",
+      "missing": [],
+      "formatted": "H.R. 5, 102d Cong. (1991)."
+    },
+    {
+      "name": "House report",
+      "input": "H.R. Rep. No. 116-123 (2019)",
+      "type_id": "committee_report",
+      "missing": [],
+      "formatted": "H.R. Rep. No. 116-123 (2019)."
+    },
+    {
+      "name": "Senate report with pinpoint",
+      "input": "S. Rep. No. 115-77, at 4 (2017)",
+      "type_id": "committee_report",
+      "missing": [],
+      "formatted": "S. Rep. No. 115-77, at 4 (2017)."
+    },
+    {
+      "name": "report typed loosely",
+      "input": "HR Rep 109-447 (2006)",
+      "type_id": "committee_report",
+      "missing": [],
+      "formatted": "H.R. Rep. No. 109-447 (2006)."
+    },
+    {
+      "name": "Congressional Record, daily edition",
+      "input": "168 Cong. Rec. H3 (daily ed. Jan. 6, 2022)",
+      "type_id": "cong_rec_daily",
+      "missing": [],
+      "formatted": "168 Cong. Rec. H3 (daily ed. Jan. 6, 2022)."
+    },
+    {
+      "name": "Congressional Record, bound edition, comma added",
+      "input": "123 Cong. Rec. 12455 (1977)",
+      "type_id": "cong_rec_bound",
+      "missing": [],
+      "formatted": "123 Cong. Rec. 12,455 (1977)."
+    },
+    {
+      "name": "Congressional Record, bound edition without year",
+      "input": "123 Cong. Rec. 12455",
+      "type_id": "cong_rec_bound",
+      "missing": [
+        "year"
+      ],
+      "formatted": null,
+      "template": "123 Cong. Rec. 12,455 ([year])."
+    },
+    {
+      "name": "GAO report, law review style, as pasted from an iPhone",
+      "input": "U.S. GOV’T ACCOUNTABILITY OFF., GAO–16–552, Firearms Data: ATF Did Not Always Comply With The Appropriations Act Restrictions (2016)",
+      "style": "law_review",
+      "type_id": "agency_report",
+      "missing": [],
+      "formatted": "U.S. GOV'T ACCOUNTABILITY OFF., GAO-16-552, FIREARMS DATA: ATF DID NOT ALWAYS COMPLY WITH THE APPROPRIATIONS ACT RESTRICTIONS (2016)."
+    },
+    {
+      "name": "GAO report, practitioner style: ordinary case, with and the lower case",
+      "input": "U.S. GOV’T ACCOUNTABILITY OFF., GAO–16–552, Firearms Data: ATF Did Not Always Comply With The Appropriations Act Restrictions (2016)",
+      "style": "practitioner",
+      "type_id": "agency_report",
+      "missing": [],
+      "formatted": "U.S. Gov't Accountability Off., GAO-16-552, *Firearms Data: ATF Did Not Always Comply with the Appropriations Act Restrictions* (2016)."
+    },
+    {
+      "name": "GAO report with everything in capitals, practitioner style",
+      "input": "U.S. GOV'T ACCOUNTABILITY OFF., GAO-16-552, FIREARMS DATA: ATF DID NOT ALWAYS COMPLY WITH THE APPROPRIATIONS ACT RESTRICTIONS (2016)",
+      "style": "practitioner",
+      "type_id": "agency_report",
+      "missing": [],
+      "formatted": "U.S. Gov't Accountability Off., GAO-16-552, *Firearms Data: ATF Did Not Always Comply with the Appropriations Act Restrictions* (2016)."
+    },
+    {
+      "name": "GAO report spelled out and abbreviated for the user",
+      "input": "Government Accountability Office, GAO-24-106481, Rental Housing: Opportunities Exist to Improve Oversight (2024)",
+      "style": "practitioner",
+      "type_id": "agency_report",
+      "missing": [],
+      "formatted": "Gov't Accountability Off., GAO-24-106481, *Rental Housing: Opportunities Exist to Improve Oversight* (2024)."
+    },
+    {
+      "name": "GAO report with no year",
+      "input": "U.S. Gov't Accountability Off., GAO-16-552, Firearms Data: ATF Did Not Always Comply With The Appropriations Act Restrictions",
+      "style": "practitioner",
+      "type_id": "agency_report",
+      "missing": [
+        "year"
+      ],
+      "formatted": null
+    },
+    {
+      "name": "only a GAO report number",
+      "input": "GAO-16-552",
+      "style": "law_review",
+      "type_id": "agency_report",
+      "missing": [
+        "author",
+        "title",
+        "year"
+      ],
+      "formatted": null,
+      "template": "[agency], GAO-16-552, [title] ([year])."
+    },
+    {
+      "name": "CRS report",
+      "input": "Congressional Research Service, R45000, An Overview of Federal Grants (2019)",
+      "style": "practitioner",
+      "type_id": "agency_report",
+      "missing": [],
+      "formatted": "Cong. Rsch. Serv., R45000, *An Overview of Federal Grants* (2019)."
+    },
+    {
+      "name": "newspaper article, law review style",
+      "input": "Jane Doe, Court Rules on Speech Case, N.Y. Times, June 15, 1990, at A1",
+      "style": "law_review",
+      "type_id": "newspaper_article",
+      "missing": [],
+      "formatted": "Jane Doe, *Court Rules on Speech Case*, N.Y. TIMES, June 15, 1990, at A1."
+    },
+    {
+      "name": "newspaper article, practitioner style",
+      "input": "Jane Doe, Court Rules on Speech Case, N.Y. Times, June 15, 1990, at A1",
+      "style": "practitioner",
+      "type_id": "newspaper_article",
+      "missing": [],
+      "formatted": "Jane Doe, *Court Rules on Speech Case*, N.Y. Times, June 15, 1990, at A1."
+    },
+    {
+      "name": "unsigned newspaper article, title recapitalised, paper normalised",
+      "input": "court rules on speech case, New York Times, June 15, 1990, at A1",
+      "style": "law_review",
+      "type_id": "newspaper_article",
+      "missing": [],
+      "formatted": "*Court Rules on Speech Case*, N.Y. TIMES, June 15, 1990, at A1."
+    },
+    {
+      "name": "Restatement, law review style",
+      "input": "Restatement (Second) of Torts § 402A (Am. L. Inst. 1965)",
+      "style": "law_review",
+      "type_id": "restatement",
+      "missing": [],
+      "formatted": "RESTATEMENT (SECOND) OF TORTS § 402A (Am. L. Inst. 1965)."
+    },
+    {
+      "name": "Restatement, practitioner style",
+      "input": "Restatement (Second) of Torts § 402A (Am. L. Inst. 1965)",
+      "style": "practitioner",
+      "type_id": "restatement",
+      "missing": [],
+      "formatted": "Restatement (Second) of Torts § 402A (Am. L. Inst. 1965)."
+    },
+    {
+      "name": "Restatement typed in lower case, no year",
+      "input": "restatement (third) of the law governing lawyers § 5",
+      "style": "law_review",
+      "type_id": "restatement",
+      "missing": [
+        "year"
+      ],
+      "formatted": null,
+      "template": "RESTATEMENT (THIRD) OF THE LAW GOVERNING LAWYERS § 5 (Am. L. Inst. [year])."
+    },
+    {
+      "name": "Restatement with a comment",
+      "input": "Restatement (Second) of Contracts § 90 cmt. b (Am. L. Inst. 1981)",
+      "style": "law_review",
+      "type_id": "restatement",
+      "missing": [],
+      "formatted": "RESTATEMENT (SECOND) OF CONTRACTS § 90 cmt. b (Am. L. Inst. 1981)."
+    },
+    {
+      "name": "Model Penal Code",
+      "input": "Model Penal Code § 2.02 (Am. L. Inst. 1985)",
+      "style": "law_review",
+      "type_id": "model_penal_code",
+      "missing": [],
+      "formatted": "MODEL PENAL CODE § 2.02 (Am. L. Inst. 1985)."
+    },
+    {
+      "name": "Uniform Commercial Code",
+      "input": "U.C.C. § 2-207 (Am. L. Inst. & Unif. L. Comm'n 1977)",
+      "type_id": "ucc",
+      "missing": [],
+      "formatted": "U.C.C. § 2-207 (Am. L. Inst. & Unif. L. Comm'n 1977)."
+    },
+    {
+      "name": "Uniform Commercial Code without a year",
+      "input": "UCC § 2-314",
+      "type_id": "ucc",
+      "missing": [
+        "year"
+      ],
+      "formatted": null,
+      "template": "U.C.C. § 2-314 (Am. L. Inst. & Unif. L. Comm'n [year])."
+    },
+    {
+      "name": "a case is not this engine's business",
+      "input": "Brandenburg v. Ohio, 395 U.S. 444 (1969)",
+      "type_id": null
+    },
+    {
+      "name": "plain words are not a citation",
+      "input": "hello world",
+      "type_id": null
+    },
+    {
+      "name": "a request in prose is not a citation",
+      "input": "I need a citation about free speech",
+      "type_id": null
+    },
+    {
+      "name": "a sentence that merely mentions a bill number is not a citation",
+      "input": "The bill, S. 5, was debated for a very long time in the Senate before anyone voted on it at all",
+      "type_id": null
+    },
+    {
+      "name": "Restatement typed in lower case, practitioner style, is recapitalised but keeps its lower-case 'the'",
+      "input": "restatement (third) of the law governing lawyers § 5 (Am. L. Inst. 2000)",
+      "style": "practitioner",
+      "type_id": "restatement",
+      "missing": [],
+      "formatted": "Restatement (Third) of the Law Governing Lawyers § 5 (Am. L. Inst. 2000)."
+    },
+    {
+      "name": "Restatement subject typed in lower case, practitioner style",
+      "input": "restatement (second) of torts § 402A (Am. L. Inst. 1965)",
+      "style": "practitioner",
+      "type_id": "restatement",
+      "missing": [],
+      "formatted": "Restatement (Second) of Torts § 402A (Am. L. Inst. 1965)."
+    }
+  ],
+  "document_cases": [
+    {
+      "name": "citations of several kinds inside running prose, in order",
+      "input": "The agency acted under 47 C.F.R. § 54.101 (2022). Congress had considered H.R. 1234, 117th Cong. (2021), and the Court cited Fed. R. Civ. P. 12(b)(6).",
+      "expected": [
+        {
+          "type_id": "cfr",
+          "text": "47 C.F.R. § 54.101 (2022)"
+        },
+        {
+          "type_id": "bill",
+          "text": "H.R. 1234, 117th Cong. (2021)"
+        },
+        {
+          "type_id": "fed_r_civ_p",
+          "text": "Fed. R. Civ. P. 12(b)(6)"
+        }
+      ]
+    },
+    {
+      "name": "a Federal Register cite in prose does not swallow the sentence before it",
+      "input": "As the agency explained in its notice of proposed rulemaking, 60 Fed. Reg. 50,379 (Sept. 29, 1995), the rule applies broadly.",
+      "expected": [
+        {
+          "type_id": "federal_register",
+          "text": "60 Fed. Reg. 50,379 (Sept. 29, 1995)"
+        }
+      ]
+    },
+    {
+      "name": "a bare report number mentioned in prose is not extracted",
+      "input": "The findings in GAO-16-552 were widely discussed.",
+      "expected": []
+    },
+    {
+      "name": "the user's GAO paragraph, normalised",
+      "input": "See U.S. GOV’T ACCOUNTABILITY OFF., GAO–16–552, Firearms Data: ATF Did Not Always Comply With The Appropriations Act Restrictions (2016).",
+      "expected": [
+        {
+          "type_id": "agency_report",
+          "text": "U.S. GOV'T ACCOUNTABILITY OFF., GAO-16-552, Firearms Data: ATF Did Not Always Comply With The Appropriations Act Restrictions (2016)"
+        }
+      ]
+    },
+    {
+      "name": "a citation introduced by 'in' is found without the prose before it",
+      "input": "As the agency explained in U.S. Gov't Accountability Off., GAO-16-552, Firearms Data (2016), the rule applies.",
+      "expected": [
+        {
+          "type_id": "agency_report",
+          "text": "U.S. Gov't Accountability Off., GAO-16-552, Firearms Data (2016)"
+        }
+      ]
+    },
+    {
+      "name": "lower-case prose before a name is never absorbed into the author",
+      "input": "Our review relied heavily upon the earlier findings of Gov't Accountability Off., GAO-16-552, Firearms Data (2016).",
+      "expected": [
+        {
+          "type_id": "agency_report",
+          "text": "Gov't Accountability Off., GAO-16-552, Firearms Data (2016)"
+        }
+      ]
+    },
+    {
+      "name": "capitalised prose directly before the name means no match rather than a wrong author",
+      "input": "Statistics came from the Senate Congressional Research Service, R45000, Federal Grants (2019).",
+      "expected": []
+    }
+  ]
+}

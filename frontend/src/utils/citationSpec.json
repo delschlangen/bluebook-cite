@@ -1,0 +1,1329 @@
+{
+  "types": [
+    {
+      "id": "us_const_article",
+      "label": "U.S. Constitution, article",
+      "family": "constitutions_rules",
+      "citation_type": "constitution",
+      "confidence": "high",
+      "patterns": [
+        {
+          "regex": "U\\.?\\s?S\\.?\\s*Const(?:itution|\\.)?\\s*,?\\s*art(?:icle|\\.)?\\s*(?P<article>[IVXLCivxlc]+|\\d{1,2})(?:\\s*,?\\s*(?:§+|sec(?:tion|\\.)?)\\s*(?P<section>\\d+))?(?:\\s*,?\\s*cl(?:ause|\\.)?\\s*(?P<clause>\\d+))?",
+          "flags": "i",
+          "paste_only": false
+        }
+      ],
+      "fields": [
+        {
+          "name": "article",
+          "label": "article number",
+          "rule": "11",
+          "why": "Articles are cited in roman numerals: art. I, not art. 1.",
+          "required": true
+        },
+        {
+          "name": "section",
+          "label": "section",
+          "rule": "11",
+          "why": "The section, after the § symbol.",
+          "required": false
+        },
+        {
+          "name": "clause",
+          "label": "clause",
+          "rule": "11",
+          "why": "The clause, written cl. and the number.",
+          "required": false
+        }
+      ],
+      "templates": {
+        "law_review": "U.S. Const. art. {article|roman}<<, § {section}>><<, cl. {clause}>>."
+      },
+      "example": {
+        "article": "I",
+        "section": "8",
+        "clause": "3"
+      },
+      "notes": []
+    },
+    {
+      "id": "us_const_amendment",
+      "label": "U.S. Constitution, amendment",
+      "family": "constitutions_rules",
+      "citation_type": "constitution",
+      "confidence": "high",
+      "patterns": [
+        {
+          "regex": "U\\.?\\s?S\\.?\\s*Const(?:itution|\\.)?\\s*,?\\s*amend(?:ment|\\.)?\\s*(?P<amendment>[IVXLCivxlc]+|\\d{1,2})(?:\\s*,?\\s*(?:§+|sec(?:tion|\\.)?)\\s*(?P<section>\\d+))?(?:\\s*,?\\s*cl(?:ause|\\.)?\\s*(?P<clause>\\d+))?",
+          "flags": "i",
+          "paste_only": false
+        }
+      ],
+      "fields": [
+        {
+          "name": "amendment",
+          "label": "amendment number",
+          "rule": "11",
+          "why": "Amendments are cited in roman numerals: amend. XIV, not amend. 14.",
+          "required": true
+        },
+        {
+          "name": "section",
+          "label": "section",
+          "rule": "11",
+          "why": "The section, after the § symbol.",
+          "required": false
+        },
+        {
+          "name": "clause",
+          "label": "clause",
+          "rule": "11",
+          "why": "The clause, written cl. and the number.",
+          "required": false
+        }
+      ],
+      "templates": {
+        "law_review": "U.S. Const. amend. {amendment|roman}<<, § {section}>><<, cl. {clause}>>."
+      },
+      "example": {
+        "amendment": "XIV",
+        "section": "1"
+      },
+      "notes": []
+    },
+    {
+      "id": "state_const",
+      "label": "State constitution",
+      "family": "constitutions_rules",
+      "citation_type": "constitution",
+      "confidence": "medium",
+      "patterns": [
+        {
+          "regex": "(?P<state>District\\ of\\ Columbia|North\\ Carolina|South\\ Carolina|Massachusetts|New\\ Hampshire|West\\ Virginia|North\\ Dakota|Pennsylvania|Rhode\\ Island|South\\ Dakota|Connecticut|Mississippi|California|New\\ Jersey|New\\ Mexico|Washington|Louisiana|Minnesota|Tennessee|Wisconsin|Arkansas|Colorado|Delaware|Illinois|Kentucky|Maryland|Michigan|Missouri|Nebraska|New\\ York|Oklahoma|Virginia|Alabama|Arizona|Florida|Georgia|Indiana|Montana|Vermont|Wyoming|Alaska|Hawaii|Kansas|Nevada|Oregon|W\\.\\ Va\\.|Ariz\\.|Colo\\.|Conn\\.|Idaho|Maine|Mass\\.|Mich\\.|Minn\\.|Miss\\.|Mont\\.|Okla\\.|Tenn\\.|Texas|Wash\\.|Ala\\.|Ark\\.|Cal\\.|D\\.C\\.|Del\\.|Fla\\.|Haw\\.|Ill\\.|Ind\\.|Iowa|Kan\\.|N\\.C\\.|N\\.D\\.|N\\.H\\.|N\\.J\\.|N\\.M\\.|N\\.Y\\.|Neb\\.|Nev\\.|Ohio|R\\.I\\.|S\\.C\\.|S\\.D\\.|Tex\\.|Utah|Wis\\.|Wyo\\.|Ga\\.|Ky\\.|La\\.|Md\\.|Me\\.|Mo\\.|Or\\.|Pa\\.|Va\\.|Vt\\.)\\s*Const(?:itution|\\.)?\\s*,?\\s*art(?:icle|\\.)?\\s*(?P<article>[IVXLCivxlc]+|\\d{1,2})(?:\\s*,?\\s*(?:§+|sec(?:tion|\\.)?)\\s*(?P<section>\\d+))?",
+          "flags": "i",
+          "paste_only": false
+        }
+      ],
+      "fields": [
+        {
+          "name": "state",
+          "label": "state",
+          "rule": "11",
+          "why": "The state, abbreviated per Table T10.",
+          "required": true
+        },
+        {
+          "name": "article",
+          "label": "article number",
+          "rule": "11",
+          "why": "Articles are cited in roman numerals.",
+          "required": true
+        },
+        {
+          "name": "section",
+          "label": "section",
+          "rule": "11",
+          "why": "The section, after the § symbol.",
+          "required": false
+        }
+      ],
+      "templates": {
+        "law_review": "{state|state_abbr} Const. art. {article|roman}<<, § {section}>>."
+      },
+      "example": {
+        "state": "Washington",
+        "article": "I",
+        "section": "7"
+      },
+      "notes": [
+        "Amendments to a state constitution use \"amend.\" in place of \"art.\"; only articles are recognised here."
+      ]
+    },
+    {
+      "id": "fed_r_civ_p",
+      "label": "Federal Rules of Civil Procedure",
+      "family": "constitutions_rules",
+      "citation_type": "statute",
+      "confidence": "high",
+      "patterns": [
+        {
+          "regex": "Fed(?:eral|\\.)?\\s*R(?:ules?|\\.)?\\s*(?:of\\s+)?Civ(?:il|\\.)?\\s*P(?:rocedure|\\.)?\\s*(?P<rule>\\d+)(?P<sub>(?:\\([A-Za-z0-9]+\\))*)",
+          "flags": "i",
+          "paste_only": false
+        },
+        {
+          "regex": "\\bFRCP\\s*(?P<rule>\\d+)(?P<sub>(?:\\([A-Za-z0-9]+\\))*)",
+          "flags": "i",
+          "paste_only": false
+        }
+      ],
+      "fields": [
+        {
+          "name": "rule",
+          "label": "rule number",
+          "rule": "12.9.3",
+          "why": "The number of the rule.",
+          "required": true
+        },
+        {
+          "name": "sub",
+          "label": "subdivision",
+          "rule": "12.9.3",
+          "why": "A subdivision such as (b)(6), written without spaces.",
+          "required": false
+        }
+      ],
+      "templates": {
+        "law_review": "Fed. R. Civ. P. {rule}<<{sub}>>."
+      },
+      "example": {
+        "rule": "12",
+        "sub": "(b)(6)"
+      },
+      "notes": []
+    },
+    {
+      "id": "fed_r_crim_p",
+      "label": "Federal Rules of Criminal Procedure",
+      "family": "constitutions_rules",
+      "citation_type": "statute",
+      "confidence": "high",
+      "patterns": [
+        {
+          "regex": "Fed(?:eral|\\.)?\\s*R(?:ules?|\\.)?\\s*(?:of\\s+)?Crim(?:inal|\\.)?\\s*P(?:rocedure|\\.)?\\s*(?P<rule>\\d+)(?P<sub>(?:\\([A-Za-z0-9]+\\))*)",
+          "flags": "i",
+          "paste_only": false
+        },
+        {
+          "regex": "\\bFRCrP\\s*(?P<rule>\\d+)(?P<sub>(?:\\([A-Za-z0-9]+\\))*)",
+          "flags": "i",
+          "paste_only": false
+        }
+      ],
+      "fields": [
+        {
+          "name": "rule",
+          "label": "rule number",
+          "rule": "12.9.3",
+          "why": "The number of the rule.",
+          "required": true
+        },
+        {
+          "name": "sub",
+          "label": "subdivision",
+          "rule": "12.9.3",
+          "why": "A subdivision such as (b)(6), written without spaces.",
+          "required": false
+        }
+      ],
+      "templates": {
+        "law_review": "Fed. R. Crim. P. {rule}<<{sub}>>."
+      },
+      "example": {
+        "rule": "7",
+        "sub": "(b)"
+      },
+      "notes": []
+    },
+    {
+      "id": "fed_r_evid",
+      "label": "Federal Rules of Evidence",
+      "family": "constitutions_rules",
+      "citation_type": "statute",
+      "confidence": "high",
+      "patterns": [
+        {
+          "regex": "Fed(?:eral|\\.)?\\s*R(?:ules?|\\.)?\\s*(?:of\\s+)?Evid(?:ence|\\.)?\\s*(?P<rule>\\d+)(?P<sub>(?:\\([A-Za-z0-9]+\\))*)",
+          "flags": "i",
+          "paste_only": false
+        },
+        {
+          "regex": "\\bFRE\\s*(?P<rule>\\d+)(?P<sub>(?:\\([A-Za-z0-9]+\\))*)",
+          "flags": "i",
+          "paste_only": false
+        }
+      ],
+      "fields": [
+        {
+          "name": "rule",
+          "label": "rule number",
+          "rule": "12.9.3",
+          "why": "The number of the rule.",
+          "required": true
+        },
+        {
+          "name": "sub",
+          "label": "subdivision",
+          "rule": "12.9.3",
+          "why": "A subdivision such as (b)(6), written without spaces.",
+          "required": false
+        }
+      ],
+      "templates": {
+        "law_review": "Fed. R. Evid. {rule}<<{sub}>>."
+      },
+      "example": {
+        "rule": "801",
+        "sub": "(d)(2)"
+      },
+      "notes": []
+    },
+    {
+      "id": "fed_r_app_p",
+      "label": "Federal Rules of Appellate Procedure",
+      "family": "constitutions_rules",
+      "citation_type": "statute",
+      "confidence": "high",
+      "patterns": [
+        {
+          "regex": "Fed(?:eral|\\.)?\\s*R(?:ules?|\\.)?\\s*(?:of\\s+)?App(?:ellate|\\.)?\\s*P(?:rocedure|\\.)?\\s*(?P<rule>\\d+)(?P<sub>(?:\\([A-Za-z0-9]+\\))*)",
+          "flags": "i",
+          "paste_only": false
+        },
+        {
+          "regex": "\\bFRAP\\s*(?P<rule>\\d+)(?P<sub>(?:\\([A-Za-z0-9]+\\))*)",
+          "flags": "i",
+          "paste_only": false
+        }
+      ],
+      "fields": [
+        {
+          "name": "rule",
+          "label": "rule number",
+          "rule": "12.9.3",
+          "why": "The number of the rule.",
+          "required": true
+        },
+        {
+          "name": "sub",
+          "label": "subdivision",
+          "rule": "12.9.3",
+          "why": "A subdivision such as (b)(6), written without spaces.",
+          "required": false
+        }
+      ],
+      "templates": {
+        "law_review": "Fed. R. App. P. {rule}<<{sub}>>."
+      },
+      "example": {
+        "rule": "4",
+        "sub": "(a)(1)"
+      },
+      "notes": []
+    },
+    {
+      "id": "public_law",
+      "label": "Federal session law (Public Law)",
+      "family": "statutes",
+      "citation_type": "statute",
+      "confidence": "medium",
+      "patterns": [
+        {
+          "regex": "^(?:See(?:\\s+also)?,?\\s+)?(?P<act>[A-Z][^,()]{3,120}?),\\s*Pub(?:lic|\\.)?\\s*L(?:aw|\\.)?\\s*(?:No\\.?\\s*)?(?P<pl>\\d{2,3}-\\d{1,4}),\\s*(?P<volume>\\d{1,3})\\s*Stat\\.?\\s*(?P<page>\\d+)(?:,\\s*(?P<pin>\\d+))?(?:\\s*\\((?P<year>\\d{4})\\))?",
+          "flags": "i",
+          "paste_only": true
+        },
+        {
+          "regex": "Pub(?:lic|\\.)?\\s*L(?:aw|\\.)?\\s*(?:No\\.?\\s*)?(?P<pl>\\d{2,3}-\\d{1,4}),\\s*(?P<volume>\\d{1,3})\\s*Stat\\.?\\s*(?P<page>\\d+)(?:,\\s*(?P<pin>\\d+))?(?:\\s*\\((?P<year>\\d{4})\\))?",
+          "flags": "i",
+          "paste_only": false
+        }
+      ],
+      "fields": [
+        {
+          "name": "act",
+          "label": "name of the Act",
+          "rule": "12.4",
+          "why": "The Act's name, when you are citing it by name.",
+          "required": false
+        },
+        {
+          "name": "pl",
+          "label": "Public Law number",
+          "rule": "12.4",
+          "why": "The Congress and law number, such as 111-148.",
+          "required": true
+        },
+        {
+          "name": "volume",
+          "label": "Statutes at Large volume",
+          "rule": "12.4",
+          "why": "The volume of the Statutes at Large.",
+          "required": true
+        },
+        {
+          "name": "page",
+          "label": "first page",
+          "rule": "12.4",
+          "why": "The page the law begins on in the Statutes at Large.",
+          "required": true
+        },
+        {
+          "name": "pin",
+          "label": "pinpoint page",
+          "rule": "12.4",
+          "why": "The page you are relying on.",
+          "required": false
+        },
+        {
+          "name": "year",
+          "label": "year",
+          "rule": "12.4",
+          "why": "The year of enactment. Leave it out only if the Act's name already contains the year.",
+          "required": false
+        }
+      ],
+      "templates": {
+        "law_review": "<<{act}, >>Pub. L. No. {pl}, {volume} Stat. {page}<<, {pin}>><< ({year})>>."
+      },
+      "example": {
+        "act": "Department of Transportation Act",
+        "pl": "89-670",
+        "volume": "80",
+        "page": "931",
+        "year": "1966"
+      },
+      "notes": [
+        "Cite the codified statute (U.S.C.) instead unless the law is too new, uncodified, or repealed.",
+        "The year is required unless the Act's name already includes it, so it is not demanded here."
+      ]
+    },
+    {
+      "id": "cfr",
+      "label": "Code of Federal Regulations",
+      "family": "admin",
+      "citation_type": "regulation",
+      "confidence": "high",
+      "patterns": [
+        {
+          "regex": "(?P<title>\\d{1,2})\\s*C\\.?\\s?F\\.?\\s?R\\.?\\s*(?:§+)?\\s*(?P<section>\\d+(?:\\.\\d+)?)(?P<sub>(?:\\([A-Za-z0-9]+\\))*)(?:\\s*\\((?P<year>\\d{4})\\))?",
+          "flags": "i",
+          "paste_only": false
+        }
+      ],
+      "fields": [
+        {
+          "name": "title",
+          "label": "title number",
+          "rule": "14.2",
+          "why": "The C.F.R. title, the number before C.F.R.",
+          "required": true
+        },
+        {
+          "name": "section",
+          "label": "section",
+          "rule": "14.2",
+          "why": "The section, after the § symbol.",
+          "required": true
+        },
+        {
+          "name": "sub",
+          "label": "subdivision",
+          "rule": "14.2",
+          "why": "A subdivision such as (a)(1), written without spaces.",
+          "required": false
+        },
+        {
+          "name": "year",
+          "label": "year",
+          "rule": "14.2",
+          "why": "The year of the C.F.R. edition. Unlike the U.S. Code, it is required.",
+          "required": true
+        }
+      ],
+      "templates": {
+        "law_review": "{title} C.F.R. § {section}<<{sub}>> ({year})."
+      },
+      "example": {
+        "title": "40",
+        "section": "261.4",
+        "sub": "(b)",
+        "year": "2021"
+      },
+      "notes": [
+        "The year is the year of the C.F.R. edition you consulted, not the year the rule was issued."
+      ]
+    },
+    {
+      "id": "federal_register",
+      "label": "Federal Register",
+      "family": "admin",
+      "citation_type": "regulation",
+      "confidence": "high",
+      "patterns": [
+        {
+          "regex": "^(?:See(?:\\s+also)?,?\\s+)?(?P<name>[A-Z][^()]{3,160}?),\\s*(?P<volume>\\d{1,3})\\s*Fed\\.?\\s*Reg\\.?\\s*(?P<page>\\d{1,3}(?:,\\d{3})+|\\d+)(?:,\\s*(?P<pin>\\d{1,3}(?:,\\d{3})+|\\d+))?(?:\\s*\\((?P<date>(?:[A-Za-z]{3,9}\\.?\\s*\\d{1,2},?\\s*\\d{4}|\\d{4}-\\d{2}-\\d{2}))\\))?",
+          "flags": "i",
+          "paste_only": true
+        },
+        {
+          "regex": "(?P<volume>\\d{1,3})\\s*Fed\\.?\\s*Reg\\.?\\s*(?P<page>\\d{1,3}(?:,\\d{3})+|\\d+)(?:,\\s*(?P<pin>\\d{1,3}(?:,\\d{3})+|\\d+))?(?:\\s*\\((?P<date>(?:[A-Za-z]{3,9}\\.?\\s*\\d{1,2},?\\s*\\d{4}|\\d{4}-\\d{2}-\\d{2}))\\))?",
+          "flags": "i",
+          "paste_only": false
+        }
+      ],
+      "fields": [
+        {
+          "name": "name",
+          "label": "name of the rule",
+          "rule": "14.2",
+          "why": "The title of the rule or notice.",
+          "required": false
+        },
+        {
+          "name": "volume",
+          "label": "volume number",
+          "rule": "14.2",
+          "why": "The Federal Register volume.",
+          "required": true
+        },
+        {
+          "name": "page",
+          "label": "first page",
+          "rule": "14.2",
+          "why": "The page the document begins on.",
+          "required": true
+        },
+        {
+          "name": "pin",
+          "label": "pinpoint page",
+          "rule": "14.2",
+          "why": "The page you are relying on.",
+          "required": false
+        },
+        {
+          "name": "date",
+          "label": "full date",
+          "rule": "14.2",
+          "why": "The complete date of publication. A year alone is not enough.",
+          "required": true
+        }
+      ],
+      "templates": {
+        "law_review": "<<{name}, >>{volume} Fed. Reg. {page|thousands}<<, {pin|thousands}>> ({date|bbdate})."
+      },
+      "example": {
+        "name": "Importation of Fruits and Vegetables",
+        "volume": "60",
+        "page": "50379",
+        "pin": "50381",
+        "date": "Sept. 29, 1995"
+      },
+      "notes": []
+    },
+    {
+      "id": "executive_order",
+      "label": "Executive order",
+      "family": "admin",
+      "citation_type": "regulation",
+      "confidence": "medium",
+      "priority": 5,
+      "patterns": [
+        {
+          "regex": "(?:Executive\\s+Order|Exec\\.?\\s*Order)\\s*(?:No\\.?\\s*)?(?P<number>\\d{1,3}(?:,\\d{3})+|\\d{3,5})(?:,\\s*(?P<volume>\\d{1,3})\\s*Fed\\.?\\s*Reg\\.?\\s*(?P<page>\\d{1,3}(?:,\\d{3})+|\\d+)(?:\\s*\\((?P<date>(?:[A-Za-z]{3,9}\\.?\\s*\\d{1,2},?\\s*\\d{4}|\\d{4}-\\d{2}-\\d{2}))\\))?)?",
+          "flags": "i",
+          "paste_only": false
+        }
+      ],
+      "fields": [
+        {
+          "name": "number",
+          "label": "order number",
+          "rule": "14.2",
+          "why": "The executive order number.",
+          "required": true
+        },
+        {
+          "name": "volume",
+          "label": "Federal Register volume",
+          "rule": "14.2",
+          "why": "The volume where the order was published.",
+          "required": true
+        },
+        {
+          "name": "page",
+          "label": "Federal Register page",
+          "rule": "14.2",
+          "why": "The page where the order begins.",
+          "required": true
+        },
+        {
+          "name": "date",
+          "label": "full date",
+          "rule": "14.2",
+          "why": "The complete date of publication.",
+          "required": true
+        }
+      ],
+      "templates": {
+        "law_review": "Exec. Order No. {number|thousands}, {volume} Fed. Reg. {page|thousands} ({date|bbdate})."
+      },
+      "example": {
+        "number": "13769",
+        "volume": "82",
+        "page": "8977",
+        "date": "Feb. 1, 2017"
+      },
+      "notes": [
+        "Older orders are cited to 3 C.F.R. instead of the Federal Register; that form is not covered here."
+      ]
+    },
+    {
+      "id": "bill",
+      "label": "Federal bill (unenacted)",
+      "family": "legislative",
+      "citation_type": "legislative",
+      "confidence": "high",
+      "patterns": [
+        {
+          "regex": "(?<![A-Za-z.])(?P<chamber>H\\.?\\s?R\\.?|S\\.?)\\s*(?P<number>\\d{1,5}),?\\s*(?P<congress>\\d{2,3})(?:st|nd|rd|th|d)?\\s*Cong\\.?(?:\\s*§+\\s*(?P<section>\\d+))?(?:\\s*\\((?P<year>\\d{4})\\))?",
+          "flags": "i",
+          "paste_only": false
+        }
+      ],
+      "fields": [
+        {
+          "name": "chamber",
+          "label": "chamber",
+          "rule": "13.2",
+          "why": "H.R. for the House, S. for the Senate.",
+          "required": true
+        },
+        {
+          "name": "number",
+          "label": "bill number",
+          "rule": "13.2",
+          "why": "The number of the bill.",
+          "required": true
+        },
+        {
+          "name": "congress",
+          "label": "Congress",
+          "rule": "13.2",
+          "why": "Which Congress, such as 117th.",
+          "required": true
+        },
+        {
+          "name": "section",
+          "label": "section",
+          "rule": "13.2",
+          "why": "A section of the bill, if you are citing one.",
+          "required": false
+        },
+        {
+          "name": "year",
+          "label": "year",
+          "rule": "13.2",
+          "why": "The year the bill was introduced.",
+          "required": true
+        }
+      ],
+      "templates": {
+        "law_review": "{chamber|chamber} {number}, {congress|ordinal} Cong.<< § {section}>> ({year})."
+      },
+      "example": {
+        "chamber": "S.",
+        "number": "516",
+        "congress": "105",
+        "section": "2",
+        "year": "1997"
+      },
+      "notes": [
+        "Resolutions (H.J. Res., S. Con. Res. and the like) use forms that could not be confirmed and are not covered."
+      ]
+    },
+    {
+      "id": "committee_report",
+      "label": "Congressional committee report",
+      "family": "legislative",
+      "citation_type": "legislative",
+      "confidence": "high",
+      "patterns": [
+        {
+          "regex": "(?<![A-Za-z.])(?P<chamber>H\\.?\\s?R\\.?|S\\.?)\\s*Rep\\.?\\s*(?:No\\.?\\s*)?(?P<number>\\d{2,3}-\\d{1,4})(?:,\\s*(?:at\\s+)?(?P<pin>\\d+(?:-\\d+)?))?(?:\\s*\\((?P<year>\\d{4})\\))?",
+          "flags": "i",
+          "paste_only": false
+        }
+      ],
+      "fields": [
+        {
+          "name": "chamber",
+          "label": "chamber",
+          "rule": "13.4",
+          "why": "H.R. for a House report, S. for a Senate report.",
+          "required": true
+        },
+        {
+          "name": "number",
+          "label": "report number",
+          "rule": "13.4",
+          "why": "The Congress and report number, such as 116-123.",
+          "required": true
+        },
+        {
+          "name": "pin",
+          "label": "pinpoint page",
+          "rule": "13.4",
+          "why": "The page you are relying on.",
+          "required": false
+        },
+        {
+          "name": "year",
+          "label": "year",
+          "rule": "13.4",
+          "why": "The year the report was issued.",
+          "required": true
+        }
+      ],
+      "templates": {
+        "law_review": "{chamber|chamber} Rep. No. {number}<<, at {pin}>> ({year})."
+      },
+      "example": {
+        "chamber": "H.R.",
+        "number": "109-447",
+        "year": "2006"
+      },
+      "notes": []
+    },
+    {
+      "id": "cong_rec_daily",
+      "label": "Congressional Record (daily edition)",
+      "family": "legislative",
+      "citation_type": "legislative",
+      "confidence": "high",
+      "patterns": [
+        {
+          "regex": "(?P<volume>\\d{2,3})\\s*Cong\\.?\\s*Rec\\.?\\s*(?P<page>[A-Z]\\d[\\d,]*|\\d[\\d,]*)\\s*\\(\\s*daily\\s*ed\\.?\\s*(?P<date>[A-Za-z]{3,9}\\.?\\s*\\d{1,2},?\\s*\\d{4})\\s*\\)",
+          "flags": "i",
+          "paste_only": false
+        }
+      ],
+      "fields": [
+        {
+          "name": "volume",
+          "label": "volume number",
+          "rule": "13.5",
+          "why": "The Congressional Record volume.",
+          "required": true
+        },
+        {
+          "name": "page",
+          "label": "page",
+          "rule": "13.5",
+          "why": "The page, including its letter prefix in the daily edition.",
+          "required": true
+        },
+        {
+          "name": "date",
+          "label": "full date",
+          "rule": "13.5",
+          "why": "The complete date of the daily issue.",
+          "required": true
+        }
+      ],
+      "templates": {
+        "law_review": "{volume} Cong. Rec. {page|thousands} (daily ed. {date|bbdate})."
+      },
+      "example": {
+        "volume": "168",
+        "page": "H3",
+        "date": "Jan. 6, 2022"
+      },
+      "notes": [
+        "Cite the bound edition once it is published."
+      ]
+    },
+    {
+      "id": "cong_rec_bound",
+      "label": "Congressional Record (bound edition)",
+      "family": "legislative",
+      "citation_type": "legislative",
+      "confidence": "high",
+      "patterns": [
+        {
+          "regex": "(?P<volume>\\d{2,3})\\s*Cong\\.?\\s*Rec\\.?\\s*(?P<page>\\d[\\d,]*)(?:\\s*\\((?P<year>\\d{4})\\))?",
+          "flags": "i",
+          "paste_only": false
+        }
+      ],
+      "fields": [
+        {
+          "name": "volume",
+          "label": "volume number",
+          "rule": "13.5",
+          "why": "The Congressional Record volume.",
+          "required": true
+        },
+        {
+          "name": "page",
+          "label": "page",
+          "rule": "13.5",
+          "why": "The page number.",
+          "required": true
+        },
+        {
+          "name": "year",
+          "label": "year",
+          "rule": "13.5",
+          "why": "The year of the bound volume.",
+          "required": true
+        }
+      ],
+      "templates": {
+        "law_review": "{volume} Cong. Rec. {page|thousands} ({year})."
+      },
+      "example": {
+        "volume": "123",
+        "page": "12455",
+        "year": "1977"
+      },
+      "notes": []
+    },
+    {
+      "id": "agency_report",
+      "label": "Government report (GAO, CRS)",
+      "family": "reports",
+      "citation_type": "other",
+      "confidence": "high",
+      "patterns": [
+        {
+          "regex": "(?:^|(?<=[.;:!?)]\\s)|(?<=\\n)|(?<=See )|(?<=See also )|(?<=Cf\\. )|(?<=Compare )|(?<=But see )|(?<=Accord )|(?<=\\bin )|(?<=\\bby )|(?<=\\bfrom )|(?<=\\bto )|(?<=\\bwith )|(?<=\\bat )|(?<=\\bof )|(?<=\\band ))(?!(?:See|also|Cf|Compare|But|see|Accord)\\b)(?P<author>[A-Z][A-Za-z'&.\\-]*(?:\\s+(?:(?:of|for|and|the|on|&)\\s+)*[A-Z][A-Za-z'&.\\-]*){0,9}?)\\s*,\\s*(?P<number>GAO-\\d{2}-\\d+[A-Za-z]*|R[LS]?\\d{5}|IF\\d{5}|IN\\d{5})\\s*,\\s*(?P<title>[^()]+?)\\s*\\((?P<year>\\d{4})\\)",
+          "flags": "",
+          "paste_only": false
+        },
+        {
+          "regex": "^(?:See\\s+(?:also\\s+)?)?(?P<author>[A-Z][A-Za-z'&.\\-]*(?:\\s+(?:(?:of|for|and|the|on|&)\\s+)*[A-Z][A-Za-z'&.\\-]*){0,9}?)\\s*,\\s*(?P<number>GAO-\\d{2}-\\d+[A-Za-z]*|R[LS]?\\d{5}|IF\\d{5}|IN\\d{5})\\s*,\\s*(?P<title>[A-Za-z0-9\\\"'][^()\\n]*?[A-Za-z0-9\\\"'?!])\\.?\\s*$",
+          "flags": "",
+          "paste_only": true
+        },
+        {
+          "regex": "(?P<number>GAO-\\d{2}-\\d+[A-Za-z]*)",
+          "flags": "",
+          "paste_only": true
+        }
+      ],
+      "fields": [
+        {
+          "name": "author",
+          "label": "agency",
+          "rule": "15.1",
+          "why": "The agency that issued the report, abbreviated per Table T6.",
+          "required": true
+        },
+        {
+          "name": "number",
+          "label": "report number",
+          "rule": "15",
+          "why": "The agency's own number for the report, such as GAO-16-552.",
+          "required": true
+        },
+        {
+          "name": "title",
+          "label": "title",
+          "rule": "15",
+          "why": "The full title as printed on the report, capitalized per Rule 8.",
+          "required": true
+        },
+        {
+          "name": "year",
+          "label": "year",
+          "rule": "15",
+          "why": "The year the report was issued.",
+          "required": true
+        }
+      ],
+      "templates": {
+        "law_review": "{author|institution|smallcaps}, {number}, {title|titlecase|smallcaps} ({year}).",
+        "practitioner": "{author|decaps|institution}, {number}, {title|decaps|titlecase|italic} ({year})."
+      },
+      "example": {
+        "author": "U.S. Gov't Accountability Off.",
+        "number": "GAO-16-552",
+        "title": "Firearms Data: ATF Did Not Always Comply with the Appropriations Act Restrictions",
+        "year": "2016"
+      },
+      "notes": [
+        "The agency name is kept as you typed it, apart from standard Table T6 abbreviations.",
+        "Text typed in capitals is converted to ordinary case in court-document style. Acronyms the tool does not recognise may need their capitals restored."
+      ]
+    },
+    {
+      "id": "newspaper_article",
+      "label": "Newspaper article",
+      "family": "periodicals",
+      "citation_type": "newspaper",
+      "confidence": "medium",
+      "patterns": [
+        {
+          "regex": "^(?:(?P<author>[A-Z][A-Za-z.'\\-]+(?:\\s+[A-Z][A-Za-z.'\\-]+){1,3}(?:\\s*(?:&|and)\\s*[A-Z][A-Za-z.'\\-]+(?:\\s+[A-Z][A-Za-z.'\\-]+){1,3})?),\\s*)?(?P<title>.{3,200}?),\\s*(?P<paper>(?:The\\s+)?(?:New York Times|N\\.?\\s?Y\\.? Times|Washington Post|Wash\\. Post|Wall Street Journal|Wall St\\. J\\.|Los Angeles Times|L\\.?\\s?A\\.? Times|USA Today|Boston Globe|Bos\\. Globe|Chicago Tribune|Chi\\. Trib\\.)),\\s*(?P<date>[A-Za-z]{3,9}\\.?\\s*\\d{1,2},?\\s*\\d{4}),\\s*at\\s*(?P<page>[A-Z]?\\d{1,3})",
+          "flags": "i",
+          "paste_only": true
+        }
+      ],
+      "fields": [
+        {
+          "name": "author",
+          "label": "author",
+          "rule": "16",
+          "why": "The reporter's full name, if the article is signed.",
+          "required": false
+        },
+        {
+          "name": "title",
+          "label": "article title",
+          "rule": "16",
+          "why": "The headline, capitalized per Rule 8.",
+          "required": true
+        },
+        {
+          "name": "paper",
+          "label": "newspaper",
+          "rule": "16",
+          "why": "The newspaper's name, abbreviated, without a leading \"The\".",
+          "required": true
+        },
+        {
+          "name": "date",
+          "label": "full date",
+          "rule": "16",
+          "why": "The full date the article ran.",
+          "required": true
+        },
+        {
+          "name": "page",
+          "label": "page",
+          "rule": "16",
+          "why": "The page, with its section letter, such as A1.",
+          "required": true
+        }
+      ],
+      "templates": {
+        "law_review": "<<{author}, >>*{title|titlecase}*, {paper|paper|smallcaps}, {date|bbdate}, at {page}.",
+        "practitioner": "<<{author}, >>*{title|titlecase}*, {paper|paper}, {date|bbdate}, at {page}."
+      },
+      "example": {
+        "author": "Jane Doe",
+        "title": "Court Rules on Speech Case",
+        "paper": "N.Y. Times",
+        "date": "June 15, 1990",
+        "page": "A1"
+      },
+      "notes": [
+        "Online-only articles use a different form, with a URL; it is not covered here."
+      ]
+    },
+    {
+      "id": "restatement",
+      "label": "Restatement",
+      "family": "model_codes",
+      "citation_type": "other",
+      "confidence": "medium",
+      "patterns": [
+        {
+          "regex": "Restatement\\s*\\((?P<series>First|Second|Third|Fourth)\\)\\s*(?:of\\s+)?(?P<subject>[A-Za-z][A-Za-z&'\\- ]{2,70}?)\\s*§+\\s*(?P<section>[\\w.\\-]+)(?:\\s*cmt\\.?\\s*(?P<comment>[A-Za-z0-9]+))?(?:\\s*\\((?:Am\\.?\\s*L\\.?\\s*Inst\\.?|A\\.?L\\.?I\\.?)\\s*(?P<year>\\d{4})\\))?",
+          "flags": "i",
+          "paste_only": false
+        }
+      ],
+      "fields": [
+        {
+          "name": "series",
+          "label": "series",
+          "rule": "12",
+          "why": "First, Second, Third or Fourth.",
+          "required": true
+        },
+        {
+          "name": "subject",
+          "label": "subject",
+          "rule": "12",
+          "why": "The subject, such as Torts or Contracts.",
+          "required": true
+        },
+        {
+          "name": "section",
+          "label": "section",
+          "rule": "12",
+          "why": "The section, after the § symbol.",
+          "required": true
+        },
+        {
+          "name": "comment",
+          "label": "comment",
+          "rule": "12",
+          "why": "A comment, written cmt. and its letter.",
+          "required": false
+        },
+        {
+          "name": "year",
+          "label": "year",
+          "rule": "12",
+          "why": "The year the Restatement was adopted.",
+          "required": true
+        }
+      ],
+      "templates": {
+        "law_review": "RESTATEMENT ({series|upper}) OF {subject|upper} § {section}<< cmt. {comment}>> (Am. L. Inst. {year}).",
+        "practitioner": "Restatement ({series|titlecase}) of {subject|titlecase_mid} § {section}<< cmt. {comment}>> (Am. L. Inst. {year})."
+      },
+      "example": {
+        "series": "Second",
+        "subject": "Torts",
+        "section": "402A",
+        "year": "1965"
+      },
+      "notes": [
+        "The 22nd edition may abbreviate the institution as A.L.I.; confirm in your edition."
+      ]
+    },
+    {
+      "id": "model_penal_code",
+      "label": "Model Penal Code",
+      "family": "model_codes",
+      "citation_type": "other",
+      "confidence": "medium",
+      "patterns": [
+        {
+          "regex": "Model\\s*Penal\\s*Code\\s*§+\\s*(?P<section>[\\w.\\-]+)(?:\\s*cmt\\.?\\s*(?P<comment>[A-Za-z0-9]+))?(?:\\s*\\((?:Am\\.?\\s*L\\.?\\s*Inst\\.?|A\\.?L\\.?I\\.?)\\s*(?P<year>\\d{4})\\))?",
+          "flags": "i",
+          "paste_only": false
+        }
+      ],
+      "fields": [
+        {
+          "name": "section",
+          "label": "section",
+          "rule": "12",
+          "why": "The section, after the § symbol.",
+          "required": true
+        },
+        {
+          "name": "comment",
+          "label": "comment",
+          "rule": "12",
+          "why": "A comment, written cmt. and its letter.",
+          "required": false
+        },
+        {
+          "name": "year",
+          "label": "year",
+          "rule": "12",
+          "why": "The year of the version you are citing.",
+          "required": true
+        }
+      ],
+      "templates": {
+        "law_review": "MODEL PENAL CODE § {section}<< cmt. {comment}>> (Am. L. Inst. {year}).",
+        "practitioner": "Model Penal Code § {section}<< cmt. {comment}>> (Am. L. Inst. {year})."
+      },
+      "example": {
+        "section": "2.02",
+        "year": "1985"
+      },
+      "notes": [
+        "The 22nd edition may abbreviate the institution as A.L.I.; confirm in your edition."
+      ]
+    },
+    {
+      "id": "ucc",
+      "label": "Uniform Commercial Code",
+      "family": "model_codes",
+      "citation_type": "other",
+      "confidence": "medium",
+      "patterns": [
+        {
+          "regex": "U\\.?\\s?C\\.?\\s?C\\.?\\s*§+\\s*(?P<section>\\d[\\w.\\-]*)(?:\\s*\\(Am\\.?\\s*L\\.?\\s*Inst\\.?\\s*&\\s*Unif\\.?\\s*L\\.?\\s*Comm['’]n\\s*(?P<year>\\d{4})\\))?",
+          "flags": "i",
+          "paste_only": false
+        }
+      ],
+      "fields": [
+        {
+          "name": "section",
+          "label": "section",
+          "rule": "12",
+          "why": "The section, such as 2-207.",
+          "required": true
+        },
+        {
+          "name": "year",
+          "label": "year",
+          "rule": "12",
+          "why": "The year of the version you are citing.",
+          "required": true
+        }
+      ],
+      "templates": {
+        "law_review": "U.C.C. § {section} (Am. L. Inst. & Unif. L. Comm'n {year})."
+      },
+      "example": {
+        "section": "2-207",
+        "year": "1977"
+      },
+      "notes": []
+    },
+    {
+      "id": "hearing",
+      "label": "Congressional hearing",
+      "family": "legislative",
+      "citation_type": "legislative",
+      "confidence": "medium",
+      "patterns": [],
+      "fields": [
+        {
+          "name": "title",
+          "label": "hearing title",
+          "rule": "13.3",
+          "why": "The title of the hearing.",
+          "required": true
+        },
+        {
+          "name": "bill",
+          "label": "bill number",
+          "rule": "13.3",
+          "why": "The bill the hearing concerned, if any.",
+          "required": false
+        },
+        {
+          "name": "committee",
+          "label": "committee",
+          "rule": "13.3",
+          "why": "The committee, abbreviated.",
+          "required": true
+        },
+        {
+          "name": "congress",
+          "label": "Congress",
+          "rule": "13.3",
+          "why": "Which Congress, such as 117th.",
+          "required": true
+        },
+        {
+          "name": "page",
+          "label": "page",
+          "rule": "13.3",
+          "why": "The page you are relying on.",
+          "required": false
+        },
+        {
+          "name": "year",
+          "label": "year",
+          "rule": "13.3",
+          "why": "The year of the hearing.",
+          "required": true
+        }
+      ],
+      "templates": {
+        "law_review": "{title|titlecase}<<: Hearing on {bill}>> Before the {committee}, {congress|ordinal} Cong.<< {page}>> ({year}).",
+        "practitioner": "*{title|titlecase}*<<: Hearing on {bill}>> Before the {committee}, {congress|ordinal} Cong.<< {page}>> ({year})."
+      },
+      "example": {
+        "title": "The Safe Port Act",
+        "bill": "H.R. 4954",
+        "committee": "Subcomm. on Economic Security, Infrastructure Protection, and Cybersecurity of the H. Comm. on Homeland Security",
+        "congress": "109",
+        "year": "2006"
+      },
+      "notes": [
+        "This format comes from search summaries of law library guides, not from the Bluebook itself. Treat it as a starting point and confirm it against your edition.",
+        "Subcommittee and committee names are abbreviated per Table T6."
+      ]
+    },
+    {
+      "id": "state_statute",
+      "label": "State statute",
+      "family": "statutes",
+      "citation_type": "statute",
+      "confidence": "low",
+      "patterns": [],
+      "fields": [
+        {
+          "name": "code",
+          "label": "code name",
+          "rule": "12",
+          "why": "The state code, abbreviated as in Table T1.",
+          "required": true
+        },
+        {
+          "name": "section",
+          "label": "section",
+          "rule": "12",
+          "why": "The section, after the § symbol.",
+          "required": true
+        },
+        {
+          "name": "year",
+          "label": "year",
+          "rule": "12",
+          "why": "The year of the code. Unlike the federal code, it is required for state codes.",
+          "required": true
+        }
+      ],
+      "templates": {
+        "law_review": "{code} § {section} ({year})."
+      },
+      "example": {
+        "code": "Ohio Rev. Code Ann.",
+        "section": "3503.06",
+        "year": "2022"
+      },
+      "notes": [
+        "This format comes from search summaries of law library guides, not from the Bluebook itself. Treat it as a starting point and confirm it against your edition.",
+        "Table T1 gives each state's code name and whether a publisher appears in the parenthetical."
+      ]
+    },
+    {
+      "id": "treaty_bilateral",
+      "label": "Treaty (bilateral)",
+      "family": "other",
+      "citation_type": "other",
+      "confidence": "low",
+      "patterns": [],
+      "fields": [
+        {
+          "name": "name",
+          "label": "name of the agreement",
+          "rule": "21.4",
+          "why": "The title of the treaty.",
+          "required": true
+        },
+        {
+          "name": "parties",
+          "label": "parties",
+          "rule": "21.4",
+          "why": "The countries, joined by a dash and abbreviated.",
+          "required": true
+        },
+        {
+          "name": "date",
+          "label": "date of signing",
+          "rule": "21.4",
+          "why": "The full date the treaty was signed.",
+          "required": true
+        },
+        {
+          "name": "source",
+          "label": "treaty source",
+          "rule": "21.4",
+          "why": "Where it is published, such as T.I.A.S. No. 12345.",
+          "required": true
+        }
+      ],
+      "templates": {
+        "law_review": "{name}, {parties}, {date|bbdate}, {source}."
+      },
+      "example": {
+        "name": "Agreement on Trade",
+        "parties": "U.S.-U.K.",
+        "date": "Mar. 3, 1990",
+        "source": "T.I.A.S. No. 11,000"
+      },
+      "notes": [
+        "This format comes from search summaries of law library guides, not from the Bluebook itself. Treat it as a starting point and confirm it against your edition.",
+        "The source order changed between the 21st and 22nd editions."
+      ]
+    },
+    {
+      "id": "record_cite",
+      "label": "Record citation (brief)",
+      "family": "other",
+      "citation_type": "other",
+      "confidence": "low",
+      "patterns": [],
+      "fields": [
+        {
+          "name": "record",
+          "label": "record abbreviation",
+          "rule": "B17",
+          "why": "The record's abbreviation, such as J.A. or R.",
+          "required": true
+        },
+        {
+          "name": "page",
+          "label": "page",
+          "rule": "B17",
+          "why": "The page of the record.",
+          "required": true
+        }
+      ],
+      "templates": {
+        "law_review": "{record} at {page}."
+      },
+      "example": {
+        "record": "J.A.",
+        "page": "12"
+      },
+      "notes": [
+        "This format comes from search summaries of law library guides, not from the Bluebook itself. Treat it as a starting point and confirm it against your edition.",
+        "Used in briefs and court documents (Bluepages), not in law review footnotes."
+      ]
+    }
+  ],
+  "families": [
+    {
+      "id": "constitutions_rules",
+      "label": "Constitutions and court rules"
+    },
+    {
+      "id": "statutes",
+      "label": "Statutes and session laws"
+    },
+    {
+      "id": "admin",
+      "label": "Regulations and executive materials"
+    },
+    {
+      "id": "legislative",
+      "label": "Legislative materials"
+    },
+    {
+      "id": "reports",
+      "label": "Reports"
+    },
+    {
+      "id": "periodicals",
+      "label": "Newspapers and periodicals"
+    },
+    {
+      "id": "model_codes",
+      "label": "Restatements and model codes"
+    },
+    {
+      "id": "other",
+      "label": "Treaties, court documents and unpublished works"
+    }
+  ],
+  "rules": {
+    "8": "Capitalization",
+    "10": "Cases",
+    "10.1": "Basic Citation Forms",
+    "10.2": "Case Names",
+    "10.3": "Reporters and Services",
+    "10.4": "Court and Jurisdiction",
+    "10.5": "Date or Year",
+    "10.7": "Prior and Subsequent History",
+    "11": "Constitutions",
+    "12": "Statutes",
+    "12.3.2": "Year of Code",
+    "13": "Legislative Materials",
+    "13.2": "Bills and Resolutions",
+    "13.3": "Hearings",
+    "13.4": "Reports, Documents, and Committee Prints",
+    "13.5": "Debates",
+    "14": "Administrative and Executive Materials",
+    "14.2": "Rules, Regulations, and Other Publications",
+    "14.3": "Administrative Adjudications and Arbitrations",
+    "15": "Books, Reports, and Other Nonperiodic Materials",
+    "15.1": "Author",
+    "16": "Periodicals",
+    "17": "Unpublished and Forthcoming Sources",
+    "17.3": "Forthcoming Publications",
+    "18": "The Internet, Electronic Media, and Other Nonprint Resources",
+    "20": "Foreign Materials",
+    "21": "International Materials",
+    "21.4": "Treaties and Other International Agreements",
+    "B17": "Court and Litigation Documents",
+    "T6": "Table T6: Case Names",
+    "T10": "Table T10: Geographical Terms"
+  }
+}
