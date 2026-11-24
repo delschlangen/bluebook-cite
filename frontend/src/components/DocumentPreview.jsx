@@ -1,28 +1,69 @@
-import React, { useMemo, useState } from 'react';
-import { WINDOW, buildHighlights, buildWindow, firstWindowStart } from '../utils/previewWindow';
+import React, { useLayoutEffect, useMemo, useRef, useState } from 'react';
+import {
+  buildHighlights,
+  hasNext,
+  hasPrevious,
+  nextPosition,
+  openingPosition,
+  previousPosition,
+  segmentsFor,
+} from '../utils/previewWindow';
+import { fmt } from '../utils/format';
 
-export default function DocumentPreview({ text, citations, unsourcedClaims }) {
+const navButton =
+  'min-h-[44px] px-4 rounded border border-gray-300 bg-white text-gray-800 ' +
+  'disabled:bg-gray-100 disabled:text-gray-500 disabled:border-gray-200 disabled:cursor-not-allowed';
+
+/**
+ * One window of the document at a time. The window being shown can be kept by the parent
+ * (`position` and `onPositionChange`), so leaving this tab and coming back does not send the
+ * reader back to the first highlight; on its own it keeps the position itself.
+ */
+export default function DocumentPreview({
+  text,
+  citations,
+  unsourcedClaims,
+  position: controlled,
+  onPositionChange,
+}) {
   const highlights = useMemo(
     () => buildHighlights(citations, unsourcedClaims),
     [citations, unsourcedClaims]
   );
 
-  const [from, setFrom] = useState(() => firstWindowStart(highlights));
+  const [own, setOwn] = useState(null);
+  const remembered = controlled ?? own;
+  const setPosition = onPositionChange ?? setOwn;
 
-  const view = useMemo(
-    () => (text ? buildWindow(text, highlights, from) : null),
-    [text, highlights, from]
+  const position = useMemo(() => {
+    if (!text) return null;
+    // A position left over from a different text cannot be trusted.
+    if (remembered && remembered.end <= text.length) return remembered;
+    return openingPosition(text, highlights);
+  }, [text, highlights, remembered]);
+
+  const segments = useMemo(
+    () => (position ? segmentsFor(text, highlights, position.start, position.end) : []),
+    [text, highlights, position]
   );
+
+  // A new window is read from its top. The pane keeps its scroll offset otherwise, so after
+  // reading to the bottom of one window, Next would land near the bottom of the next.
+  const paneRef = useRef(null);
+  const windowStart = position?.start;
+  useLayoutEffect(() => {
+    if (paneRef.current) paneRef.current.scrollTop = 0;
+  }, [windowStart]);
 
   if (!text) {
     return (
-      <div className="text-center py-8 text-gray-500">
+      <div className="text-center py-8 text-gray-600">
         <p>No document content to display.</p>
       </div>
     );
   }
 
-  const { segments, start, end } = view;
+  const { start, end } = position;
 
   return (
     <div className="space-y-4">
@@ -37,30 +78,34 @@ export default function DocumentPreview({ text, citations, unsourcedClaims }) {
         </div>
       </div>
 
-      <div className="flex items-center justify-between text-xs text-gray-600">
+      <div className="flex items-center justify-between gap-2 text-xs text-gray-600">
         <button
           type="button"
-          disabled={start <= 0}
-          onClick={() => setFrom(Math.max(0, start - WINDOW))}
-          className="px-3 py-2 rounded border border-gray-300 bg-white disabled:opacity-40"
+          disabled={!hasPrevious(position)}
+          onClick={() => setPosition(previousPosition(text, position))}
+          className={navButton}
         >
           Previous
         </button>
-        <span>
-          Characters {start.toLocaleString()} to {end.toLocaleString()} of {text.length.toLocaleString()}
+        <span className="text-center" aria-live="polite">
+          Characters {fmt(start)} to {fmt(end)} of {fmt(text.length)}
         </span>
         <button
           type="button"
-          disabled={end >= text.length}
-          onClick={() => setFrom(end)}
-          className="px-3 py-2 rounded border border-gray-300 bg-white disabled:opacity-40"
+          disabled={!hasNext(text, position)}
+          onClick={() => setPosition(nextPosition(text, position))}
+          className={navButton}
         >
           Next
         </button>
       </div>
 
-      <div className="p-4 bg-white border border-gray-200 rounded-lg max-h-[600px] overflow-y-auto">
-        <div className="prose prose-sm max-w-none font-serif text-gray-800 whitespace-pre-wrap">
+      <div
+        ref={paneRef}
+        data-testid="preview-pane"
+        className="p-4 bg-white border border-gray-200 rounded-lg max-h-[600px] overflow-y-auto"
+      >
+        <div className="prose prose-sm max-w-none font-serif text-gray-800 whitespace-pre-wrap wrap-anywhere">
           {segments.map((segment, index) => {
             if (segment.type === 'citation') {
               return (

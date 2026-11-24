@@ -1,4 +1,6 @@
-import React, { useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
+import { fmt } from '../utils/format';
+import { PAGE_SIZE } from '../utils/paging';
 
 const claimTypeColors = {
   legal: 'bg-purple-100 text-purple-800',
@@ -8,10 +10,23 @@ const claimTypeColors = {
 };
 
 // A prose-heavy document can yield tens of thousands of claims; render a page at a time.
-const PAGE_SIZE = 100;
 
-export default function SourceSuggestions({ claims, notice }) {
-  const [shown, setShown] = useState(PAGE_SIZE);
+export default function SourceSuggestions({ claims, notice, shown: controlledShown, onShownChange }) {
+  // How many are out can be kept by the parent, so leaving this tab does not close them.
+  const [ownShown, setOwnShown] = useState(PAGE_SIZE);
+  const shown = controlledShown ?? ownShown;
+  const setShown = onShownChange ?? setOwnShown;
+
+  // After "Show more", put focus on the first claim that was added.
+  const listRef = useRef(null);
+  const focusIndex = useRef(null);
+  useEffect(() => {
+    if (focusIndex.current == null) return;
+    const card = listRef.current?.querySelector(`[data-claim-index="${focusIndex.current}"]`);
+    focusIndex.current = null;
+    card?.focus();
+  }, [shown]);
+
   if (!claims || claims.length === 0) {
     return (
       <div className="text-center py-8">
@@ -19,23 +34,28 @@ export default function SourceSuggestions({ claims, notice }) {
           <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
         </svg>
         <p className="text-gray-600 font-medium">No unsourced claims detected</p>
-        <p className="text-sm text-gray-400 mt-1">All statements appear to have citations</p>
+        <p className="text-sm text-gray-600 mt-1">All statements appear to have citations</p>
       </div>
     );
   }
 
   return (
-    <div className="space-y-4">
+    <div className="space-y-4" ref={listRef}>
       <p className="text-sm text-gray-600">
         The following statements may need citations. Review each and consider adding appropriate sources.
       </p>
       {notice && <p className="text-xs text-gray-600" data-testid="claims-notice">{notice}</p>}
       
       {claims.slice(0, shown).map((claim, index) => (
-        <div key={claim.id || index} className="p-4 bg-red-50 border border-red-100 rounded-lg">
+        <div
+          key={claim.id || index}
+          data-claim-index={index}
+          tabIndex={-1}
+          className="p-4 bg-red-50 border border-red-100 rounded-lg focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
+        >
           <div className="flex items-start justify-between gap-3 mb-3">
             <div className="flex items-center gap-2">
-              <span className="text-xs font-medium text-gray-400">#{index + 1}</span>
+              <span className="text-xs font-medium text-gray-500">#{index + 1}</span>
               <span className={`px-2 py-0.5 rounded text-xs font-medium ${claimTypeColors[claim.claim_type]}`}>
                 {claim.claim_type}
               </span>
@@ -45,7 +65,7 @@ export default function SourceSuggestions({ claims, notice }) {
             </div>
           </div>
           
-          <p className="text-sm text-gray-800 mb-3 leading-relaxed">
+          <p className="text-sm text-gray-800 mb-3 leading-relaxed wrap-anywhere">
             "{claim.text}"
           </p>
           
@@ -59,7 +79,7 @@ export default function SourceSuggestions({ claims, notice }) {
                     href={`https://www.courtlistener.com/?q=${encodeURIComponent(term)}`}
                     target="_blank"
                     rel="noopener noreferrer"
-                    className="px-2 py-1 bg-white border border-gray-200 rounded text-xs text-blue-600 hover:bg-blue-50 hover:border-blue-200 transition-colors"
+                    className="max-w-full wrap-anywhere px-2 py-1 bg-white border border-gray-200 rounded text-xs text-blue-700 hover:bg-blue-50 hover:border-blue-200 transition-colors"
                   >
                     {term} →
                   </a>
@@ -72,12 +92,19 @@ export default function SourceSuggestions({ claims, notice }) {
       {claims.length > shown && (
         <button
           type="button"
-          onClick={() => setShown((n) => n + PAGE_SIZE)}
-          className="w-full py-3 rounded-lg border border-gray-300 bg-white text-sm text-gray-700 hover:bg-gray-50"
+          onClick={() => {
+            focusIndex.current = shown;
+            setShown(shown + PAGE_SIZE);
+          }}
+          className="w-full min-h-[44px] py-3 rounded-lg border border-gray-300 bg-white text-sm text-gray-700 hover:bg-gray-50"
         >
-          Show {Math.min(PAGE_SIZE, claims.length - shown)} more ({claims.length - shown} not shown)
+          Show {fmt(Math.min(PAGE_SIZE, claims.length - shown))} more ({fmt(claims.length - shown)} not shown)
         </button>
       )}
+      {/* Last, so the spacing between the visible blocks is unchanged. Spoken when more are shown. */}
+      <p className="sr-only" aria-live="polite">
+        Showing {fmt(Math.min(shown, claims.length))} of {fmt(claims.length)} statements
+      </p>
     </div>
   );
 }

@@ -1,24 +1,60 @@
-import React, { useState, useCallback, useEffect, useRef } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import FileUpload from './components/FileUpload';
 import CitationList from './components/CitationList';
 import CitationEditor from './components/CitationEditor';
 import CitationRepair from './components/CitationRepair';
 import SourceSuggestions from './components/SourceSuggestions';
 import DocumentPreview from './components/DocumentPreview';
-import { analyzeDocument, checkHealth, explainNetworkFailure, lookupCitation } from './services/api';
-import { analysisNotices, claimsNotice } from './utils/uploadChecks';
+import { useMediaQuery } from './hooks/useMediaQuery';
+import {
+  UNEXPECTED_FORMAT_MESSAGE,
+  analyzeDocument,
+  checkHealth,
+  explainNetworkFailure,
+  getLimits,
+  lookupCitation,
+  uploadDocument,
+} from './services/api';
+import { normalizeAnalysis, normalizeUpload } from './utils/analysisShape';
+import { editedFieldsDiffer } from './utils/editedCitation';
+import { describeFailure } from './utils/failures';
+import { PAGE_SIZE } from './utils/paging';
+import { analysisNotices, checkFileBeforeUpload, claimsNotice } from './utils/uploadChecks';
+
+// Below this width the results are one column, so the editor cannot sit beside the list.
+const NARROW_SCREEN = '(max-width: 1023px)';
+
+let errorSerial = 0;
+
+const STOPPED_MESSAGE =
+  'Stopped before the analysis finished. Your document is still loaded. Try again when you are ready.';
 
 function App() {
-  const [document, setDocument] = useState(null);
+  const [doc, setDoc] = useState(null);
   const [analysis, setAnalysis] = useState(null);
   const [selectedCitation, setSelectedCitation] = useState(null);
   const [loading, setLoading] = useState(false);
   // What the page is doing while it waits, when that is more than the analysis itself.
   const [checkingServer, setCheckingServer] = useState(false);
+  // { id, message, hint, canRetry, retryAfter }
   const [error, setError] = useState(null);
   const [activeTab, setActiveTab] = useState('citations');
   // Pasting one citation is the common case, so it is the default door.
   const [mode, setMode] = useState('repair');
+  // Where the person had got to in each results tab. Kept here, not in the tab, so switching
+  // tabs and coming back does not close the cards they opened or move the preview.
+  const [citationsShown, setCitationsShown] = useState(PAGE_SIZE);
+  const [claimsShown, setClaimsShown] = useState(PAGE_SIZE);
+  const [previewPosition, setPreviewPosition] = useState(null);
+  // The file being uploaded, { file, phase }, and what to say about the upload. Kept here, not in
+  // the upload box, so it goes on (and can be cancelled) whichever panel is showing.
+  const [upload, setUpload] = useState(null);
+  const [uploadError, setUploadError] = useState(null);
+  const [uploadNote, setUploadNote] = useState(null);
+  // Spoken, not shown: what a saved edit did.
+  const [savedNotice, setSavedNotice] = useState('');
+
+  const narrow = useMediaQuery(NARROW_SCREEN);
 
   // The backend sleeps on a free tier. Wake it while the visitor is reading,
   // so their first real request is not paying for a cold start.
@@ -26,44 +62,78 @@ function App() {
     checkHealth();
   }, []);
 
-  // Each upload gets a run number. A result that arrives after the person reset the page, or
-  // after a newer upload, belongs to a run that no longer exists and must be dropped.
+  // Each upload and each analysis gets a run number. A result that arrives after the person
+  // cancelled or reset, or after a newer run began, belongs to a run that no longer exists and
+  // must be dropped.
   const runRef = useRef(0);
   const abortRef = useRef(null);
+  const uploadRunRef = useRef(0);
+  const uploadAbortRef = useRef(null);
+  // A ref, not the state: two files dropped in one gesture must not both start.
+  const uploadBusyRef = useRef(false);
 
-  const handleUpload = useCallback(async (uploadResult) => {
+  const startAnalysis = useCallback(async (uploadResult) => {
     const run = ++runRef.current;
     abortRef.current?.abort();
     const controller = new AbortController();
     abortRef.current = controller;
 
-    setDocument(uploadResult);
+    setDoc(uploadResult);
     setAnalysis(null);
     setSelectedCitation(null);
     setActiveTab('citations');
+    setCitationsShown(PAGE_SIZE);
+    setClaimsShown(PAGE_SIZE);
+    setPreviewPosition(null);
+    setSavedNotice('');
     setLoading(true);
     setError(null);
 
+    const fail = (failure) => setError({ ...failure, id: ++errorSerial });
+
     try {
-      const analysisResult = await analyzeDocument(
+      const raw = await analyzeDocument(
         uploadResult.document_id,
         uploadResult.full_text,
         uploadResult.filename,
         { signal: controller.signal }
       );
       if (run !== runRef.current) return;
-      setAnalysis(analysisResult);
-    } catch (err) {
-      if (run !== runRef.current || err?.cancelled) return;
-      // No response at all could be a crash, a restart or a dropped connection, and the
-      // browser reports them all alike. Ask the server which it was before blaming it.
-      let message = `Failed to analyze document: ${err.message}`;
-      if (err.offline) {
-        setCheckingServer(true);
-        message = await explainNetworkFailure('Failed to analyze document');
-        if (run !== runRef.current) return;
+      const result = normalizeAnalysis(raw);
+      if (!result) {
+        fail({
+          message: `Failed to analyze document: ${UNEXPECTED_FORMAT_MESSAGE}`,
+          canRetry: true,
+        });
+        return;
       }
-      setError(message);
+      setAnalysis(result);
+    } catch (err) {
+      if (run !== runRef.current) return;
+      if (err?.cancelled) {
+        // Cancel was pressed. The run is still current, so say what happened rather than
+        // leaving an empty page.
+        fail({ message: STOPPED_MESSAGE, canRetry: true });
+        return;
+      }
+      if (err?.offline) {
+        // No response at all could be a crash, a restart or a dropped connection, and the
+        // browser reports them all alike. Ask the server which it was before blaming it.
+        setCheckingServer(true);
+        let message;
+        try {
+          message = await explainNetworkFailure('Failed to analyze document', {
+            signal: controller.signal,
+          });
+        } catch (probeError) {
+          if (run !== runRef.current) return;
+          message = probeError?.cancelled ? STOPPED_MESSAGE : `Failed to analyze document: ${err.message}`;
+        }
+        if (run !== runRef.current) return;
+        fail({ message, canRetry: true });
+      } else {
+        fail(describeFailure(err, { prefix: 'Failed to analyze document' }));
+      }
       console.error(err);
     } finally {
       if (run === runRef.current) {
@@ -73,25 +143,136 @@ function App() {
     }
   }, []);
 
-  const handleCitationSelect = useCallback((citation) => {
+  const handleFiles = useCallback(
+    async (files) => {
+      const list = Array.from(files || []);
+      if (list.length === 0) return;
+
+      if (uploadBusyRef.current) {
+        setUploadNote(
+          'A file is already uploading, so the one you just added was ignored. ' +
+            'Cancel the upload first if you want to use a different file.'
+        );
+        return;
+      }
+      const file = list[0];
+      setUploadNote(
+        list.length > 1
+          ? `Only one file is checked at a time, so only ${file.name} was used. ` +
+              `The other ${list.length - 1} ${list.length === 2 ? 'file was' : 'files were'} ignored.`
+          : null
+      );
+
+      // The browser's reported type is NOT checked. Phones send an empty or generic type for
+      // Word and PDF files that come from iCloud or Google Drive, and rejecting on it blocked
+      // working files before a single byte was sent. The server identifies the format from the
+      // file's own contents.
+      const problem = checkFileBeforeUpload(file, getLimits());
+      if (problem) {
+        setUploadError(problem);
+        return;
+      }
+
+      setUploadError(null);
+      const run = ++uploadRunRef.current;
+      const controller = new AbortController();
+      uploadAbortRef.current = controller;
+      uploadBusyRef.current = true;
+      setUpload({ file, phase: 'sending' });
+
+      try {
+        const result = await uploadDocument(file, { signal: controller.signal });
+        if (run !== uploadRunRef.current) return;
+        const uploaded = normalizeUpload(result);
+        if (!uploaded) {
+          setUploadError(UNEXPECTED_FORMAT_MESSAGE);
+          return;
+        }
+        setUploadNote(null);
+        setUploadError(null);
+        startAnalysis(uploaded);
+      } catch (err) {
+        if (run !== uploadRunRef.current) return;
+        // A response the server sent already says what is wrong (too long, unreadable, empty).
+        // No response at all could be a crash, a restart or a dropped connection, and the
+        // browser reports them all the same, so ask the server which it was.
+        if (err?.offline) {
+          setUpload({ file, phase: 'checking' });
+          let message;
+          try {
+            message = await explainNetworkFailure('The upload failed', { signal: controller.signal });
+          } catch {
+            // Only Cancel stops the probe, and Cancel has made this run stale.
+            if (run !== uploadRunRef.current) return;
+            message = err.message;
+          }
+          if (run !== uploadRunRef.current) return;
+          setUploadError(message);
+        } else {
+          setUploadError(err?.message || 'The upload failed.');
+        }
+      } finally {
+        if (run === uploadRunRef.current) {
+          uploadBusyRef.current = false;
+          setUpload(null);
+        }
+      }
+    },
+    [startAnalysis]
+  );
+
+  const cancelUpload = useCallback(() => {
+    if (!uploadBusyRef.current) return;
+    uploadRunRef.current++;
+    uploadAbortRef.current?.abort();
+    uploadBusyRef.current = false;
+    setUpload(null);
+    setUploadError(null);
+    setUploadNote('Upload cancelled. Choose the file again to start over.');
+  }, []);
+
+  // Stop waiting for the analysis, or stop asking whether the server is up, and keep the
+  // document so the analysis can be retried without uploading again.
+  const cancelAnalysis = useCallback(() => {
+    abortRef.current?.abort();
+  }, []);
+
+  // Where focus goes back to when the editor closes, so a keyboard user is not dropped at the top.
+  const returnFocusRef = useRef(null);
+
+  const handleCitationSelect = useCallback((citation, trigger) => {
+    returnFocusRef.current = trigger || null;
+    setSavedNotice('');
     setSelectedCitation(citation);
   }, []);
 
-  const handleCitationUpdate = useCallback((updatedCitation) => {
-    if (analysis) {
-      const updatedCitations = analysis.analysis.citations.map(c =>
-        c.id === updatedCitation.id ? updatedCitation : c
-      );
-      setAnalysis({
-        ...analysis,
-        analysis: {
-          ...analysis.analysis,
-          citations: updatedCitations
+  const closeEditor = useCallback(() => setSelectedCitation(null), []);
+
+  useEffect(() => {
+    if (selectedCitation || !returnFocusRef.current) return;
+    const trigger = returnFocusRef.current;
+    returnFocusRef.current = null;
+    if (trigger.isConnected) trigger.focus();
+  }, [selectedCitation]);
+
+  const handleCitationUpdate = useCallback(
+    (updated) => {
+      if (analysis) {
+        const citations = analysis.analysis.citations;
+        const index = citations.findIndex((c) => c.id === updated.id);
+        if (index >= 0) {
+          const original = citations[index];
+          const changed = editedFieldsDiffer(original, updated);
+          const next = citations.slice();
+          next[index] = changed || original.edited ? { ...updated, edited: true } : updated;
+          setAnalysis({ ...analysis, analysis: { ...analysis.analysis, citations: next } });
+          setSavedNotice(changed ? `Saved changes to citation ${index + 1}.` : 'No changes to save.');
         }
-      });
-    }
-    setSelectedCitation(null);
-  }, [analysis]);
+      }
+      setSelectedCitation(null);
+    },
+    [analysis]
+  );
 
   const handleLookup = useCallback(async (citation) => {
     return await lookupCitation(citation);
@@ -102,27 +283,50 @@ function App() {
     abortRef.current?.abort();
     setLoading(false);
     setCheckingServer(false);
-    setDocument(null);
+    setDoc(null);
     setAnalysis(null);
     setSelectedCitation(null);
     setError(null);
+    setSavedNotice('');
   }, []);
+
+  // On a phone the editor is a sheet over the page; the page behind should not scroll with it.
+  const sheetOpen = narrow && Boolean(selectedCitation) && activeTab === 'citations';
+  useEffect(() => {
+    if (!sheetOpen) return undefined;
+    const previous = window.document.body.style.overflow;
+    window.document.body.style.overflow = 'hidden';
+    return () => {
+      window.document.body.style.overflow = previous;
+    };
+  }, [sheetOpen]);
+
+  const uploading = Boolean(upload);
+  const editor = selectedCitation && analysis && (
+    <CitationEditor
+      citation={selectedCitation}
+      suggestion={analysis.short_form_suggestions.find((s) => s.citation_id === selectedCitation.id)}
+      onSave={handleCitationUpdate}
+      onLookup={handleLookup}
+      onCancel={closeEditor}
+    />
+  );
 
   return (
     <div className="min-h-screen bg-gray-50">
       {/* Header */}
       <header className="bg-blue-900 text-white py-6 px-4 shadow-lg">
-        <div className="max-w-7xl mx-auto flex justify-between items-center">
-          <div>
+        <div className="max-w-7xl mx-auto flex justify-between items-center gap-3">
+          <div className="min-w-0">
             <h1 className="text-2xl font-bold">Bluebook Citation Generator</h1>
             <p className="text-blue-200 mt-1 text-sm">
               Automated citation formatting per Bluebook 21st Edition
             </p>
           </div>
-          {document && (
+          {doc && (
             <button
               onClick={handleReset}
-              className="px-4 py-2 bg-blue-700 hover:bg-blue-600 rounded-lg text-sm transition-colors"
+              className="flex-shrink-0 max-w-[8.5rem] sm:max-w-none min-h-[44px] px-3 sm:px-4 py-2 bg-blue-700 hover:bg-blue-600 rounded-lg text-sm transition-colors"
             >
               Upload New Document
             </button>
@@ -131,115 +335,143 @@ function App() {
       </header>
 
       <main className="max-w-7xl mx-auto py-8 px-4">
+        {/* Spoken, not shown: the result of saving an edit. */}
+        <p className="sr-only" role="status">{savedNotice}</p>
+
         {/* Error Display */}
         {error && (
-          <div className="bg-red-50 border border-red-200 rounded-lg p-4 mb-6">
-            <div className="flex items-center">
-              <svg className="w-5 h-5 text-red-500 mr-2 flex-shrink-0" fill="currentColor" viewBox="0 0 20 20">
+          <div role="alert" className="bg-red-50 border border-red-200 rounded-lg p-4 mb-6">
+            <div className="flex items-start">
+              <svg className="w-5 h-5 text-red-500 mr-2 mt-0.5 flex-shrink-0" fill="currentColor" viewBox="0 0 20 20" aria-hidden="true">
                 <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM8.707 7.293a1 1 0 00-1.414 1.414L8.586 10l-1.293 1.293a1 1 0 101.414 1.414L10 11.414l1.293 1.293a1 1 0 001.414-1.414L11.414 10l1.293-1.293a1 1 0 00-1.414-1.414L10 8.586 8.707 7.293z" clipRule="evenodd" />
               </svg>
-              <p className="text-red-800">{error}</p>
+              <div className="min-w-0">
+                <p className="text-red-800 wrap-anywhere">{error.message}</p>
+                {error.hint && <p className="mt-1 text-sm text-red-800 wrap-anywhere">{error.hint}</p>}
+              </div>
             </div>
           </div>
         )}
 
-        {/* After a failed analysis the upload is still in memory, so offer a retry instead of a re-upload. */}
-        {error && document && !analysis && !loading && (
-          <button
-            type="button"
-            onClick={() => handleUpload(document)}
-            className="mb-6 px-4 py-2 bg-blue-600 text-white rounded-lg text-sm"
-          >
-            Try again
-          </button>
+        {/* After a failed analysis the upload is still in memory, so offer a retry instead of a
+            re-upload, unless sending the same thing again cannot work. */}
+        {error?.canRetry && doc && !analysis && !loading && (
+          <RetryButton
+            key={error.id}
+            waitSeconds={error.retryAfter}
+            onRetry={() => startAnalysis(doc)}
+          />
         )}
 
-        {/* Landing: repair a single citation, or analyze a whole document. */}
-        {!document && !loading && (
-          <div>
-            <div className="flex gap-2 mb-5" role="tablist" aria-label="Choose a mode">
-              <ModeButton
-                active={mode === 'repair'}
-                onClick={() => setMode('repair')}
-              >
-                Fix a citation
-              </ModeButton>
-              <ModeButton
-                active={mode === 'upload'}
-                onClick={() => setMode('upload')}
-              >
-                Check a document
-              </ModeButton>
-            </div>
+        {/* Landing: repair a single citation, or analyze a whole document. Both panels stay
+            mounted, hidden when not in use, so what was typed or chosen in one survives a trip
+            to the other and back, and a trip through the results. */}
+        <div hidden={Boolean(doc || loading)}>
+          <div className={`flex gap-2 ${uploading ? 'mb-2' : 'mb-5'}`} role="tablist" aria-label="Choose a mode">
+            <ModeButton
+              id="mode-repair"
+              controls="panel-repair"
+              active={mode === 'repair'}
+              disabled={uploading}
+              onClick={() => setMode('repair')}
+            >
+              Fix a citation
+            </ModeButton>
+            <ModeButton
+              id="mode-upload"
+              controls="panel-upload"
+              active={mode === 'upload'}
+              onClick={() => setMode('upload')}
+            >
+              Check a document
+            </ModeButton>
+          </div>
+          {uploading && (
+            <p className="mb-5 text-sm text-gray-600">A file is uploading. Cancel the upload to switch.</p>
+          )}
 
-            {mode === 'repair' && <CitationRepair />}
+          <div role="tabpanel" id="panel-repair" aria-labelledby="mode-repair" hidden={mode !== 'repair'}>
+            <CitationRepair />
+          </div>
 
-            {mode === 'upload' && (
-          <div className="bg-white rounded-lg shadow-lg p-8">
-            <h2 className="text-xl font-semibold mb-4">Check a whole document</h2>
-            <p className="text-gray-600 mb-6">
-              Upload a legal document (PDF, DOCX, or TXT) to analyze and format citations
-              according to Bluebook 21st Edition rules.
-            </p>
-            <FileUpload onUpload={handleUpload} />
+          <div role="tabpanel" id="panel-upload" aria-labelledby="mode-upload" hidden={mode !== 'upload'}>
+            <div className="bg-white rounded-lg shadow-lg p-5 sm:p-8">
+              <h2 className="text-xl font-semibold mb-4">Check a whole document</h2>
+              <p className="text-gray-600 mb-6">
+                Upload a legal document (PDF, DOCX, or TXT) to analyze and format citations
+                according to Bluebook 21st Edition rules.
+              </p>
+              <FileUpload
+                uploading={upload}
+                error={uploadError}
+                notice={uploadNote}
+                onFiles={handleFiles}
+                onCancel={cancelUpload}
+              />
 
-            <div className="mt-8 border-t pt-6">
-              <h3 className="font-medium text-gray-700 mb-3">Features</h3>
-              <ul className="grid grid-cols-1 md:grid-cols-3 gap-4 text-sm text-gray-600">
-                <li className="flex items-start">
-                  <svg className="w-5 h-5 text-green-500 mr-2 flex-shrink-0" fill="currentColor" viewBox="0 0 20 20">
-                    <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clipRule="evenodd" />
-                  </svg>
-                  <span>Complete incomplete citations with database lookups</span>
-                </li>
-                <li className="flex items-start">
-                  <svg className="w-5 h-5 text-green-500 mr-2 flex-shrink-0" fill="currentColor" viewBox="0 0 20 20">
-                    <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clipRule="evenodd" />
-                  </svg>
-                  <span>Context-aware Id. and supra suggestions</span>
-                </li>
-                <li className="flex items-start">
-                  <svg className="w-5 h-5 text-green-500 mr-2 flex-shrink-0" fill="currentColor" viewBox="0 0 20 20">
-                    <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clipRule="evenodd" />
-                  </svg>
-                  <span>Detect claims that need citations</span>
-                </li>
-              </ul>
+              <div className="mt-8 border-t pt-6">
+                <h3 className="font-medium text-gray-700 mb-3">Features</h3>
+                <ul className="grid grid-cols-1 md:grid-cols-3 gap-4 text-sm text-gray-600">
+                  <li className="flex items-start">
+                    <svg className="w-5 h-5 text-green-500 mr-2 flex-shrink-0" fill="currentColor" viewBox="0 0 20 20">
+                      <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clipRule="evenodd" />
+                    </svg>
+                    <span>Complete incomplete citations with database lookups</span>
+                  </li>
+                  <li className="flex items-start">
+                    <svg className="w-5 h-5 text-green-500 mr-2 flex-shrink-0" fill="currentColor" viewBox="0 0 20 20">
+                      <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clipRule="evenodd" />
+                    </svg>
+                    <span>Context-aware Id. and supra suggestions</span>
+                  </li>
+                  <li className="flex items-start">
+                    <svg className="w-5 h-5 text-green-500 mr-2 flex-shrink-0" fill="currentColor" viewBox="0 0 20 20">
+                      <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clipRule="evenodd" />
+                    </svg>
+                    <span>Detect claims that need citations</span>
+                  </li>
+                </ul>
+              </div>
             </div>
           </div>
-            )}
-          </div>
-        )}
+        </div>
 
         {/* Loading State */}
         {loading && (
-          <div className="bg-white rounded-lg shadow-lg p-12 text-center">
+          <div className="bg-white rounded-lg shadow-lg p-6 sm:p-12 text-center">
             <div className="animate-spin rounded-full h-12 w-12 border-4 border-blue-200 border-t-blue-600 mx-auto"></div>
-            <p className="mt-4 text-gray-600" role="status">
+            <p className="mt-4 text-gray-700" role="status">
               {checkingServer ? 'Checking whether the server is still running...' : 'Analyzing citations...'}
             </p>
-            <p className="mt-2 text-sm text-gray-400">
+            <p className="mt-2 text-sm text-gray-600">
               {checkingServer
-                ? 'The request did not finish. This takes a few seconds.'
+                ? 'The request did not finish. This can take up to half a minute.'
                 : 'A long document can take up to a minute. Looking up incomplete citations is the slow part.'}
             </p>
+            <button
+              type="button"
+              onClick={cancelAnalysis}
+              className="mt-4 min-h-[44px] px-5 rounded-lg border border-gray-300 bg-white text-sm font-medium text-gray-800 hover:bg-gray-50"
+            >
+              Cancel
+            </button>
           </div>
         )}
 
         {/* Analysis Results */}
-        {analysis && !loading && (
+        {analysis && doc && !loading && (
           <div className="space-y-6">
             {/* Stats Overview */}
             <div className="bg-white rounded-lg shadow p-6">
-              <div className="flex items-center justify-between mb-4">
+              <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-1 mb-4">
                 <h2 className="text-lg font-semibold">Analysis Summary</h2>
-                <span className="text-sm text-gray-500">{document.filename}</span>
+                <span className="min-w-0 text-sm text-gray-600 wrap-anywhere">{doc.filename}</span>
               </div>
-              {(document.footnote_count > 0 || document.endnote_count > 0) && (
-                <p className="text-xs text-gray-500 mb-4">
-                  Read {document.footnote_count} footnote{document.footnote_count === 1 ? '' : 's'}
-                  {document.endnote_count > 0
-                    ? ` and ${document.endnote_count} endnote${document.endnote_count === 1 ? '' : 's'}`
+              {(doc.footnote_count > 0 || doc.endnote_count > 0) && (
+                <p className="text-xs text-gray-600 mb-4">
+                  Read {doc.footnote_count} footnote{doc.footnote_count === 1 ? '' : 's'}
+                  {doc.endnote_count > 0
+                    ? ` and ${doc.endnote_count} endnote${doc.endnote_count === 1 ? '' : 's'}`
                     : ''}
                   {' '}from the Word file.
                 </p>
@@ -247,8 +479,8 @@ function App() {
               {analysisNotices(analysis).map((notice) => (
                 <p key={notice} className="text-xs text-gray-600 mb-3">{notice}</p>
               ))}
-              {document.warnings?.map((w) => (
-                <p key={w} className="text-xs text-amber-700 mb-2">{w}</p>
+              {doc.warnings?.map((w) => (
+                <p key={w} className="text-xs text-amber-800 mb-2">{w}</p>
               ))}
               <div className="grid grid-cols-2 md:grid-cols-5 gap-4">
                 <StatCard label="Total Citations" value={analysis.stats.total_citations} color="blue" />
@@ -262,8 +494,9 @@ function App() {
             {/* Tabs */}
             <div className="bg-white rounded-lg shadow">
               <div className="border-b">
-                <nav className="flex -mb-px overflow-x-auto">
+                <nav className="flex -mb-px" role="tablist" aria-label="Results">
                   <TabButton
+                    id="citations"
                     active={activeTab === 'citations'}
                     onClick={() => setActiveTab('citations')}
                     count={analysis.stats.total_citations}
@@ -271,6 +504,7 @@ function App() {
                     Citations
                   </TabButton>
                   <TabButton
+                    id="unsourced"
                     active={activeTab === 'unsourced'}
                     onClick={() => setActiveTab('unsourced')}
                     count={analysis.stats.unsourced_claims}
@@ -278,6 +512,7 @@ function App() {
                     Unsourced Claims
                   </TabButton>
                   <TabButton
+                    id="preview"
                     active={activeTab === 'preview'}
                     onClick={() => setActiveTab('preview')}
                   >
@@ -286,31 +521,25 @@ function App() {
                 </nav>
               </div>
 
-              <div className="p-4">
+              <div className="p-4" role="tabpanel" id={`panel-${activeTab}`} aria-labelledby={`tab-${activeTab}`}>
                 {activeTab === 'citations' && (
                   <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-                    <div className="lg:col-span-2">
+                    <div className="lg:col-span-2 min-w-0">
                       <CitationList
                         citations={analysis.analysis.citations}
                         shortFormSuggestions={analysis.short_form_suggestions}
                         onSelect={handleCitationSelect}
                         selectedId={selectedCitation?.id}
+                        shown={citationsShown}
+                        onShownChange={setCitationsShown}
                       />
                     </div>
-                    <div>
-                      {selectedCitation ? (
-                        <CitationEditor
-                          citation={selectedCitation}
-                          suggestion={analysis.short_form_suggestions.find(
-                            s => s.citation_id === selectedCitation.id
-                          )}
-                          onSave={handleCitationUpdate}
-                          onLookup={handleLookup}
-                          onCancel={() => setSelectedCitation(null)}
-                        />
+                    <div className="min-w-0">
+                      {editor ? (
+                        narrow ? <EditorSheet onClose={closeEditor}>{editor}</EditorSheet> : editor
                       ) : (
-                        <div className="bg-gray-50 rounded-lg p-6 text-center text-gray-500">
-                          <svg className="w-12 h-12 mx-auto mb-3 text-gray-300" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <div className="hidden lg:block bg-gray-50 rounded-lg p-6 text-center text-gray-600">
+                          <svg className="w-12 h-12 mx-auto mb-3 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
                             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z" />
                           </svg>
                           <p>Select a citation to view details and edit</p>
@@ -324,14 +553,18 @@ function App() {
                   <SourceSuggestions
                     claims={analysis.analysis.unsourced_claims}
                     notice={claimsNotice(analysis.stats)}
+                    shown={claimsShown}
+                    onShownChange={setClaimsShown}
                   />
                 )}
 
                 {activeTab === 'preview' && (
                   <DocumentPreview
-                    text={document.full_text}
+                    text={doc.full_text}
                     citations={analysis.analysis.citations}
                     unsourcedClaims={analysis.analysis.unsourced_claims}
+                    position={previewPosition}
+                    onPositionChange={setPreviewPosition}
                   />
                 )}
               </div>
@@ -341,15 +574,106 @@ function App() {
       </main>
 
       {/* Footer */}
-      <footer className="bg-gray-800 text-gray-400 py-6 px-4 mt-12">
+      <footer className="bg-gray-800 text-gray-300 py-6 px-4 mt-12">
         <div className="max-w-7xl mx-auto text-center text-sm">
           <p>Bluebook Citation Generator - Using Bluebook 21st Edition Rules</p>
-          <p className="mt-2 text-gray-500">
+          <p className="mt-2 text-gray-400">
             Note: Always verify citations before submission. This tool provides suggestions only.
           </p>
         </div>
       </footer>
     </div>
+  );
+}
+
+/**
+ * The editor as a sheet rising over the list, for a phone. Tapping a card used to open the
+ * editor in a column that, on one screen, sat 20,000 px below the list, so nothing seemed to
+ * happen. The list stays where it is; Close, Escape, or a tap outside goes back to it.
+ */
+function EditorSheet({ onClose, children }) {
+  const sheet = useRef(null);
+
+  useEffect(() => {
+    sheet.current?.focus();
+  }, []);
+
+  const handleKeyDown = (event) => {
+    if (event.key === 'Escape') {
+      event.stopPropagation();
+      onClose();
+      return;
+    }
+    if (event.key !== 'Tab' || !sheet.current) return;
+    // Keep Tab inside the sheet; the page behind it is covered.
+    const stops = Array.from(
+      sheet.current.querySelectorAll('button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])')
+    ).filter((el) => !el.disabled);
+    if (stops.length === 0) return;
+    const first = stops[0];
+    const last = stops[stops.length - 1];
+    const active = window.document.activeElement;
+    if (event.shiftKey && (active === first || active === sheet.current)) {
+      event.preventDefault();
+      last.focus();
+    } else if (!event.shiftKey && active === last) {
+      event.preventDefault();
+      first.focus();
+    }
+  };
+
+  return (
+    <>
+      <div
+        data-testid="sheet-backdrop"
+        className="fixed inset-0 z-40 bg-black/40"
+        onClick={onClose}
+        aria-hidden="true"
+      />
+      <div
+        ref={sheet}
+        role="dialog"
+        aria-modal="true"
+        aria-label="Edit citation"
+        tabIndex={-1}
+        onKeyDown={handleKeyDown}
+        className="editor-sheet fixed inset-x-0 bottom-0 z-50 overflow-y-auto overscroll-contain rounded-t-2xl bg-white shadow-2xl focus:outline-none"
+      >
+        {children}
+      </div>
+    </>
+  );
+}
+
+/**
+ * Try again. When the server said how long to wait (a busy 503 with Retry-After), the button is
+ * disabled and counts that down, so pressing it does not just be refused again.
+ */
+function RetryButton({ onRetry, waitSeconds }) {
+  const wait = Number.isFinite(waitSeconds) && waitSeconds > 0 ? Math.ceil(waitSeconds) : 0;
+  const [until] = useState(() => Date.now() + wait * 1000);
+  const [left, setLeft] = useState(wait);
+
+  useEffect(() => {
+    if (!wait) return undefined;
+    const tick = () => {
+      const remaining = Math.max(0, Math.ceil((until - Date.now()) / 1000));
+      setLeft(remaining);
+      if (remaining === 0) clearInterval(timer);
+    };
+    const timer = setInterval(tick, 250);
+    return () => clearInterval(timer);
+  }, [wait, until]);
+
+  return (
+    <button
+      type="button"
+      onClick={onRetry}
+      disabled={left > 0}
+      className="mb-6 min-h-[44px] px-5 py-2 bg-blue-600 text-white rounded-lg text-sm font-medium disabled:bg-gray-200 disabled:text-gray-700 disabled:cursor-not-allowed"
+    >
+      {left > 0 ? `Try again in ${left} s` : 'Try again'}
+    </button>
   );
 }
 
@@ -370,17 +694,20 @@ function StatCard({ label, value, color }) {
   );
 }
 
-function ModeButton({ children, active, onClick }) {
+function ModeButton({ children, id, controls, active, disabled = false, onClick }) {
   return (
     <button
       type="button"
       role="tab"
+      id={id}
+      aria-controls={controls}
       aria-selected={active}
+      disabled={disabled}
       onClick={onClick}
-      className={`px-4 py-2 rounded-lg text-sm font-medium transition-colors ${
+      className={`min-h-[44px] px-4 py-2 rounded-lg text-sm font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-60 ${
         active
           ? 'bg-blue-600 text-white shadow'
-          : 'bg-white text-gray-600 border border-gray-200 hover:bg-gray-50'
+          : 'bg-white text-gray-700 border border-gray-200 hover:bg-gray-50'
       }`}
     >
       {children}
@@ -388,20 +715,26 @@ function ModeButton({ children, active, onClick }) {
   );
 }
 
-function TabButton({ children, active, onClick, count }) {
+function TabButton({ children, id, active, onClick, count }) {
+  // Three tabs share the row on a phone, so a label may wrap and the count sits under it.
   return (
     <button
+      type="button"
+      role="tab"
+      id={`tab-${id}`}
+      aria-selected={active}
+      aria-controls={`panel-${id}`}
       onClick={onClick}
-      className={`px-3 sm:px-6 py-3 text-sm font-medium border-b-2 transition-colors ${
+      className={`flex-1 sm:flex-none min-h-[48px] min-w-0 px-1 sm:px-6 py-2 sm:py-3 flex flex-col sm:flex-row items-center justify-center gap-1 text-xs sm:text-sm font-medium border-b-2 transition-colors ${
         active
-          ? 'border-blue-600 text-blue-600'
-          : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
+          ? 'border-blue-600 text-blue-700'
+          : 'border-transparent text-gray-600 hover:text-gray-800 hover:border-gray-300'
       }`}
     >
-      {children}
+      <span>{children}</span>
       {count !== undefined && (
-        <span className={`ml-2 px-2 py-0.5 rounded-full text-xs ${
-          active ? 'bg-blue-100 text-blue-600' : 'bg-gray-100 text-gray-600'
+        <span className={`sm:ml-2 px-2 py-0.5 rounded-full text-xs ${
+          active ? 'bg-blue-100 text-blue-700' : 'bg-gray-100 text-gray-700'
         }`}>
           {count}
         </span>

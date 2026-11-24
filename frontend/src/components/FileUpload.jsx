@@ -1,62 +1,34 @@
-import React, { useState, useCallback, useEffect, useRef } from 'react';
-import { explainNetworkFailure, getLimits, subscribeLimits, uploadDocument } from '../services/api';
-import { checkFileBeforeUpload, limitsSummary, uploadingMessage } from '../utils/uploadChecks';
+import React, { useCallback, useEffect, useState } from 'react';
+import { getLimits, subscribeLimits } from '../services/api';
+import { CHECKING_SERVER_MESSAGE, limitsSummary, uploadingMessage } from '../utils/uploadChecks';
 
-export default function FileUpload({ onUpload }) {
+/**
+ * The upload box. It only shows what the page is doing and hands files up: the upload itself
+ * (and the way to cancel it) lives in App, so it carries on, and can be cancelled, whichever
+ * panel is on screen.
+ *
+ * - `uploading`: { file, phase } while a file is going up; phase is 'sending' or 'checking'
+ *   (finding out why it did not finish). null otherwise.
+ * - `error`, `notice`: what to say under the box; an error is a failure, a notice is a remark
+ *   (a second file was ignored, the upload was cancelled).
+ * - `onFiles(files)` is called with every file that was chosen or dropped.
+ */
+export default function FileUpload({ uploading = null, error = null, notice = null, onFiles, onCancel }) {
   const [isDragging, setIsDragging] = useState(false);
-  const [uploading, setUploading] = useState(null); // the file being sent, or null
-  const [error, setError] = useState(null);
   // The limits the server enforces, once the page has heard them; until then the defaults.
   const [limits, setLimits] = useState(getLimits);
-  // A drop is not blocked by the disabled input, so guard against a second file while one is in flight.
-  const busyRef = useRef(false);
 
   useEffect(() => subscribeLimits(setLimits), []);
 
-  const handleFile = useCallback(async (file) => {
-    if (busyRef.current) return;
-    // The browser's reported type is NOT checked. Phones send an empty or
-    // generic type for Word and PDF files that come from iCloud or Google Drive,
-    // and rejecting on it blocked working files before a single byte was sent.
-    // The server identifies the format from the file's own contents.
-    const problem = checkFileBeforeUpload(file, getLimits());
-    if (problem) {
-      setError(problem);
-      return;
-    }
-
-    setError(null);
-    busyRef.current = true;
-    setUploading(file);
-
-    try {
-      const result = await uploadDocument(file);
-      onUpload(result);
-    } catch (err) {
-      if (err?.cancelled) return;
-      // A response the server sent already says what is wrong (too long, unreadable, empty).
-      // No response at all could be a crash, a restart or a dropped connection, and the
-      // browser reports them all the same, so ask the server which it was.
-      setError(
-        err?.offline
-          ? await explainNetworkFailure('The upload failed')
-          : err?.message || 'The upload failed.'
-      );
-    } finally {
-      busyRef.current = false;
-      setUploading(null);
-    }
-  }, [onUpload]);
-
-  const handleDrop = useCallback((e) => {
-    e.preventDefault();
-    setIsDragging(false);
-
-    const file = e.dataTransfer.files[0];
-    if (file) {
-      handleFile(file);
-    }
-  }, [handleFile]);
+  const handleDrop = useCallback(
+    (e) => {
+      e.preventDefault();
+      setIsDragging(false);
+      const files = Array.from(e.dataTransfer?.files || []);
+      if (files.length) onFiles?.(files);
+    },
+    [onFiles]
+  );
 
   const handleDragOver = useCallback((e) => {
     e.preventDefault();
@@ -68,57 +40,85 @@ export default function FileUpload({ onUpload }) {
     setIsDragging(false);
   }, []);
 
-  const handleInputChange = useCallback((e) => {
-    const file = e.target.files[0];
-    if (file) {
-      handleFile(file);
-    }
-    // Picking the same file again after a failure must fire a change event.
-    e.target.value = '';
-  }, [handleFile]);
+  const handleInputChange = useCallback(
+    (e) => {
+      const files = Array.from(e.target.files || []);
+      // Picking the same file again after a failure must fire a change event.
+      e.target.value = '';
+      if (files.length) onFiles?.(files);
+    },
+    [onFiles]
+  );
+
+  const busy = Boolean(uploading);
 
   return (
     <div className="w-full">
       <label
-        className={`flex flex-col items-center justify-center w-full min-h-48 border-2 border-dashed rounded-lg cursor-pointer transition-colors ${
+        data-testid="dropzone"
+        className={`flex flex-col items-center justify-center w-full min-h-48 border-2 border-dashed rounded-lg transition-colors focus-within:ring-2 focus-within:ring-blue-500 focus-within:ring-offset-2 ${
+          busy ? 'cursor-wait' : 'cursor-pointer'
+        } ${
           isDragging
             ? 'border-blue-500 bg-blue-50'
-            : 'border-gray-300 bg-gray-50 hover:bg-gray-100'
-        } ${uploading ? 'opacity-50 cursor-not-allowed' : ''}`}
+            : busy
+              ? 'border-gray-300 bg-gray-100'
+              : 'border-gray-300 bg-gray-50 hover:bg-gray-100'
+        }`}
         onDrop={handleDrop}
         onDragOver={handleDragOver}
         onDragLeave={handleDragLeave}
       >
         <div className="flex flex-col items-center justify-center px-4 pt-5 pb-6 text-center">
-          {uploading ? (
+          {busy ? (
             <>
               <div className="animate-spin rounded-full h-10 w-10 border-4 border-blue-200 border-t-blue-600 mb-3"></div>
-              <p className="text-sm text-gray-500" role="status">{uploadingMessage(uploading)}</p>
+              <p className="text-sm text-gray-700 wrap-anywhere" role="status">
+                {uploading.phase === 'checking' ? CHECKING_SERVER_MESSAGE : uploadingMessage(uploading.file)}
+              </p>
             </>
           ) : (
             <>
-              <svg className="w-10 h-10 mb-3 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <svg className="w-10 h-10 mb-3 text-gray-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12" />
               </svg>
-              <p className="mb-2 text-sm text-gray-500">
+              <p className="mb-2 text-sm text-gray-600">
                 <span className="font-semibold">Click to upload</span> or drag and drop
               </p>
-              <p className="text-xs text-gray-400" data-testid="upload-limits">{limitsSummary(limits)}</p>
+              <p className="text-xs text-gray-600" data-testid="upload-limits">{limitsSummary(limits)}</p>
             </>
           )}
         </div>
+        {/* Visually hidden, not display:none, so the keyboard can reach it. */}
         <input
           type="file"
-          className="hidden"
+          className="sr-only"
+          aria-label="Choose a document to check"
           accept=".pdf,.docx,.txt,.md,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document,text/plain"
           onChange={handleInputChange}
-          disabled={Boolean(uploading)}
+          disabled={busy}
         />
       </label>
 
+      {busy && (
+        <button
+          type="button"
+          onClick={onCancel}
+          className="mt-3 min-h-[44px] px-5 rounded-lg border border-gray-300 bg-white text-sm font-medium text-gray-800 hover:bg-gray-50"
+        >
+          Cancel
+        </button>
+      )}
+
+      {notice && (
+        <p className="mt-3 text-sm text-gray-700" role="status" data-testid="upload-notice">
+          {notice}
+        </p>
+      )}
+
       {error && (
         <div className="mt-3 p-3 bg-red-50 border border-red-200 rounded-lg" role="alert">
-          <p className="text-sm text-red-600">{error}</p>
+          <p className="text-sm text-red-700 wrap-anywhere">{error}</p>
         </div>
       )}
     </div>

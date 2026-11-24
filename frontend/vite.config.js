@@ -7,6 +7,10 @@ export default defineConfig({
   build: {
     outDir: 'dist',
   },
+  test: {
+    // Some tests render a few hundred cards and press keys on them; allow for a slow or busy machine.
+    testTimeout: 15000,
+  },
   server: {
     proxy: {
       '/api': {

@@ -20,3 +20,22 @@ body {
   background-color: rgba(239, 68, 68, 0.1);
   border-bottom: 2px dashed #ef4444;
 }
+
+@layer utilities {
+  /* Break a long unbroken word (a file name with underscores, a URL) only when it would
+     otherwise run past its box, and let the box shrink to fit: unlike break-words, this also
+     lowers the width the word asks for, which is what stops it widening a flex or grid cell. */
+  .wrap-anywhere {
+    overflow-wrap: anywhere;
+  }
+}
+
+/* The citation editor on a phone: a sheet over the list, not a panel 20,000 px down the page. */
+.editor-sheet {
+  max-height: 88vh;
+}
+@supports (height: 1dvh) {
+  .editor-sheet {
+    max-height: 88dvh;
+  }
+}

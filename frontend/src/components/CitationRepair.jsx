@@ -196,7 +196,7 @@ export default function CitationRepair() {
           <button
             type="submit"
             disabled={loading || !text.trim()}
-            className="px-5 py-2 bg-blue-600 text-white rounded-lg text-sm font-medium
+            className="min-h-[44px] px-5 py-2 bg-blue-600 text-white rounded-lg text-sm font-medium
                        hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed
                        transition-colors"
           >
@@ -244,7 +244,7 @@ export default function CitationRepair() {
           <button
             type="button"
             onClick={() => run(text, style)}
-            className="mt-3 px-3 py-1.5 bg-white border border-red-200 rounded-lg
+            className="mt-3 min-h-[44px] px-4 py-1.5 bg-white border border-red-200 rounded-lg
                        text-xs font-medium text-red-800 hover:bg-red-50"
           >
             Try again

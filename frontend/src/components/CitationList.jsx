@@ -1,5 +1,8 @@
-import React, { memo, useMemo, useState } from 'react';
+import React, { memo, useEffect, useMemo, useRef, useState } from 'react';
 import { renderCitation } from '../utils/citationText';
+import { editedCitationText } from '../utils/editedCitation';
+import { fmt } from '../utils/format';
+import { PAGE_SIZE } from '../utils/paging';
 import { renderTemplate } from './CitationTypeGuide';
 
 const statusColors = {
@@ -21,13 +24,23 @@ const typeLabels = {
 
 // Rendering every card is what makes a 4,000-citation result unusable on a phone: thousands
 // of cards in the DOM, and every selection re-rendered all of them. Show a page at a time.
-const PAGE_SIZE = 100;
 
 const CitationCard = memo(function CitationCard({ citation, index, suggestion, isSelected, onSelect }) {
   return (
     <div
-      onClick={() => onSelect(citation)}
-      className={`p-4 rounded-lg border cursor-pointer transition-all ${
+      role="button"
+      tabIndex={0}
+      aria-pressed={isSelected}
+      data-card-index={index}
+      data-citation-id={citation.id}
+      onClick={(e) => onSelect(citation, e.currentTarget)}
+      onKeyDown={(e) => {
+        if (e.key === 'Enter' || e.key === ' ') {
+          e.preventDefault();
+          onSelect(citation, e.currentTarget);
+        }
+      }}
+      className={`p-4 rounded-lg border cursor-pointer transition-all focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 ${
         isSelected
           ? 'border-blue-500 bg-blue-50 ring-2 ring-blue-200'
           : 'border-gray-200 bg-white hover:border-gray-300 hover:shadow-sm'
@@ -36,7 +49,7 @@ const CitationCard = memo(function CitationCard({ citation, index, suggestion, i
       <div className="flex items-start justify-between gap-3">
         <div className="flex-1 min-w-0">
           <div className="flex items-center gap-2 mb-2">
-            <span className="text-xs font-medium text-gray-400">#{index + 1}</span>
+            <span className="text-xs font-medium text-gray-500">#{index + 1}</span>
             <span className={`px-2 py-0.5 rounded text-xs font-medium ${statusColors[citation.status]}`}>
               {citation.status.replace('_', ' ')}
             </span>
@@ -44,11 +57,27 @@ const CitationCard = memo(function CitationCard({ citation, index, suggestion, i
               {citation.kind_label || typeLabels[citation.type] || citation.type}
             </span>
             {citation.footnote_number && (
-              <span className="text-xs text-gray-400">Note {citation.footnote_number}</span>
+              <span className="text-xs text-gray-500">Note {citation.footnote_number}</span>
+            )}
+            {citation.edited && (
+              <span className="px-2 py-0.5 rounded text-xs font-medium bg-blue-100 text-blue-800">
+                Edited
+              </span>
             )}
           </div>
 
-          <p className="text-sm text-gray-700 mb-2 font-mono break-words">{citation.raw_text}</p>
+          {citation.edited ? (
+            <>
+              <p className="text-sm text-gray-900 mb-1 font-mono wrap-anywhere" data-testid="edited-text">
+                {renderCitation(editedCitationText(citation))}
+              </p>
+              <p className="text-xs text-gray-600 mb-2 font-mono wrap-anywhere">
+                As found in the document: {citation.raw_text}
+              </p>
+            </>
+          ) : (
+            <p className="text-sm text-gray-700 mb-2 font-mono wrap-anywhere">{citation.raw_text}</p>
+          )}
 
           {suggestion?.suggested_form && suggestion.suggested_form !== citation.raw_text && (
             <div className="mt-2 p-2 bg-green-50 rounded border border-green-100">
@@ -92,8 +121,19 @@ const CitationCard = memo(function CitationCard({ citation, index, suggestion, i
   );
 });
 
-export default function CitationList({ citations, shortFormSuggestions, onSelect, selectedId }) {
-  const [shown, setShown] = useState(PAGE_SIZE);
+export default function CitationList({
+  citations,
+  shortFormSuggestions,
+  onSelect,
+  selectedId,
+  shown: controlledShown,
+  onShownChange,
+}) {
+  // How many cards are out can be kept by the parent, so leaving this tab does not close them.
+  const [ownShown, setOwnShown] = useState(PAGE_SIZE);
+  const shown = controlledShown ?? ownShown;
+  const setShown = onShownChange ?? setOwnShown;
+
   // One pass to index the suggestions; the old code ran .find() over all of them per card.
   const suggestionById = useMemo(() => {
     const map = new Map();
@@ -101,9 +141,20 @@ export default function CitationList({ citations, shortFormSuggestions, onSelect
     return map;
   }, [shortFormSuggestions]);
 
+  // After "Show more" the button moves far down the page. Put focus on the first card that was
+  // added, so a keyboard or screen-reader user is where the new cards begin.
+  const listRef = useRef(null);
+  const focusIndex = useRef(null);
+  useEffect(() => {
+    if (focusIndex.current == null) return;
+    const card = listRef.current?.querySelector(`[data-card-index="${focusIndex.current}"]`);
+    focusIndex.current = null;
+    card?.focus();
+  }, [shown]);
+
   if (!citations || citations.length === 0) {
     return (
-      <div className="text-center py-8 text-gray-500">
+      <div className="text-center py-8 text-gray-600">
         <p>No citations found in this document.</p>
       </div>
     );
@@ -113,7 +164,12 @@ export default function CitationList({ citations, shortFormSuggestions, onSelect
   const remaining = citations.length - visible.length;
 
   return (
-    <div className="space-y-3">
+    <div ref={listRef}>
+      {/* Spoken when "Show more" adds cards; the count on screen is the button's. */}
+      <p className="sr-only" aria-live="polite">
+        Showing {fmt(visible.length)} of {fmt(citations.length)} citations
+      </p>
+      <div className="space-y-3">
       {visible.map((citation, index) => (
         <CitationCard
           key={citation.id}
@@ -127,12 +183,16 @@ export default function CitationList({ citations, shortFormSuggestions, onSelect
       {remaining > 0 && (
         <button
           type="button"
-          onClick={() => setShown((n) => n + PAGE_SIZE)}
-          className="w-full py-3 rounded-lg border border-gray-300 bg-white text-sm text-gray-700 hover:bg-gray-50"
+          onClick={() => {
+            focusIndex.current = visible.length;
+            setShown(shown + PAGE_SIZE);
+          }}
+          className="w-full min-h-[44px] py-3 rounded-lg border border-gray-300 bg-white text-sm text-gray-700 hover:bg-gray-50"
         >
-          Show {Math.min(PAGE_SIZE, remaining)} more ({remaining} not shown)
+          Show {fmt(Math.min(PAGE_SIZE, remaining))} more ({fmt(remaining)} not shown)
         </button>
       )}
+      </div>
     </div>
   );
 }

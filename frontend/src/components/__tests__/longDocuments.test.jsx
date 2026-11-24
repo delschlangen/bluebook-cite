@@ -134,7 +134,9 @@ describe('the document preview', () => {
     const text = filler(20000); // over a million characters
     const out = html(<DocumentPreview text={text} citations={[]} unsourcedClaims={[]} />);
     expect(out.length).toBeLessThan(40000);
-    expect(out).toContain(`of ${text.length.toLocaleString()}`);
+    // 20,000 repetitions of a 55-character sentence. Written out, not computed with the component's call.
+    expect(out).toContain('of 1,100,000');
+    expect(out).toContain('Characters 0 to 20,000 of 1,100,000');
   });
 
   it('has Previous disabled at the top and Next available', () => {

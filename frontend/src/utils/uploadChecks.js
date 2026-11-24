@@ -1,5 +1,6 @@
 // What can be said about a file before it is sent, and how the limits are put to a person.
 // Kept apart from the component so the wording and the arithmetic are testable on their own.
+import { fmt } from './format';
 
 // File types we can say, with certainty and before uploading, will not work.
 // Anything not listed is sent, and the server decides from the file's bytes.
@@ -31,9 +32,22 @@ function roundEstimate(n) {
   return n >= 100 ? Math.round(n / 10) * 10 : n;
 }
 
-function formatMb(bytes) {
-  const mb = bytes / (1024 * 1024);
-  return mb >= 10 ? mb.toFixed(0) : mb.toFixed(1);
+const MB = 1024 * 1024;
+
+/**
+ * A size for the message that refuses a file: one decimal below 100 MB, rounded UP, so the size
+ * shown is always above the limit it is being compared with ("10.1 MB" against a 10 MB limit,
+ * never "10 MB" against 10 MB).
+ */
+function formatMbRoundedUp(bytes) {
+  if (bytes < 100 * MB) return (Math.ceil((bytes * 10) / MB) / 10).toFixed(1);
+  return fmt(Math.ceil(bytes / MB));
+}
+
+/** A size for the message while a file is going up: KB for a small file, never "0.0 MB". */
+function formatSize(bytes) {
+  if (bytes < MB) return `${Math.max(1, Math.round(bytes / 1024))} KB`;
+  return `${(Math.round((bytes * 10) / MB) / 10).toFixed(1)} MB`;
 }
 
 /**
@@ -47,9 +61,9 @@ export function limitsSummary(limits) {
   const ordinaryPages = roundEstimate(Math.round(words / WORDS_PER_ORDINARY_PAGE));
   return (
     `Up to ${limits.max_upload_mb} MB. Word and text files up to about ` +
-    `${words.toLocaleString('en-US')} words (roughly ${densePages.toLocaleString('en-US')} to ` +
-    `${ordinaryPages.toLocaleString('en-US')} pages); PDFs up to ` +
-    `${limits.max_pdf_pages.toLocaleString('en-US')} pages. Footnotes are read.`
+    `${fmt(words)} words (roughly ${fmt(densePages)} to ` +
+    `${fmt(ordinaryPages)} pages); PDFs up to ` +
+    `${fmt(limits.max_pdf_pages)} pages. Footnotes are read.`
   );
 }
 
@@ -61,7 +75,7 @@ export function checkFileBeforeUpload(file, limits) {
   const maxBytes = limits.max_upload_mb * 1024 * 1024;
   if (file.size > maxBytes) {
     return (
-      `This file is ${formatMb(file.size)} MB. The limit is ${limits.max_upload_mb} MB. ` +
+      `This file is ${formatMbRoundedUp(file.size)} MB. The limit is ${limits.max_upload_mb} MB. ` +
       'Split the document at a chapter or section boundary and check the parts one at a time, ' +
       'or export it again at a smaller size.'
     );
@@ -72,11 +86,55 @@ export function checkFileBeforeUpload(file, limits) {
 /** What the upload box says while a file is going up and being read. */
 export function uploadingMessage(file) {
   if (!file) return 'Uploading...';
-  const size = formatMb(file.size);
-  const long = file.size > 2 * 1024 * 1024 || /\.pdf$/i.test(file.name || '');
+  const size = formatSize(file.size);
+  const long = file.size > 2 * MB || /\.pdf$/i.test(file.name || '');
   return long
-    ? `Uploading and reading ${size} MB. A long document can take a minute.`
-    : `Uploading ${size} MB...`;
+    ? `Uploading and reading ${size}. A long document can take a minute.`
+    : `Uploading ${size}...`;
+}
+
+/** What the upload box says while it is finding out why the upload did not finish. */
+export const CHECKING_SERVER_MESSAGE =
+  'The upload did not finish. Checking whether the server is still running... ' +
+  'This can take up to half a minute.';
+
+/** A count the server sent, or null when it is missing or not a usable number. */
+function count(value) {
+  return Number.isFinite(value) && value >= 0 ? value : null;
+}
+
+/** The sentence about outside lookups, or null when there is nothing to say. */
+function lookupNotice(lookup) {
+  if (!lookup || !(lookup.eligible > 0)) return null;
+  const skipped = count(lookup.skipped) ?? 0;
+  const matched = count(lookup.matched);
+  const failed = count(lookup.failed);
+  const limit = lookup.budget_exhausted ? '; the time limit was reached' : '';
+
+  // A server that reports how each lookup ended. "Looked up 200 of 218" would read as 200
+  // successes when an outside source being unreachable ends a lookup too, so say what happened.
+  if (matched !== null || failed !== null) {
+    const completed = count(lookup.completed) ?? 0;
+    const unmatched = matched !== null && matched < completed;
+    if (skipped === 0 && !failed && !unmatched) return null;
+    const outcomes = [];
+    if (matched !== null) outcomes.push(`${fmt(matched)} matched`);
+    if (failed) outcomes.push(`${fmt(failed)} could not be reached`);
+    return (
+      `Checked ${fmt(completed)} of ${fmt(lookup.eligible)} incomplete citations in outside ` +
+      `sources${limit}: ${outcomes.join(', ')}. ` +
+      'The rest, and any that did not match, need checking by hand.'
+    );
+  }
+
+  // An older server that only says how many lookups finished.
+  if (skipped > 0) {
+    return (
+      `Looked up ${fmt(lookup.completed)} of ${fmt(lookup.eligible)} incomplete citations in ` +
+      `outside sources${limit}, so ${fmt(skipped)} were left as found. Check those by hand.`
+    );
+  }
+  return null;
 }
 
 /**
@@ -86,24 +144,15 @@ export function uploadingMessage(file) {
 export function analysisNotices(analysis) {
   const notices = [];
   const stats = analysis?.stats;
-  const lookup = analysis?.lookup;
 
   if (stats?.citations_shown != null && stats.citations_shown < stats.total_citations) {
     notices.push(
-      `Found ${stats.total_citations.toLocaleString('en-US')} citations. Showing the first ` +
-        `${stats.citations_shown.toLocaleString('en-US')}, in document order.`
+      `Found ${fmt(stats.total_citations)} citations. Showing the first ` +
+        `${fmt(stats.citations_shown)}, in document order.`
     );
   }
-  if (lookup && lookup.eligible > 0) {
-    if (lookup.skipped > 0) {
-      notices.push(
-        `Looked up ${lookup.completed.toLocaleString('en-US')} of ` +
-          `${lookup.eligible.toLocaleString('en-US')} incomplete citations in outside sources` +
-          `${lookup.budget_exhausted ? '; the time limit was reached' : ''}, so ` +
-          `${lookup.skipped.toLocaleString('en-US')} were left as found. Check those by hand.`
-      );
-    }
-  }
+  const lookup = lookupNotice(analysis?.lookup);
+  if (lookup) notices.push(lookup);
   return notices;
 }
 
@@ -111,8 +160,8 @@ export function analysisNotices(analysis) {
 export function claimsNotice(stats) {
   if (stats?.claims_shown != null && stats.claims_shown < stats.unsourced_claims) {
     return (
-      `Found ${stats.unsourced_claims.toLocaleString('en-US')} statements that may need a ` +
-      `citation. Showing the ${stats.claims_shown.toLocaleString('en-US')} most likely.`
+      `Found ${fmt(stats.unsourced_claims)} statements that may need a ` +
+      `citation. Showing the ${fmt(stats.claims_shown)} most likely.`
     );
   }
   return null;
