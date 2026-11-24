@@ -19,7 +19,7 @@ def test_ligature_code_points_are_expanded():
 def test_line_end_hyphen_inside_a_word_is_dropped_and_joined():
     assert r("the regu-\nlation applies") == "the regulation applies"
     assert r("the regu‐\n  lation") == "the regulation"
-    assert r("the regu­\nlation") == "the regulation"
+    assert r("the regu\u00ad\nlation") == "the regulation"
 
 
 def test_real_hyphens_in_numbers_and_identifiers_are_kept():
@@ -29,7 +29,7 @@ def test_real_hyphens_in_numbers_and_identifiers_are_kept():
 
 
 def test_soft_hyphen_inside_a_word_is_removed():
-    assert r("sta­ndard") == "standard"
+    assert r("sta\u00adndard") == "standard"
 
 
 def test_pdfium_hyphen_markers():
@@ -76,7 +76,8 @@ JOINED = [          # the hyphen was added to break the word: dropped, the halve
     ("or-\nder of the court", "order of the court"),
     ("pris-\non officials", "prison officials"),
     ("mo-\ndel rules", "model rules"),
-    ("regu­\nlation", "regulation"),                           # a soft hyphen is never part of a spelling
+    ("regu\u00ad\nlation", "regulation"),                           # a soft hyphen is never part of a spelling
+    ("non\u00ad\nprofit", "nonprofit"),                             # not even after a prefix that usually keeps its hyphen
     ("State-\nment", "Statement"),
 ]
 
@@ -90,6 +91,10 @@ KEPT = [            # part of the spelling: the hyphen stays and the line break 
     ("e-\nmail", "e-mail"),
     ("5-\nyear plan", "5-year plan"),
     ("FDA-\napproved", "FDA-approved"),
+    ("COVID-\nrelated costs", "COVID-related costs"),
+    ("GAO-\nreport", "GAO-report"),
+    ("X-\nray", "X-ray"),
+    ("T-\nshirt", "T-shirt"),
     ("state-\nof-the-art", "state-of-the-art"),
     ("mother-\nin-law", "mother-in-law"),
     ("United States v. Lopez-\nde la Cruz", "United States v. Lopez-de la Cruz"),
@@ -151,6 +156,7 @@ URL_NOT_JOINED = [
     ("https://www.example.gov/a/\n- https://www.example.gov/b/", "https://www.example.gov/a/\n- https://www.example.gov/b/"),
     ("https://www.example.gov/a/\n• Smith v. Jones", "https://www.example.gov/a/\n• Smith v. Jones"),
     ("https://www.example.gov/a/\n2. Smith v. Jones", "https://www.example.gov/a/\n2. Smith v. Jones"),
+    ("https://www.example.gov/a/\n(3) Smith v. Jones", "https://www.example.gov/a/\n(3) Smith v. Jones"),
     ("https://www.example.gov/a/\n[^3] Smith v. Jones", "https://www.example.gov/a/\n[^3] Smith v. Jones"),
     ("https://www.example.gov/a/\nhttps://www.example.gov/b/", "https://www.example.gov/a/\nhttps://www.example.gov/b/"),
     ("https://www.example.gov/a/\n/", "https://www.example.gov/a/\n/"),
@@ -188,7 +194,7 @@ RUNS = {
     "dots": ".", "hyphens": "-", "hyphen then newline": "a-\n", "hyphen space newline space": "a- \n ",
     "capital hyphen newline": "Ab-\n", "spaces": " ", "tabs": "\t", "newlines": "\n", "blank lines": "a\n\n",
     "url": "http://aaaaaaaa", "url lines": "http://a/\n", "url continued": "http://a/\n/b", "url numbered": "http://a/\n2 B\n",
-    "marker newline": "\x02\n", "marker space newline": "\x02 \n ", "soft hyphen": "­", "soft hyphen newline": "ab­\n",
+    "marker newline": "\x02\n", "marker space newline": "\x02 \n ", "soft hyphen": "\u00ad", "soft hyphen newline": "ab\u00ad\n",
     "ligature": "ﬁ", "control": "\x01", "mixed whitespace": " \n\t", "brackets": "(", "bullets": "- ", "particles": "A-\nde ",
 }
 
@@ -240,7 +246,7 @@ def test_a_664_byte_pdf_of_letters_is_read_in_a_blink():
 PIECES = [
     "re", "regu", "lation", "GAO", "16", "552", "Smith", "Jones", "de", "la", "Cruz", "and", "of", "the", "non", "e", "FDA",
     "approved", "van", "state", "art", "A", "b", "10", "K", "x", "http://x.org/a", "https://www.gao.gov/p/", "/b-1", "3",
-    "(a)", "“q”", "-", "-", "-", "‐", "­", "\n", "\n", "\n", " ", " ", "\t", "\n\n", "\x02", "￾",
+    "(a)", "“q”", "-", "-", "-", "‐", "\u00ad", "\n", "\n", "\n", " ", " ", "\t", "\n\n", "\x02", "￾",
     "ﬁ", "- ", "2 ", "[^2] ",
 ]
 
@@ -257,7 +263,7 @@ def naive_dehyphenate(text: str) -> str:
             return None
         if not (len(nxt) >= 2 and nxt[:2].isascii() and nxt[:2].isalpha() and nxt[:2].islower()):
             return None
-        if hyphen == "­":
+        if hyphen == "\u00ad":
             return frag
         low, word = frag.lower(), nxt.lower()
         if word in ("and", "or"):
@@ -343,7 +349,7 @@ def naive_repair(text: str) -> str:
     text = re.sub(r"[\x00-\x08\x0b\x0e-\x1f\x7f]", "", text)
     text = text.translate(P._LIG_TABLE)
     text = naive_dehyphenate(text)
-    text = text.replace("­", "").replace("‐", "-").replace("‑", "-")
+    text = text.replace("\u00ad", "").replace("‐", "-").replace("‑", "-")
     return naive_join_urls(text)
 
 
@@ -364,7 +370,7 @@ def test_repair_text_is_idempotent_on_random_text():
     the pieces: removing one at the start of a line can leave a line-end hyphen that was not
     there before, and the text is repaired once, so that corner is not worth a different rule.)"""
     rng = random.Random(7)
-    pieces = [p for p in PIECES if p not in ("­", "\x02", "￾")]
+    pieces = [p for p in PIECES if p not in ("\u00ad", "\x02", "￾")]
     for _ in range(1500):
         text = "".join(rng.choice(pieces) for _ in range(rng.randint(1, 18)))
         once = r(text)

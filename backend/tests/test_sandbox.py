@@ -321,21 +321,21 @@ class TestAdmission:
         assert sandbox.stats() == {"running": 0, "waiting": 0}
 
     def test_uploads_do_not_use_the_thread_pool(self, fake, monkeypatch):
-        """The analysis runs on the default thread pool; a pool full of uploads would starve it."""
-        import threading
-
-        before = threading.active_count()
+        """The analysis runs on the default thread pool; a pool full of uploads would starve it. Any
+        use of the loop's default executor (asyncio.to_thread uses it) fails this test."""
         monkeypatch.setattr(limits, "PARSE_MAX_CONCURRENT", 2)
 
         async def scenario():
-            tasks = [asyncio.ensure_future(sandbox.parse_isolated(b"x", "sleep|0.6")) for _ in range(2)]
-            await asyncio.sleep(0.3)
-            during = threading.active_count()
-            await asyncio.gather(*tasks)
-            return during
+            loop = asyncio.get_running_loop()
 
-        during = run(scenario())
-        assert during - before <= 2, "reading two uploads should not occupy a pool of worker threads"
+            def forbidden(*args, **kwargs):
+                raise AssertionError("an upload used the default thread pool")
+
+            loop.run_in_executor = forbidden
+            results = await asyncio.gather(*(sandbox.parse_isolated(b"x", "sleep|0.3") for _ in range(2)))
+            return [r.text for r in results]
+
+        assert run(scenario()) == ["slept", "slept"]
 
 
 # --- through the endpoint ----------------------------------------------------------------------

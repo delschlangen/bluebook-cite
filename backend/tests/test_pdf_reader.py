@@ -571,7 +571,11 @@ class TestSecondOpinion:
 
 class TestBoundsInsideAPage:
     def test_a_page_with_more_text_than_the_budget_has_left_is_refused_before_any_layout(self, monkeypatch):
+        """50,000 characters is under the layout limit, so layout WOULD be built for it; it must not
+        be, because the page cannot fit in the 20,000 the text budget allows."""
         monkeypatch.setattr(P, "_build_lines", lambda *a, **k: pytest.fail("layout was built for a page that cannot fit"))
+        with pytest.raises(P.PdfTooLongError, match=r"20,000-character limit"):
+            P.read_pdf(one_page_pdf(50_000), max_chars=20_000)
         with pytest.raises(P.PdfTooLongError, match=r"100,000-character limit"):
             P.read_pdf(one_page_pdf(300_000), max_chars=100_000)
 

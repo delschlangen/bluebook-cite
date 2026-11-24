@@ -69,6 +69,17 @@ def test_a_nested_tables_text_belongs_to_the_cell_that_holds_it():
     assert text == "Left cell. Inside. Also inside. | Right cell."
 
 
+def test_a_nested_table_in_a_later_cell_does_not_disturb_the_cells_before_it():
+    outer = (
+        "<w:tbl><w:tr>"
+        f"<w:tc>{para('First.')}</w:tc>"
+        f"<w:tc>{para('Second.')}<w:tbl><w:tr><w:tc>{para('Inside.')}</w:tc></w:tr></w:tbl></w:tc>"
+        f"<w:tc>{para('Third.')}</w:tc>"
+        "</w:tr></w:tbl>"
+    )
+    assert read(docx_with(outer)).text == "First. | Second. Inside. | Third."
+
+
 def test_ordinary_tables_read_as_rows_of_cells_as_before():
     body = (
         para("Before.")
@@ -164,6 +175,16 @@ def test_a_doctype_is_refused_even_in_another_encoding():
     buffer = io.BytesIO()
     with zipfile.ZipFile(buffer, "w") as archive:
         archive.writestr("word/document.xml", evil)
+    with pytest.raises(UnsupportedDocumentError, match="cannot be read safely"):
+        read(buffer.getvalue())
+
+
+def test_a_doctype_without_any_entity_is_refused_too():
+    """No Word part has a DOCTYPE; the old reader refused any, and so does this one."""
+    xml = f'<?xml version="1.0"?><!DOCTYPE d><w:document {W}><w:body><w:p><w:r><w:t>x</w:t></w:r></w:p></w:body></w:document>'
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as archive:
+        archive.writestr("word/document.xml", xml)
     with pytest.raises(UnsupportedDocumentError, match="cannot be read safely"):
         read(buffer.getvalue())
 
