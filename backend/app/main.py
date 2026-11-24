@@ -17,6 +17,7 @@ from .models.citation import (
     CitationStatus,
     CitationType,
     DocumentAnalysis,
+    LookupSummary,
     UploadResponse,
 )
 from .services.bluebook_rules import BluebookFormatter
@@ -36,6 +37,11 @@ MAX_CONCURRENT_LOOKUPS = 6
 # Extraction and formatting still return if this is hit; only the enrichment
 # is dropped, so a slow upstream degrades the result instead of failing it.
 COMPLETION_BUDGET_SECONDS = float(os.getenv("COMPLETION_BUDGET_SECONDS", "25"))
+
+# Cap on how many citations one document may send to outside lookups. Time alone
+# is not a safe bound: with fast upstreams a very long document could still queue
+# thousands of requests against free public APIs.
+MAX_LOOKUPS_PER_DOCUMENT = int(os.getenv("MAX_LOOKUPS_PER_DOCUMENT", "200"))
 
 # Uploads are unauthenticated, so the body is read with a hard cap rather than
 # pulled into memory in full. Content-Type is client-supplied and cannot be
@@ -224,57 +230,63 @@ async def upload_document(file: UploadFile = File(...)):
 async def _complete_citations(citations):
     """Enrich incomplete citations concurrently, under a total time budget.
 
-    Previously this ran one lookup at a time with a long per-call timeout, so a
-    document with a handful of incomplete citations could outlive any browser's
-    patience and surface as an opaque network failure. Now the lookups overlap,
-    the whole phase is bounded, and exceeding the budget degrades the response
-    instead of failing it.
+    Returns (citations, LookupSummary).
+
+    The lookups overlap and the whole phase is bounded, so a slow upstream
+    degrades the response instead of failing it. When the budget runs out, every
+    lookup that had already finished is KEPT and only the unfinished ones are
+    dropped. (This used to discard all of them, so the longer the document, the
+    more likely it was to get no enrichment at all.) The summary says how many
+    were skipped so the page can say so rather than imply it looked everything up.
     """
     # Engine-recognised kinds (reports, rules, regulations, legislative materials...) are
     # never sent to an outside search. No free source can verify a record for them, and
     # searching a case database for a Federal Register cite can only return noise.
-    needs_lookup = [
+    eligible = [
         c for c in citations
         if c.status.value in ("incomplete", "needs_verification") and not c.kind
     ]
+    # Bound the number of tasks as well as the time, so a huge document cannot queue
+    # thousands of requests against free public APIs.
+    to_look_up = eligible[:MAX_LOOKUPS_PER_DOCUMENT]
 
-    if needs_lookup:
+    finished: dict[int, Citation] = {}
+    budget_exhausted = False
+
+    if to_look_up:
         completer = CitationCompleter(get_lookup_service())
         semaphore = asyncio.Semaphore(MAX_CONCURRENT_LOOKUPS)
 
         async def complete_one(citation):
             async with semaphore:
                 try:
-                    return await completer.complete_citation(citation)
+                    finished[id(citation)] = await completer.complete_citation(citation)
                 except Exception:
                     # A failed enrichment must not fail the document. The
                     # citation is still returned exactly as it was found.
-                    return citation
+                    finished[id(citation)] = citation
 
-        try:
-            enriched = await asyncio.wait_for(
-                asyncio.gather(
-                    *(complete_one(c) for c in needs_lookup),
-                    return_exceptions=True,
-                ),
-                timeout=COMPLETION_BUDGET_SECONDS,
-            )
-            replacements = {
-                id(original): result
-                for original, result in zip(needs_lookup, enriched, strict=True)
-                if not isinstance(result, Exception) and result is not None
-            }
-        except TimeoutError:
-            replacements = {}
-    else:
-        replacements = {}
+        tasks = [asyncio.create_task(complete_one(c)) for c in to_look_up]
+        _, pending = await asyncio.wait(tasks, timeout=COMPLETION_BUDGET_SECONDS)
+        if pending:
+            budget_exhausted = True
+            for task in pending:
+                task.cancel()
+            await asyncio.gather(*pending, return_exceptions=True)
 
     completed = []
     for citation in citations:
-        citation = replacements.get(id(citation), citation)
+        citation = finished.get(id(citation), citation)
         citation.suggested_correction = formatter.format_citation(citation)
         completed.append(citation)
-    return completed
+
+    summary = LookupSummary(
+        eligible=len(eligible),
+        completed=len(finished),
+        skipped=len(eligible) - len(finished),
+        budget_exhausted=budget_exhausted,
+    )
+    return completed, summary
 
 
 @app.post("/api/analyze", response_model=AnalysisResponse)
@@ -287,7 +299,7 @@ async def analyze_citations(
     # Extract citations
     citations = extractor.extract_all(text)
 
-    completed_citations = await _complete_citations(citations)
+    completed_citations, lookup_summary = await _complete_citations(citations)
 
     # Analyze citation sequence for short forms
     context_analyzer = DocumentContextAnalyzer()
@@ -320,6 +332,7 @@ async def analyze_citations(
         analysis=analysis,
         short_form_suggestions=short_form_suggestions,
         stats=stats,
+        lookup=lookup_summary,
     )
 
 

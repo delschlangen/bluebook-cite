@@ -104,27 +104,38 @@ def make_docx(
     return buffer.getvalue()
 
 
-def make_pdf(lines: list[tuple[int, str]]) -> bytes:
-    """A minimal one-page PDF with text at the given (y, text) positions.
+def _pdf_escape(text: str) -> str:
+    return text.replace("\\", "\\\\").replace("(", "\\(").replace(")", "\\)")
+
+
+def make_pdf_pages(pages: list[list[tuple[int, str]]]) -> bytes:
+    """A PDF with one page per item; each page is a list of (y, text) lines.
 
     Handwritten rather than generated with a library, so the test suite carries
-    no PDF dependency beyond the parser under test.
+    no PDF dependency beyond the parser under test. Each page has its own content
+    stream, as in a real document, which is what makes page-by-page reading (and
+    its memory behaviour) testable.
     """
-    def pdf_escape(text: str) -> str:
-        return text.replace("\\", "\\\\").replace("(", "\\(").replace(")", "\\)")
-
-    stream = "BT /F1 12 Tf " + " ".join(
-        f"1 0 0 1 72 {y} Tm ({pdf_escape(t)}) Tj" for y, t in lines
-    ) + " ET"
-
-    objects = [
+    count = len(pages)
+    # Object numbers: 1 catalog, 2 pages tree, 3 font, then (page, contents) pairs.
+    first_page_obj = 4
+    page_objs = [first_page_obj + 2 * i for i in range(count)]
+    objects: list[str] = [
         "<< /Type /Catalog /Pages 2 0 R >>",
-        "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
-        "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R "
-        "/Resources << /Font << /F1 5 0 R >> >> >>",
-        f"<< /Length {len(stream)} >>\nstream\n{stream}\nendstream",
+        "<< /Type /Pages /Kids ["
+        + " ".join(f"{n} 0 R" for n in page_objs)
+        + f"] /Count {count} >>",
         "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
     ]
+    for i, lines in enumerate(pages):
+        stream = "BT /F1 12 Tf " + " ".join(
+            f"1 0 0 1 72 {y} Tm ({_pdf_escape(t)}) Tj" for y, t in lines
+        ) + " ET"
+        objects.append(
+            f"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] "
+            f"/Contents {page_objs[i] + 1} 0 R /Resources << /Font << /F1 3 0 R >> >> >>"
+        )
+        objects.append(f"<< /Length {len(stream)} >>\nstream\n{stream}\nendstream")
 
     out = bytearray(b"%PDF-1.4\n")
     offsets = []
@@ -139,3 +150,8 @@ def make_pdf(lines: list[tuple[int, str]]) -> bytes:
         f"trailer\n<< /Size {len(objects) + 1} /Root 1 0 R >>\nstartxref\n{xref_at}\n%%EOF\n"
     ).encode()
     return bytes(out)
+
+
+def make_pdf(lines: list[tuple[int, str]]) -> bytes:
+    """A minimal one-page PDF with text at the given (y, text) positions."""
+    return make_pdf_pages([lines])

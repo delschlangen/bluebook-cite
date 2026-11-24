@@ -139,8 +139,22 @@ class AnalysisStats(BaseModel):
     needs_verification: int
     unsourced_claims: int
 
+class LookupSummary(BaseModel):
+    """How much of the outside lookup phase actually ran.
+
+    A long document can have more citations needing a lookup than the time budget
+    allows. Reporting the counts lets the page say "looked up 150 of 218" instead of
+    implying every one was checked.
+    """
+    eligible: int = 0          # citations that were missing details a lookup could supply
+    completed: int = 0         # lookups that ran to the end (whether or not they found anything)
+    skipped: int = 0           # eligible but not attempted or not finished in time
+    budget_exhausted: bool = False
+
+
 class AnalysisResponse(BaseModel):
     """Response from citation analysis."""
     analysis: DocumentAnalysis
     short_form_suggestions: list[dict]
     stats: AnalysisStats
+    lookup: LookupSummary | None = None
