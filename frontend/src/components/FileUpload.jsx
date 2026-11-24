@@ -1,24 +1,65 @@
 import React, { useState, useCallback } from 'react';
 import { uploadDocument } from '../services/api';
 
+const MAX_BYTES = 10 * 1024 * 1024;
+
+// File types we can say, with certainty and before uploading, will not work.
+// Anything not listed is sent, and the server decides from the file's bytes.
+const KNOWN_UNSUPPORTED = {
+  doc: 'Old-format Word (.doc) files are not supported. In Word, choose Save As and pick .docx, or export a PDF.',
+  rtf: 'Rich Text Format (.rtf) is not supported. Save it as .docx or PDF.',
+  odt: 'OpenDocument (.odt) files are not supported. Save it as .docx or PDF.',
+  pages: 'Apple Pages files are not supported. Export to Word (.docx) or PDF first.',
+  key: 'Keynote files are not supported. Upload a Word document, PDF or text file.',
+  numbers: 'Numbers files are not supported. Upload a Word document, PDF or text file.',
+  pptx: 'PowerPoint files are not supported. Upload a Word document, PDF or text file.',
+  xlsx: 'Excel files are not supported. Upload a Word document, PDF or text file.',
+  jpg: 'Images are not supported. Upload a PDF with selectable text, or a Word or text file.',
+  jpeg: 'Images are not supported. Upload a PDF with selectable text, or a Word or text file.',
+  png: 'Images are not supported. Upload a PDF with selectable text, or a Word or text file.',
+  heic: 'Images are not supported. Upload a PDF with selectable text, or a Word or text file.',
+};
+
+function unsupportedReason(file) {
+  const name = (file?.name || '').toLowerCase();
+  const ext = name.includes('.') ? name.split('.').pop() : '';
+  return KNOWN_UNSUPPORTED[ext] || null;
+}
+
+// Hosting platforms reject large request bodies before the app sees them, and a
+// rejected request carries no CORS headers, so the browser reports it only as a
+// failed fetch. Say what is likely going on instead of "could not reach server".
+const HOST_LIMIT_BYTES = 4 * 1024 * 1024;
+
+function explainUploadFailure(err, file) {
+  if (err?.offline && file.size > HOST_LIMIT_BYTES) {
+    const mb = (file.size / (1024 * 1024)).toFixed(1);
+    return (
+      `The upload failed. This file is ${mb} MB, and some hosts reject uploads over ` +
+      `about 4 MB without any explanation. Try a smaller file, or a PDF or ` +
+      `text copy of the same document.`
+    );
+  }
+  return err?.message || 'The upload failed.';
+}
+
 export default function FileUpload({ onUpload }) {
   const [isDragging, setIsDragging] = useState(false);
   const [uploading, setUploading] = useState(false);
   const [error, setError] = useState(null);
 
   const handleFile = useCallback(async (file) => {
-    const allowedTypes = [
-      'application/pdf',
-      'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
-      'text/plain',
-    ];
-
-    if (!allowedTypes.includes(file.type)) {
-      setError('Please upload a PDF, DOCX, or TXT file');
+    // The browser's reported type is NOT checked. Phones send an empty or
+    // generic type for Word and PDF files that come from iCloud or Google Drive,
+    // and rejecting on it blocked working files before a single byte was sent.
+    // The server identifies the format from the file's own contents.
+    const problem = unsupportedReason(file);
+    if (problem) {
+      setError(problem);
       return;
     }
 
-    if (file.size > 10 * 1024 * 1024) {
+    if (file.size > MAX_BYTES) {
       setError('File size must be less than 10MB');
       return;
     }
@@ -30,7 +71,7 @@ export default function FileUpload({ onUpload }) {
       const result = await uploadDocument(file);
       onUpload(result);
     } catch (err) {
-      setError(err.message);
+      setError(explainUploadFailure(err, file));
     } finally {
       setUploading(false);
     }
@@ -89,14 +130,14 @@ export default function FileUpload({ onUpload }) {
               <p className="mb-2 text-sm text-gray-500">
                 <span className="font-semibold">Click to upload</span> or drag and drop
               </p>
-              <p className="text-xs text-gray-400">PDF, DOCX, or TXT (max 10MB)</p>
+              <p className="text-xs text-gray-400">PDF, Word (.docx), or text (max 10MB). Footnotes are read.</p>
             </>
           )}
         </div>
         <input
           type="file"
           className="hidden"
-          accept=".pdf,.docx,.txt,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document,text/plain"
+          accept=".pdf,.docx,.txt,.md,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document,text/plain"
           onChange={handleInputChange}
           disabled={uploading}
         />

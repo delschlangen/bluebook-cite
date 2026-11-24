@@ -23,7 +23,7 @@ from .services.bluebook_rules import BluebookFormatter
 from .services.context_analyzer import DocumentContextAnalyzer
 from .services.extractor import CitationExtractor
 from .services.lookup_service import CitationCompleter, LegalLookupService
-from .services.parser import DocumentParser
+from .services.parser import DocumentParser, UnsupportedDocumentError
 from .services.repair import CitationRepairer
 from .services.source_finder import ClaimDetector, SourceFinder
 
@@ -157,19 +157,13 @@ async def health_check():
 
 @app.post("/api/upload", response_model=UploadResponse)
 async def upload_document(file: UploadFile = File(...)):
-    """Upload a legal document for citation analysis."""
-    allowed_types = {
-        "application/pdf": "pdf",
-        "application/vnd.openxmlformats-officedocument.wordprocessingml.document": "docx",
-        "text/plain": "txt",
-    }
+    """Upload a legal document for citation analysis.
 
-    if file.content_type not in allowed_types:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Unsupported file type: {file.content_type}. Supported: PDF, DOCX, TXT"
-        )
-
+    The format is detected from the file's bytes. The Content-Type the browser
+    reports is deliberately ignored: phones send an empty or generic type for
+    Word and PDF files from iCloud or Google Drive, and rejecting on it turned
+    a working upload into a failure the user could not diagnose.
+    """
     content = await file.read(MAX_UPLOAD_BYTES + 1)
     if len(content) > MAX_UPLOAD_BYTES:
         raise HTTPException(
@@ -180,17 +174,21 @@ async def upload_document(file: UploadFile = File(...)):
         raise HTTPException(status_code=400, detail="The uploaded file is empty.")
 
     try:
-        # pdfplumber and python-docx are synchronous and CPU-bound. Calling
+        # pdfplumber and zip/XML parsing are synchronous and CPU-bound. Calling
         # them directly would block the event loop for the whole parse and
         # stall every other in-flight request.
-        document_text = await asyncio.to_thread(
-            parser.parse, content, file.content_type
+        parsed = await asyncio.to_thread(
+            parser.parse_document, content, file.filename
         )
+    except UnsupportedDocumentError as e:
+        # The message already says what to do about it.
+        raise HTTPException(status_code=415, detail=str(e)) from e
     except Exception as e:
         raise HTTPException(
             status_code=400, detail=f"Failed to parse document: {e}"
         ) from e
 
+    document_text = parsed.text
     if not document_text or not document_text.strip():
         raise HTTPException(
             status_code=400,
@@ -215,6 +213,10 @@ async def upload_document(file: UploadFile = File(...)):
         has_footnotes=structure["has_footnotes"],
         text_preview=preview,
         full_text=document_text,
+        format=parsed.format,
+        footnote_count=parsed.footnote_count,
+        endnote_count=parsed.endnote_count,
+        warnings=parsed.warnings,
     )
 
 

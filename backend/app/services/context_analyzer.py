@@ -44,36 +44,39 @@ class DocumentContextAnalyzer:
             "estimated_word_count": len(text.split()),
         }
 
-        # Detect footnote markers
-        footnote_patterns = [
-            r'\[\d+\]',
-            r'(?:^|\s)\d{1,3}(?=\s+[A-Z])',
-            r'(?:^|\s)\d{1,3}\.',
-        ]
+        # Real footnotes extracted from a Word document carry an explicit marker,
+        # which is far more reliable than guessing from stray digits.
+        explicit_notes = len(re.findall(r'^\[\^e?\d+\]', text, re.MULTILINE))
 
-        for pattern in footnote_patterns:
-            if re.search(pattern, text, re.MULTILINE):
-                analysis["has_footnotes"] = True
-                break
-
-        # Count potential footnotes
-        footnote_count = len(re.findall(r'\[\d+\]', text))
-
-        if footnote_count > 10:
-            analysis["citation_style"] = "law_review"
-        elif footnote_count > 0:
-            analysis["citation_style"] = "footnotes"
+        if explicit_notes:
+            analysis["has_footnotes"] = True
+            analysis["footnote_count"] = explicit_notes
+            analysis["citation_style"] = "law_review" if explicit_notes > 10 else "footnotes"
         else:
-            analysis["citation_style"] = "inline"
+            footnote_patterns = [
+                r'\[\d+\]',
+                r'(?:^|\s)\d{1,3}(?=\s+[A-Z])',
+                r'(?:^|\s)\d{1,3}\.',
+            ]
+            for pattern in footnote_patterns:
+                if re.search(pattern, text, re.MULTILINE):
+                    analysis["has_footnotes"] = True
+                    break
 
-        # Count sections
+            footnote_count = len(re.findall(r'\[\d+\]', text))
+            if footnote_count > 10:
+                analysis["citation_style"] = "law_review"
+            elif footnote_count > 0:
+                analysis["citation_style"] = "footnotes"
+            else:
+                analysis["citation_style"] = "inline"
+
         section_patterns = [
             r'^(?:I{1,3}|IV|V|VI{0,3}|IX|X)\.',
             r'^\d+\.',
             r'^[A-Z]\.',
             r'^Section\s+\d+',
         ]
-
         for pattern in section_patterns:
             matches = re.findall(pattern, text, re.MULTILINE)
             analysis["section_count"] = max(analysis["section_count"], len(matches))

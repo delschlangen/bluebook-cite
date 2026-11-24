@@ -6,6 +6,7 @@ import re
 
 from ..models.citation import Citation, CitationStatus, CitationType
 from ..utils.bluebook_patterns import PATTERNS
+from ..utils.text_normalize import normalize_text
 
 # Procedural case-name forms where the leading words ARE the party name and
 # must survive cleanup.
@@ -86,6 +87,10 @@ class CitationExtractor:
 
     def extract_all(self, text: str) -> list[Citation]:
         """Extract all citations from text."""
+        # Curly quotes and en dashes from phones and word processors defeat the
+        # patterns. The replacement is one character for one character, so every
+        # offset still points at the same place in the original document.
+        text = normalize_text(text)
         citations = []
 
         # Track positions to avoid duplicate matches
@@ -389,10 +394,24 @@ class CitationExtractor:
 
     def _assign_footnotes(self, citations: list[Citation], text: str) -> None:
         """Assign footnote numbers to citations based on document structure."""
-        # Find footnote markers
+        # A Word document carries real footnote numbers, written in front of each
+        # note by the parser. When any are present they are the truth, and the
+        # guess below, which would misread numbered headings and lines that begin
+        # with a reporter volume, is skipped entirely.
         footnote_positions = []
-        for match in PATTERNS["footnote_marker"].finditer(text):
-            footnote_positions.append((int(match.group(1)), match.start()))
+        explicit = list(PATTERNS["footnote_marker_explicit"].finditer(text))
+        if explicit:
+            # Endnotes are numbered separately and would collide with footnotes.
+            footnote_positions = [
+                (int(m.group(2)), m.start()) for m in explicit if not m.group(1)
+            ]
+            endnote_positions = [
+                (int(m.group(2)), m.start()) for m in explicit if m.group(1)
+            ]
+            footnote_positions += endnote_positions
+        else:
+            for match in PATTERNS["footnote_marker"].finditer(text):
+                footnote_positions.append((int(match.group(1)), match.start()))
 
         footnote_positions.sort(key=lambda x: x[1])
 

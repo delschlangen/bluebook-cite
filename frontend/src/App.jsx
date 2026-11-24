@@ -184,6 +184,18 @@ function App() {
                 <h2 className="text-lg font-semibold">Analysis Summary</h2>
                 <span className="text-sm text-gray-500">{document.filename}</span>
               </div>
+              {(document.footnote_count > 0 || document.endnote_count > 0) && (
+                <p className="text-xs text-gray-500 mb-4">
+                  Read {document.footnote_count} footnote{document.footnote_count === 1 ? '' : 's'}
+                  {document.endnote_count > 0
+                    ? ` and ${document.endnote_count} endnote${document.endnote_count === 1 ? '' : 's'}`
+                    : ''}
+                  {' '}from the Word file.
+                </p>
+              )}
+              {document.warnings?.map((w) => (
+                <p key={w} className="text-xs text-amber-700 mb-2">{w}</p>
+              ))}
               <div className="grid grid-cols-2 md:grid-cols-5 gap-4">
                 <StatCard label="Total Citations" value={analysis.stats.total_citations} color="blue" />
                 <StatCard label="Complete" value={analysis.stats.complete} color="green" />

@@ -139,6 +139,11 @@ PATTERNS: dict[str, Pattern] = {
     # and statute titles were read as footnote numbers: "47 U.S.C. § 230" was
     # labelled "Note 47" and "395 U.S. 444" became "Note 395". The reporter
     # lookahead is a second guard for numbered lines that begin a citation.
+    # Written by the Word parser in front of each real footnote, e.g. "[^4] ".
+    # Endnotes use "[^e4]". When these are present they are authoritative and
+    # the digit-at-line-start heuristic below is not consulted at all.
+    "footnote_marker_explicit": re.compile(r"(?m)^[ \t]*\[\^(e?)(\d{1,4})\][ \t]*"),
+
     "footnote_marker": re.compile(
         rf"(?m)^[ \t]*(\d{{1,3}})[.)]?[ \t]+(?!{_REPORTER_LOOKAHEAD})(?=[A-Z\"'])"
     ),

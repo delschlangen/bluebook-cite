@@ -109,29 +109,54 @@ async def safe_get(client: httpx.AsyncClient, url: str) -> httpx.Response:
 
     httpx's follow_redirects would chase a redirect into a private address
     without re-checking it, so redirects are followed manually here.
+
+    The body is streamed and abandoned the moment it passes the size limit. A
+    plain client.get() buffers the entire response before returning, so checking
+    its length afterwards bounds nothing: a hostile server could send gigabytes
+    and the process would hold all of it.
     """
     current = assert_safe_url(url)
 
     for _ in range(MAX_REDIRECTS + 1):
-        response = await client.get(
+        async with client.stream(
+            "GET",
             current,
             follow_redirects=False,
             timeout=FETCH_TIMEOUT,
             headers={"Accept": "text/html,application/xhtml+xml"},
-        )
+        ) as response:
+            if response.is_redirect:
+                location = response.headers.get("location")
+                if not location:
+                    return httpx.Response(
+                        response.status_code, headers=response.headers, request=response.request
+                    )
+                current = assert_safe_url(str(response.url.join(location)))
+                continue
 
-        if response.is_redirect:
-            location = response.headers.get("location")
-            if not location:
-                return response
-            current = assert_safe_url(str(response.url.join(location)))
-            continue
+            # A declared length is a cheap early refusal, but it is only a claim.
+            # The count below is what actually bounds memory.
+            declared = response.headers.get("content-length")
+            if declared and declared.isdigit() and int(declared) > MAX_RESPONSE_BYTES:
+                raise UnsafeURLError("That page is too large to inspect.")
 
-        declared = response.headers.get("content-length")
-        if declared and declared.isdigit() and int(declared) > MAX_RESPONSE_BYTES:
-            raise UnsafeURLError("That page is too large to inspect.")
-        if len(response.content) > MAX_RESPONSE_BYTES:
-            raise UnsafeURLError("That page is too large to inspect.")
-        return response
+            received = 0
+            chunks: list[bytes] = []
+            async for chunk in response.aiter_bytes():
+                received += len(chunk)
+                if received > MAX_RESPONSE_BYTES:
+                    raise UnsafeURLError("That page is too large to inspect.")
+                chunks.append(chunk)
+
+            headers = {
+                k: v for k, v in response.headers.items()
+                if k.lower() not in {"content-length", "content-encoding", "transfer-encoding"}
+            }
+            return httpx.Response(
+                response.status_code,
+                headers=headers,
+                content=b"".join(chunks),
+                request=response.request,
+            )
 
     raise UnsafeURLError("Too many redirects.")

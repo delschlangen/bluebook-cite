@@ -115,6 +115,11 @@ class UploadResponse(BaseModel):
     has_footnotes: bool
     text_preview: str
     full_text: str
+    # What the parser actually read, so the page can say so.
+    format: str = "txt"
+    footnote_count: int = 0
+    endnote_count: int = 0
+    warnings: list[str] = []
 
 class AnalysisStats(BaseModel):
     """Statistics about citation analysis."""
