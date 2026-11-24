@@ -317,10 +317,10 @@ async def upload_document(file: UploadFile = File(...)):
         raise HTTPException(status_code=400, detail="The uploaded file is empty.")
 
     try:
-        # The file is read in a short-lived child process (services/sandbox.py), never in
+        # The file is read in a short-lived child process (services/sandbox.py), not in
         # this one: a hostile or merely unlucky PDF can abort native code or hold the
         # interpreter lock in a regular expression, and neither a thread nor a deadline can
-        # stop that. A child can be killed, and costs the server nothing but the wait.
+        # stop that. A child can be killed, and the server only waits for it.
         parsed = await parse_isolated(content, file.filename, max_text_chars=MAX_TEXT_CHARS)
     except ParseBusyError as e:
         # Not a problem with the file, and not 415: say the server is busy and when to retry.

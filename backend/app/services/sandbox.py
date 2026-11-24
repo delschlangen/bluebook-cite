@@ -2,7 +2,7 @@
 
     parsed = await parse_isolated(content, filename, max_text_chars=...)   # ParsedDocument
 
-The parent never parses an upload. It starts `python -m app.services.parse_worker`, sends a small
+The parent does not parse an upload. It starts `python -m app.services.parse_worker`, sends a small
 JSON header and the file on stdin, and reads one JSON object from stdout. Why: see limits.py and
 parse_worker.py. A native library that aborts, a regular expression that holds the interpreter
 lock and a memory bomb each end only the child.
@@ -10,7 +10,7 @@ lock and a memory bomb each end only the child.
 What the parent does, and why each part is here:
 
 * asyncio.create_subprocess_exec, not a thread pool: an upload waiting on or running a child
-  occupies no worker thread, so uploads cannot starve the analysis (which runs on the default
+  occupies no worker thread, so uploads do not take threads from the analysis (which runs on the default
   thread pool).
 * At most PARSE_MAX_CONCURRENT children at once and PARSE_MAX_QUEUE uploads waiting for one.
   Beyond that, or after waiting PARSE_QUEUE_WAIT_S, ParseBusyError (the endpoint answers 503 with
@@ -288,6 +288,7 @@ async def _run_child(content: bytes, filename: str | None, max_text_chars: int) 
             cwd=str(_ROOT), env=_child_env(), start_new_session=True,
         )
     except OSError as exc:
+        log.error("could not start the document reader (%s): %s", sys.executable, exc)
         raise ParseUnavailableError("the document reader could not be started") from exc
 
     started = time.monotonic()

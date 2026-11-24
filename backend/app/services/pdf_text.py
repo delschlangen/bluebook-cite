@@ -316,7 +316,7 @@ _extractor = None
 def _citation_veto(line: str) -> bool:
     """True if the citation extractor reads `line` as a citation (other than a bare web address,
     which a repeated footer legitimately is). Used as strip_running_lines's `veto`, so that a
-    footnote is never removed as a running footer because it repeats: _CITATION_LIKE knows the
+    footnote is not removed as a running footer merely because it repeats: _CITATION_LIKE knows the
     common forms, the extractor knows the rest ("47 CFR 54.101", "FRCP 12(b)(6)", "HR 1234").
 
     The extractor is imported on first use, which is the first time a line is about to be
@@ -396,9 +396,9 @@ def strip_running_lines(
             repeats = n_text_pages >= min_pages and count >= max(min_count, math.ceil(min_fraction * n_text_pages))
         if not repeats or not _digit_fields_are_page_counters(by_page):
             continue
-        # Last, and only for a line that is about to be removed: nothing that holds a citation is
-        # ever removed, however often it repeats. (`veto` may be slow, such as the citation
-        # extractor, which is why it is asked only now.)
+        # Last, and only for a line that is about to be removed: a line that holds a citation, as far
+        # as the quick patterns and the `veto` can tell, stays however often it repeats. (`veto` may
+        # be slow, such as the citation extractor, which is why it is asked only now.)
         if protect_citations and any(_CITATION_LIKE.search(line) for line in samples):
             continue
         # (the lines of one group have one shape, so three of them are enough to ask about)

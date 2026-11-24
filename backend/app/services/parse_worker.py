@@ -15,7 +15,7 @@ by a thread, a deadline or a timeout. A process can be killed.
 
 This module imports only the standard library at the top. The limits go on before anything
 heavy (pypdfium2, pdfminer, zipfile and the XML parser) is imported, and before the file is
-read, so the file never meets code that is not yet bounded.
+read, so the file is not handled by code that is not yet bounded.
 """
 from __future__ import annotations
 

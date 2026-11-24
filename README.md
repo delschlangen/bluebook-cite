@@ -149,7 +149,7 @@ Each can be changed per environment without a code change (`MAX_UPLOAD_MB`, `MAX
 a client can show the number that is actually enforced.
 
 **Reading documents in a child process.** Every upload (PDF, Word and text) is read by a
-short-lived child process, never by the server itself. A PDF can make the native library behind
+short-lived child process, not by the server itself. A PDF can make the native library behind
 the reader abort or allocate gigabytes (an 862-byte file did), and a long unbroken run of
 letters or digits can hold a regular expression for minutes; neither a thread, a deadline nor a
 timeout inside the server can stop either, but a child can be killed. The child starts with a
@@ -207,9 +207,9 @@ with "this PDF has 450 pages", a count that is too small no longer drops the res
 without a word, and either mismatch is reported in the warnings. Running lines are removed only if
 they really run: a URL is compared exactly (a different regulations.gov docket on every page is
 five citations, not a footer), digits that differ between pages must count pages, and nothing the
-citation extractor reads as a citation is ever removed. A line-end hyphen is dropped only when it
+citation extractor reads as a citation is removed. A line-end hyphen is dropped only when it
 is the typesetter's (regu-/lation) and kept when it may be part of the spelling
-(state-/of-the-art, GAO-/16-552), and never across a blank line; the rule is written in
+(state-/of-the-art, GAO-/16-552), and not across a blank line; the rule is written in
 `pdf_text.py` next to the code and pinned by a table of right and wrong cases.
 
 What it cannot do: a scanned PDF has no text to read (run OCR first), and a PDF whose fonts carry
