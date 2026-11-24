@@ -307,8 +307,12 @@ async def _run_child(content: bytes, filename: str | None, max_text_chars: int) 
 
 # --- from the child's answer to what the endpoint raises ---------------------------------------
 
-_CRASH = {signal.SIGSEGV, signal.SIGBUS, signal.SIGILL, signal.SIGFPE}
-_TIME = {signal.SIGXCPU, signal.SIGALRM}
+def _signals(*names: str) -> set:
+    return {getattr(signal, n) for n in names if hasattr(signal, n)}      # not every platform has every signal
+
+
+_CRASH = _signals("SIGSEGV", "SIGBUS", "SIGILL", "SIGFPE")
+_TIME = _signals("SIGXCPU", "SIGALRM")
 
 
 def _interpret(out: _Outcome, wall_s: float) -> ParsedDocument:

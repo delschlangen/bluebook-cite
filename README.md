@@ -192,6 +192,23 @@ footers and page numbers that repeat on most pages, and marks footnotes the same
 reader does. On 17 realistic PDFs this raised citation recall from 97.3% to 99.96% and footnote
 numbers from 92.6% to 98.7%.
 
+Inside the child the reader is bounded before the child's own limits have to stop it: a page's
+character count is read before any layout is built (a page that cannot fit in the text limit is
+refused at once, an enormous one is read as plain text and the person is told), the time limit is
+checked inside the page as well as between pages, and the slow second reader (pdfminer) is tried
+only on a page with real garble evidence (control characters, or "(cid:N)" codes making up 2% of
+the page; the text "(cid:12)" in a sentence is not evidence), never while the first reader's lock
+is held, and for at most `PDF_SECOND_OPINION_BUDGET_S` in all. The page count in a PDF is treated
+as a claim and checked against the file: a count that is too large no longer refuses a small file
+with "this PDF has 450 pages", a count that is too small no longer drops the rest of the document
+without a word, and either mismatch is reported in the warnings. Running lines are removed only if
+they really run: a URL is compared exactly (a different regulations.gov docket on every page is
+five citations, not a footer), digits that differ between pages must count pages, and nothing the
+citation extractor reads as a citation is ever removed. A line-end hyphen is dropped only when it
+is the typesetter's (regu-/lation) and kept when it may be part of the spelling
+(state-/of-the-art, GAO-/16-552), and never across a blank line; the rule is written in
+`pdf_text.py` next to the code and pinned by a table of right and wrong cases.
+
 What it cannot do: a scanned PDF has no text to read (run OCR first), and a PDF whose fonts carry
 no text map comes out as codes, which is reported rather than passed on as text. The test
 fixtures are real PDFs written by Chromium, reportlab and LibreOffice; PDFs from other producers

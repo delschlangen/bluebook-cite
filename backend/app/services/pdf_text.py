@@ -791,6 +791,10 @@ def _loadable_pages(content: bytes, declared: int) -> int:
 
 _PAGE_OBJECT = re.compile(rb"/Type\s*/Page(?![A-Za-z])")
 
+# Longest the check of a too-small /Count may take. It runs before the read's own time budget starts,
+# so it is kept well under what is left of PARSE_WALL_S after that budget.
+_PAGE_WALK_BUDGET_S = 5.0
+
 
 def _count_page_objects(content: bytes, stop_above: int) -> int:
     """'/Type /Page' objects written out in the file (a quick suspicion only: objects inside
@@ -829,7 +833,7 @@ def _pages_in_file(content: bytes, declared: int, max_pages: int) -> int:
     if _count_page_objects(content, declared) <= declared:
         return declared
     try:
-        with _time_limit(PDF_SECOND_OPINION_BUDGET_S):
+        with _time_limit(_PAGE_WALK_BUDGET_S):
             return max(declared, _pdfminer_page_total(content, max_pages + 1))
     except (_TimeUp, Exception):
         return declared
