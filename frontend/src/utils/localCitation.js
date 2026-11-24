@@ -44,10 +44,13 @@ const ENTITY_SUFFIX = String.raw`(?:Inc|LLC|L\.L\.C|Corp|Co|Ltd|L\.P|LP|LLP|PLLC
 // Must contain a letter. A purely numeric token is never part of a party name, and
 // allowing one let "Brandenburg v Ohio 395 US 444" absorb the volume, reporter and
 // page into the defendant, then report all three as missing.
-const PARTY_WORD = String.raw`(?:[A-Za-z][A-Za-z0-9.'&\-]*|[0-9]+[A-Za-z][A-Za-z0-9.'&\-]*)`;
+// A standalone "Id." is the short form for the authority just cited and is never a word in a
+// party name (the Python side has the same rule; "Idaho" and "Ida." are unaffected).
+const NOT_ID = String.raw`(?!Id\.(?![A-Za-z0-9]))`;
+const PARTY_WORD = String.raw`(?:${NOT_ID}[A-Za-z][A-Za-z0-9.'&\-]*|[0-9]+[A-Za-z][A-Za-z0-9.'&\-]*)`;
 // The first token may also begin with digits followed by a letter ("3M"), but not
 // with digits alone, so "395 US" cannot start a party name.
-const PARTY_FIRST = String.raw`(?:[A-Z][A-Za-z0-9.'&\-]*|[0-9]+[A-Z][A-Za-z0-9.'&\-]*)`;
+const PARTY_FIRST = String.raw`(?:${NOT_ID}[A-Z][A-Za-z0-9.'&\-]*|[0-9]+[A-Z][A-Za-z0-9.'&\-]*)`;
 const PARTY = String.raw`${PARTY_FIRST}(?:\s+${PARTY_WORD}){0,7}(?:,\s*${ENTITY_SUFFIX})?`;
 
 const CASE_COMPLETE = new RegExp(

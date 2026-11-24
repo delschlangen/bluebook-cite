@@ -21,7 +21,15 @@ from re import Pattern
 # name, and allowing one let "Brandenburg v Ohio 395 US 444" absorb the volume,
 # reporter and page into the defendant, then report all three as missing.
 # "3M" and similar still match, because they are digits followed by a letter.
-_PARTY_WORD = r"(?:[A-Za-z][A-Za-z0-9.'&\-]*|[0-9]+[A-Za-z][A-Za-z0-9.'&\-]*)"
+# A standalone "Id." is the short form for the authority just cited. It is never a word in a
+# party name, and letting it be one swallowed it: "Id. Brown v. Board" read as a party called
+# "Id. Brown", and "Marbury v. Madison. Id. at 177" as a defendant called "Id. at".
+# "Idaho", "Ida." and "Id.Co" are unaffected: the lookahead needs "Id." followed by a non-word.
+_NOT_ID = r"(?!Id\.(?![A-Za-z0-9]))"
+
+_PARTY_WORD = (
+    rf"(?:{_NOT_ID}[A-Za-z][A-Za-z0-9.'&\-]*|[0-9]+[A-Za-z][A-Za-z0-9.'&\-]*)"
+)
 
 # Entity suffixes that legitimately follow a comma inside a party name.
 _ENTITY_SUFFIX = (
@@ -33,7 +41,7 @@ _ENTITY_SUFFIX = (
 # is what keeps a greedy match from swallowing the sentence before " v. ".
 # The first token may also begin with digits followed by a letter ("3M"),
 # but not with digits alone, so "395 US" cannot start a party name.
-_PARTY_FIRST = r"(?:[A-Z][A-Za-z0-9.'&\-]*|[0-9]+[A-Z][A-Za-z0-9.'&\-]*)"
+_PARTY_FIRST = rf"(?:{_NOT_ID}[A-Z][A-Za-z0-9.'&\-]*|[0-9]+[A-Z][A-Za-z0-9.'&\-]*)"
 
 _PARTY = (
     rf"{_PARTY_FIRST}"

@@ -3,12 +3,14 @@ FastAPI application for Bluebook Citation Generator.
 """
 
 import asyncio
+import logging
 import os
 import uuid
 from contextlib import asynccontextmanager
 
-from fastapi import Body, FastAPI, File, HTTPException, UploadFile
+from fastapi import Body, FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
 from .models.citation import (
     AnalysisResponse,
@@ -115,6 +117,31 @@ app = FastAPI(
     version="1.0.0",
     lifespan=lifespan,
 )
+
+log = logging.getLogger("bluebook")
+
+
+# Registered BEFORE CORSMiddleware, which makes it the inner layer: an unhandled error
+# becomes a JSON 500 that then passes through CORS and so carries
+# Access-Control-Allow-Origin. Without this, Starlette's outermost error handler answers a
+# bare text 500 with no CORS headers. A browser hides such a response entirely, so the page
+# can only report "could not reach the server" for what is really a bug with a stack trace.
+@app.middleware("http")
+async def json_errors(request: Request, call_next):
+    try:
+        return await call_next(request)
+    except Exception as exc:  # noqa: BLE001 - this is the last line of defence by design
+        error_id = uuid.uuid4().hex[:8]
+        log.exception("unhandled error %s on %s", error_id, request.url.path)
+        if isinstance(exc, MemoryError):
+            what = "The server ran out of memory while processing this document."
+        else:
+            what = "The server hit an unexpected error while processing this request."
+        return JSONResponse(
+            {"detail": f"{what} (error {error_id})", "error_id": error_id},
+            status_code=500,
+        )
+
 
 # CORS configuration
 app.add_middleware(

@@ -364,7 +364,10 @@ class CitationExtractor:
                 position_end=match.end(),
                 is_short_form=True,
                 short_form_type="id",
-                pincite=match.group(1) if match.lastindex >= 1 else None,
+                # A bare "Id." has no groups at all, so lastindex is None, not 0. Comparing
+                # None to an int raised TypeError, which made every document containing a
+                # bare "Id." fail (the most common short form in legal writing).
+                pincite=match.group(1),
             ))
 
         # Supra citations

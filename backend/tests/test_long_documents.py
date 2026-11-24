@@ -55,7 +55,42 @@ def fake_lookup(monkeypatch):
     return _FakeCompleter
 
 
+class _CopyingCompleter(_FakeCompleter):
+    """Returns a NEW object instead of editing its argument.
+
+    The production completer happens to edit in place, which means a finished lookup would
+    survive a timeout even if the result list were thrown away. That is an accident of one
+    implementation, not a guarantee, so the contract is tested against a completer that
+    returns a copy: the only way a finished result reaches the response is if it is kept.
+    """
+
+    async def complete_citation(self, citation):
+        type(self).calls.append(citation.raw_text)
+        if citation.raw_text in type(self).slow:
+            await asyncio.sleep(60)
+        await asyncio.sleep(0.01)
+        return citation.model_copy(update={"confidence_score": 0.99})
+
+
 class TestLookupPhaseKeepsFinishedWork:
+    @pytest.mark.asyncio
+    async def test_finished_results_are_kept_even_when_the_completer_returns_a_copy(
+        self, monkeypatch
+    ):
+        _CopyingCompleter.calls = []
+        _CopyingCompleter.slow = set()
+        monkeypatch.setattr(main, "CitationCompleter", _CopyingCompleter)
+        monkeypatch.setattr(main, "get_lookup_service", lambda: object())
+        monkeypatch.setattr(main, "COMPLETION_BUDGET_SECONDS", 0.3)
+        citations = [_incomplete_case(i) for i in range(10)]
+        _CopyingCompleter.slow = {c.raw_text for c in citations[6:]}
+
+        completed, summary = await main._complete_citations(citations)
+
+        assert [c.confidence_score for c in completed] == [0.99] * 6 + [0.0] * 4
+        assert [c.raw_text for c in completed] == [c.raw_text for c in citations]
+        assert summary.completed == 6 and summary.skipped == 4
+
     @pytest.mark.asyncio
     async def test_lookups_that_finished_survive_when_the_budget_runs_out(
         self, fake_lookup, monkeypatch
