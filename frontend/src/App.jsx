@@ -1,17 +1,20 @@
-import React, { useState, useCallback, useEffect } from 'react';
+import React, { useState, useCallback, useEffect, useRef } from 'react';
 import FileUpload from './components/FileUpload';
 import CitationList from './components/CitationList';
 import CitationEditor from './components/CitationEditor';
 import CitationRepair from './components/CitationRepair';
 import SourceSuggestions from './components/SourceSuggestions';
 import DocumentPreview from './components/DocumentPreview';
-import { analyzeDocument, checkHealth, lookupCitation } from './services/api';
+import { analyzeDocument, checkHealth, explainNetworkFailure, lookupCitation } from './services/api';
+import { analysisNotices, claimsNotice } from './utils/uploadChecks';
 
 function App() {
   const [document, setDocument] = useState(null);
   const [analysis, setAnalysis] = useState(null);
   const [selectedCitation, setSelectedCitation] = useState(null);
   const [loading, setLoading] = useState(false);
+  // What the page is doing while it waits, when that is more than the analysis itself.
+  const [checkingServer, setCheckingServer] = useState(false);
   const [error, setError] = useState(null);
   const [activeTab, setActiveTab] = useState('citations');
   // Pasting one citation is the common case, so it is the default door.
@@ -23,23 +26,50 @@ function App() {
     checkHealth();
   }, []);
 
+  // Each upload gets a run number. A result that arrives after the person reset the page, or
+  // after a newer upload, belongs to a run that no longer exists and must be dropped.
+  const runRef = useRef(0);
+  const abortRef = useRef(null);
+
   const handleUpload = useCallback(async (uploadResult) => {
+    const run = ++runRef.current;
+    abortRef.current?.abort();
+    const controller = new AbortController();
+    abortRef.current = controller;
+
     setDocument(uploadResult);
+    setAnalysis(null);
+    setSelectedCitation(null);
+    setActiveTab('citations');
     setLoading(true);
     setError(null);
-    
+
     try {
       const analysisResult = await analyzeDocument(
         uploadResult.document_id,
         uploadResult.full_text,
-        uploadResult.filename
+        uploadResult.filename,
+        { signal: controller.signal }
       );
+      if (run !== runRef.current) return;
       setAnalysis(analysisResult);
     } catch (err) {
-      setError(`Failed to analyze document: ${err.message}`);
+      if (run !== runRef.current || err?.cancelled) return;
+      // No response at all could be a crash, a restart or a dropped connection, and the
+      // browser reports them all alike. Ask the server which it was before blaming it.
+      let message = `Failed to analyze document: ${err.message}`;
+      if (err.offline) {
+        setCheckingServer(true);
+        message = await explainNetworkFailure('Failed to analyze document');
+        if (run !== runRef.current) return;
+      }
+      setError(message);
       console.error(err);
     } finally {
-      setLoading(false);
+      if (run === runRef.current) {
+        setLoading(false);
+        setCheckingServer(false);
+      }
     }
   }, []);
 
@@ -68,6 +98,10 @@ function App() {
   }, []);
 
   const handleReset = useCallback(() => {
+    runRef.current++;
+    abortRef.current?.abort();
+    setLoading(false);
+    setCheckingServer(false);
     setDocument(null);
     setAnalysis(null);
     setSelectedCitation(null);
@@ -101,12 +135,23 @@ function App() {
         {error && (
           <div className="bg-red-50 border border-red-200 rounded-lg p-4 mb-6">
             <div className="flex items-center">
-              <svg className="w-5 h-5 text-red-500 mr-2" fill="currentColor" viewBox="0 0 20 20">
+              <svg className="w-5 h-5 text-red-500 mr-2 flex-shrink-0" fill="currentColor" viewBox="0 0 20 20">
                 <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM8.707 7.293a1 1 0 00-1.414 1.414L8.586 10l-1.293 1.293a1 1 0 101.414 1.414L10 11.414l1.293 1.293a1 1 0 001.414-1.414L11.414 10l1.293-1.293a1 1 0 00-1.414-1.414L10 8.586 8.707 7.293z" clipRule="evenodd" />
               </svg>
               <p className="text-red-800">{error}</p>
             </div>
           </div>
+        )}
+
+        {/* After a failed analysis the upload is still in memory, so offer a retry instead of a re-upload. */}
+        {error && document && !analysis && !loading && (
+          <button
+            type="button"
+            onClick={() => handleUpload(document)}
+            className="mb-6 px-4 py-2 bg-blue-600 text-white rounded-lg text-sm"
+          >
+            Try again
+          </button>
         )}
 
         {/* Landing: repair a single citation, or analyze a whole document. */}
@@ -170,8 +215,14 @@ function App() {
         {loading && (
           <div className="bg-white rounded-lg shadow-lg p-12 text-center">
             <div className="animate-spin rounded-full h-12 w-12 border-4 border-blue-200 border-t-blue-600 mx-auto"></div>
-            <p className="mt-4 text-gray-600">Analyzing citations...</p>
-            <p className="mt-2 text-sm text-gray-400">This may take a moment for longer documents</p>
+            <p className="mt-4 text-gray-600" role="status">
+              {checkingServer ? 'Checking whether the server is still running...' : 'Analyzing citations...'}
+            </p>
+            <p className="mt-2 text-sm text-gray-400">
+              {checkingServer
+                ? 'The request did not finish. This takes a few seconds.'
+                : 'A long document can take up to a minute. Looking up incomplete citations is the slow part.'}
+            </p>
           </div>
         )}
 
@@ -193,6 +244,9 @@ function App() {
                   {' '}from the Word file.
                 </p>
               )}
+              {analysisNotices(analysis).map((notice) => (
+                <p key={notice} className="text-xs text-gray-600 mb-3">{notice}</p>
+              ))}
               {document.warnings?.map((w) => (
                 <p key={w} className="text-xs text-amber-700 mb-2">{w}</p>
               ))}
@@ -208,7 +262,7 @@ function App() {
             {/* Tabs */}
             <div className="bg-white rounded-lg shadow">
               <div className="border-b">
-                <nav className="flex -mb-px">
+                <nav className="flex -mb-px overflow-x-auto">
                   <TabButton
                     active={activeTab === 'citations'}
                     onClick={() => setActiveTab('citations')}
@@ -267,7 +321,10 @@ function App() {
                 )}
 
                 {activeTab === 'unsourced' && (
-                  <SourceSuggestions claims={analysis.analysis.unsourced_claims} />
+                  <SourceSuggestions
+                    claims={analysis.analysis.unsourced_claims}
+                    notice={claimsNotice(analysis.stats)}
+                  />
                 )}
 
                 {activeTab === 'preview' && (
@@ -335,7 +392,7 @@ function TabButton({ children, active, onClick, count }) {
   return (
     <button
       onClick={onClick}
-      className={`px-6 py-3 text-sm font-medium border-b-2 transition-colors ${
+      className={`px-3 sm:px-6 py-3 text-sm font-medium border-b-2 transition-colors ${
         active
           ? 'border-blue-600 text-blue-600'
           : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'

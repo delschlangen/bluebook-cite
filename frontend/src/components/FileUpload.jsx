@@ -1,79 +1,50 @@
-import React, { useState, useCallback } from 'react';
-import { uploadDocument } from '../services/api';
-
-const MAX_BYTES = 10 * 1024 * 1024;
-
-// File types we can say, with certainty and before uploading, will not work.
-// Anything not listed is sent, and the server decides from the file's bytes.
-const KNOWN_UNSUPPORTED = {
-  doc: 'Old-format Word (.doc) files are not supported. In Word, choose Save As and pick .docx, or export a PDF.',
-  rtf: 'Rich Text Format (.rtf) is not supported. Save it as .docx or PDF.',
-  odt: 'OpenDocument (.odt) files are not supported. Save it as .docx or PDF.',
-  pages: 'Apple Pages files are not supported. Export to Word (.docx) or PDF first.',
-  key: 'Keynote files are not supported. Upload a Word document, PDF or text file.',
-  numbers: 'Numbers files are not supported. Upload a Word document, PDF or text file.',
-  pptx: 'PowerPoint files are not supported. Upload a Word document, PDF or text file.',
-  xlsx: 'Excel files are not supported. Upload a Word document, PDF or text file.',
-  jpg: 'Images are not supported. Upload a PDF with selectable text, or a Word or text file.',
-  jpeg: 'Images are not supported. Upload a PDF with selectable text, or a Word or text file.',
-  png: 'Images are not supported. Upload a PDF with selectable text, or a Word or text file.',
-  heic: 'Images are not supported. Upload a PDF with selectable text, or a Word or text file.',
-};
-
-function unsupportedReason(file) {
-  const name = (file?.name || '').toLowerCase();
-  const ext = name.includes('.') ? name.split('.').pop() : '';
-  return KNOWN_UNSUPPORTED[ext] || null;
-}
-
-// Hosting platforms reject large request bodies before the app sees them, and a
-// rejected request carries no CORS headers, so the browser reports it only as a
-// failed fetch. Say what is likely going on instead of "could not reach server".
-const HOST_LIMIT_BYTES = 4 * 1024 * 1024;
-
-function explainUploadFailure(err, file) {
-  if (err?.offline && file.size > HOST_LIMIT_BYTES) {
-    const mb = (file.size / (1024 * 1024)).toFixed(1);
-    return (
-      `The upload failed. This file is ${mb} MB, and some hosts reject uploads over ` +
-      `about 4 MB without any explanation. Try a smaller file, or a PDF or ` +
-      `text copy of the same document.`
-    );
-  }
-  return err?.message || 'The upload failed.';
-}
+import React, { useState, useCallback, useEffect, useRef } from 'react';
+import { explainNetworkFailure, getLimits, subscribeLimits, uploadDocument } from '../services/api';
+import { checkFileBeforeUpload, limitsSummary, uploadingMessage } from '../utils/uploadChecks';
 
 export default function FileUpload({ onUpload }) {
   const [isDragging, setIsDragging] = useState(false);
-  const [uploading, setUploading] = useState(false);
+  const [uploading, setUploading] = useState(null); // the file being sent, or null
   const [error, setError] = useState(null);
+  // The limits the server enforces, once the page has heard them; until then the defaults.
+  const [limits, setLimits] = useState(getLimits);
+  // A drop is not blocked by the disabled input, so guard against a second file while one is in flight.
+  const busyRef = useRef(false);
+
+  useEffect(() => subscribeLimits(setLimits), []);
 
   const handleFile = useCallback(async (file) => {
+    if (busyRef.current) return;
     // The browser's reported type is NOT checked. Phones send an empty or
     // generic type for Word and PDF files that come from iCloud or Google Drive,
     // and rejecting on it blocked working files before a single byte was sent.
     // The server identifies the format from the file's own contents.
-    const problem = unsupportedReason(file);
+    const problem = checkFileBeforeUpload(file, getLimits());
     if (problem) {
       setError(problem);
       return;
     }
 
-    if (file.size > MAX_BYTES) {
-      setError('File size must be less than 10MB');
-      return;
-    }
-
     setError(null);
-    setUploading(true);
+    busyRef.current = true;
+    setUploading(file);
 
     try {
       const result = await uploadDocument(file);
       onUpload(result);
     } catch (err) {
-      setError(explainUploadFailure(err, file));
+      if (err?.cancelled) return;
+      // A response the server sent already says what is wrong (too long, unreadable, empty).
+      // No response at all could be a crash, a restart or a dropped connection, and the
+      // browser reports them all the same, so ask the server which it was.
+      setError(
+        err?.offline
+          ? await explainNetworkFailure('The upload failed')
+          : err?.message || 'The upload failed.'
+      );
     } finally {
-      setUploading(false);
+      busyRef.current = false;
+      setUploading(null);
     }
   }, [onUpload]);
 
@@ -102,12 +73,14 @@ export default function FileUpload({ onUpload }) {
     if (file) {
       handleFile(file);
     }
+    // Picking the same file again after a failure must fire a change event.
+    e.target.value = '';
   }, [handleFile]);
 
   return (
     <div className="w-full">
       <label
-        className={`flex flex-col items-center justify-center w-full h-48 border-2 border-dashed rounded-lg cursor-pointer transition-colors ${
+        className={`flex flex-col items-center justify-center w-full min-h-48 border-2 border-dashed rounded-lg cursor-pointer transition-colors ${
           isDragging
             ? 'border-blue-500 bg-blue-50'
             : 'border-gray-300 bg-gray-50 hover:bg-gray-100'
@@ -116,11 +89,11 @@ export default function FileUpload({ onUpload }) {
         onDragOver={handleDragOver}
         onDragLeave={handleDragLeave}
       >
-        <div className="flex flex-col items-center justify-center pt-5 pb-6">
+        <div className="flex flex-col items-center justify-center px-4 pt-5 pb-6 text-center">
           {uploading ? (
             <>
               <div className="animate-spin rounded-full h-10 w-10 border-4 border-blue-200 border-t-blue-600 mb-3"></div>
-              <p className="text-sm text-gray-500">Uploading...</p>
+              <p className="text-sm text-gray-500" role="status">{uploadingMessage(uploading)}</p>
             </>
           ) : (
             <>
@@ -130,7 +103,7 @@ export default function FileUpload({ onUpload }) {
               <p className="mb-2 text-sm text-gray-500">
                 <span className="font-semibold">Click to upload</span> or drag and drop
               </p>
-              <p className="text-xs text-gray-400">PDF, Word (.docx), or text (max 10MB). Footnotes are read.</p>
+              <p className="text-xs text-gray-400" data-testid="upload-limits">{limitsSummary(limits)}</p>
             </>
           )}
         </div>
@@ -139,12 +112,12 @@ export default function FileUpload({ onUpload }) {
           className="hidden"
           accept=".pdf,.docx,.txt,.md,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document,text/plain"
           onChange={handleInputChange}
-          disabled={uploading}
+          disabled={Boolean(uploading)}
         />
       </label>
 
       {error && (
-        <div className="mt-3 p-3 bg-red-50 border border-red-200 rounded-lg">
+        <div className="mt-3 p-3 bg-red-50 border border-red-200 rounded-lg" role="alert">
           <p className="text-sm text-red-600">{error}</p>
         </div>
       )}

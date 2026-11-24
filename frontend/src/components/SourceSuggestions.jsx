@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useState } from 'react';
 
 const claimTypeColors = {
   legal: 'bg-purple-100 text-purple-800',
@@ -7,7 +7,11 @@ const claimTypeColors = {
   quotation: 'bg-yellow-100 text-yellow-800',
 };
 
-export default function SourceSuggestions({ claims }) {
+// A prose-heavy document can yield tens of thousands of claims; render a page at a time.
+const PAGE_SIZE = 100;
+
+export default function SourceSuggestions({ claims, notice }) {
+  const [shown, setShown] = useState(PAGE_SIZE);
   if (!claims || claims.length === 0) {
     return (
       <div className="text-center py-8">
@@ -25,8 +29,9 @@ export default function SourceSuggestions({ claims }) {
       <p className="text-sm text-gray-600">
         The following statements may need citations. Review each and consider adding appropriate sources.
       </p>
+      {notice && <p className="text-xs text-gray-600" data-testid="claims-notice">{notice}</p>}
       
-      {claims.map((claim, index) => (
+      {claims.slice(0, shown).map((claim, index) => (
         <div key={claim.id || index} className="p-4 bg-red-50 border border-red-100 rounded-lg">
           <div className="flex items-start justify-between gap-3 mb-3">
             <div className="flex items-center gap-2">
@@ -64,6 +69,15 @@ export default function SourceSuggestions({ claims }) {
           )}
         </div>
       ))}
+      {claims.length > shown && (
+        <button
+          type="button"
+          onClick={() => setShown((n) => n + PAGE_SIZE)}
+          className="w-full py-3 rounded-lg border border-gray-300 bg-white text-sm text-gray-700 hover:bg-gray-50"
+        >
+          Show {Math.min(PAGE_SIZE, claims.length - shown)} more ({claims.length - shown} not shown)
+        </button>
+      )}
     </div>
   );
 }

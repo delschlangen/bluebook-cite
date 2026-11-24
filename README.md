@@ -126,8 +126,10 @@ of those kinds, because their formats could only be sourced from search summarie
 
 ## Document limits
 
-"Check a document" takes Word (`.docx`), PDF and plain text. A document over a limit is refused
-with a message that says which limit and what to do, never with a bare connection error.
+"Check a document" takes Word (`.docx`), PDF and plain text. The upload box states the limits
+before anyone chooses a file, using the values the server publishes. A document over a limit is
+refused with a message that says which limit and what to do, never with a bare connection error,
+and a file over the size limit is refused in the browser before anything is sent.
 
 | What | Limit | Notes |
 |---|---|---|
@@ -156,6 +158,16 @@ What it cannot do: a scanned PDF has no text to read (run OCR first), and a PDF 
 no text map comes out as codes, which is reported rather than passed on as text. The test
 fixtures are real PDFs written by Chromium, reportlab and LibreOffice; PDFs from other producers
 (LaTeX, InDesign, Word's own export) are not covered.
+
+**When something does fail.** The browser reports a crash, a dropped connection and an outage
+identically. After a request that got no answer, the page asks `/health` which it was: a changed
+`boot_id` means the server restarted while working on the document (usually out of memory), the
+same one means the request itself did not finish, and no answer means it is down. Analysis has
+its own two-minute timeout and uploads are allowed time in proportion to the file, so a slow
+phone connection is not mistaken for a broken server. After a failed analysis, "Try again" re-runs
+it without uploading the file again. Long results are shown a hundred at a time, and the
+document preview shows one window of text, because thousands of cards made a phone unusable
+(4,000 citations took 3.9 s to first paint on a throttled phone).
 
 **Staying responsive.** The analysis is CPU work, so it runs in a worker thread, one document at
 a time, and every error the server can produce, including an unexpected one, is a JSON response
