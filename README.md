@@ -160,8 +160,11 @@ how it ended into a message: too many pages or too much text is a 413 with the l
 a document that needed more memory, processor time or wall-clock time than allowed is a 413
 "too complex to read within this server's limits ... export it again or split it"; a damaged,
 encrypted or unsupported file keeps its 415 or 400; and a full queue is a 503 with `Retry-After`.
-Measured cost: about 50 ms for a short document and 0.3 to 0.5 s more than reading in the server
-for a 273-page PDF. The server's own memory stays flat across uploads.
+Measured cost over reading in the server itself (medians, 4 CPUs): 46 ms for a short text or
+Word document, 170 to 200 ms for a PDF (it imports pdfium, and the citation extractor when the PDF
+has running headers), 56 ms for a 300-page Word document, and 0.29 s (at most 0.47 s) for the
+273-page PDF, 3.65 s to 3.94 s. The server's own memory stays flat across uploads (62.6 MB before
+50 mixed uploads to a live server, 60.7 MB after); the child peaks at 41 MB on the 273-page PDF.
 
 | Variable | Default | Meaning |
 |---|---|---|

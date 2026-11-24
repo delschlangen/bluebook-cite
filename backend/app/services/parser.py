@@ -350,12 +350,17 @@ class DocumentParser:
         # pdfium page by page (memory stays flat however long the file is), pdfminer.six
         # only as a second opinion, and the page limit checked before any page is read.
         # See services/pdf_text.py for why this is not pdfplumber.
-        from .pdf_text import PdfReadError, PdfTooLongError, read_pdf
+        from . import pdf_text
+        from .pdf_text import PdfReadError, PdfTimeoutError, PdfTooLongError, read_pdf
 
         try:
             result = read_pdf(content)
         except PdfTooLongError as exc:
             raise DocumentTooLongError(str(exc)) from exc
+        except PdfTimeoutError as exc:
+            # the same answer as when the child is stopped for time: too complex for this server's limits
+            raise DocumentTooComplexError(complex_message(
+                f"reading it took longer than the {pdf_text.PDF_TIME_BUDGET_S:g} seconds one PDF is allowed")) from exc
         except PdfReadError as exc:
             raise UnsupportedDocumentError(str(exc)) from exc
         except Exception as exc:  # a parser bug must not become a 500 the page cannot read

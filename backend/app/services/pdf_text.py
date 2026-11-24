@@ -453,7 +453,7 @@ def _build_lines(tp, whole: str, page_w: float, page_h: float, deadline: float |
         # the time limit is checked inside the page, not only between pages: one page can hold
         # a million characters, and this loop costs about 30 microseconds for each
         if deadline is not None and not i & 0x7FF and time.monotonic() > deadline:
-            raise PdfReadError(_TOO_SLOW)
+            raise PdfTimeoutError(_TOO_SLOW)
         if ch == "\r" or ch == "\n":
             continue
         left, b, r, t = tp.get_charbox(i, loose=True)
@@ -690,6 +690,11 @@ class PdfTooLongError(PdfReadError):
     """Over the page or text limit.  Map to HTTP 413 so the page can say what the limit is."""
 
 
+class PdfTimeoutError(PdfReadError):
+    """The time budget ran out. Like a memory or wall-clock stop it is a 413 "too complex"
+    (DocumentParser maps it); its own message is the reader's, for callers that use the reader directly."""
+
+
 class PdfResult(NamedTuple):
     text: str
     pages: int
@@ -873,7 +878,7 @@ def iter_pdf_pages(
             count = len(pdf) if limit is None else min(len(pdf), limit)
             for i in range(count):
                 if deadline is not None and time.monotonic() > deadline:
-                    raise PdfReadError(_TOO_SLOW)
+                    raise PdfTimeoutError(_TOO_SLOW)
                 try:
                     page = pdf[i]
                 except Exception:
@@ -1010,14 +1015,14 @@ def read_pdf(content: bytes, *, max_pages: int | None = None, max_chars: int | N
                     if len(pages) >= max_pages:
                         raise PdfTooLongError(_too_long(len(pages) + 1, max_pages))
                     if time.monotonic() > deadline:
-                        raise PdfReadError(_TOO_SLOW)
+                        raise PdfTimeoutError(_TOO_SLOW)
                     text = repair_text(raw)
                     total += len(text)
                     if total > max_chars:
                         raise PdfTooLongError(_too_much_text(max_chars))
                     pages.append(text)
         except _TimeUp:
-            raise PdfReadError(_TOO_SLOW) from None
+            raise PdfTimeoutError(_TOO_SLOW) from None
         except PdfReadError:
             raise
         except Exception:
@@ -1096,7 +1101,7 @@ def read_pdf(content: bytes, *, max_pages: int | None = None, max_chars: int | N
                     for raw in _pdfminer_pages(content, set(range(n, in_file))):
                         pages.append(repair_text(raw))
             except _TimeUp:
-                raise PdfReadError(_TOO_SLOW) from None
+                raise PdfTimeoutError(_TOO_SLOW) from None
             except PdfReadError:
                 raise
             except Exception:

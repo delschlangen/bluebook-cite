@@ -18,6 +18,7 @@ from pathlib import Path
 import pytest
 
 import app.services.pdf_text as P
+from app.services.parser import DocumentParser, DocumentTooComplexError
 from tests.docfactory import make_pdf_pages
 from tests.hostile import cid_scattered_pdf, one_page_pdf, pages_pdf
 
@@ -649,3 +650,11 @@ def test_the_time_budget_starts_when_the_reader_lock_is_held_not_when_the_upload
     assert not thread.is_alive()
     assert "error" not in outcome, outcome.get("error")
     assert outcome["result"].pages == 3
+
+
+def test_the_readers_time_budget_is_answered_like_any_other_limit_the_document_exceeds(monkeypatch):
+    """Run out of time inside the reader and run out of time in the child are the same answer for the
+    person: 413, too complex to read within this server's limits, with the time stated."""
+    monkeypatch.setattr(P, "PDF_TIME_BUDGET_S", 0.0)
+    with pytest.raises(DocumentTooComplexError, match=r"too complex to read within this server's limits \(reading it took longer than the 0 seconds"):
+        DocumentParser().parse_document(text_pdf(5), "a.pdf")
