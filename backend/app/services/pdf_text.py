@@ -34,6 +34,15 @@ from typing import NamedTuple
 from ..limits import MAX_PDF_FALLBACK_PAGES, MAX_PDF_PAGES, MAX_TEXT_CHARS, PDF_TIME_BUDGET_S
 
 # =========================== text repair ===========================
+#
+# Every regular expression in this section runs over a whole page of text from an untrusted file,
+# and a regular expression that is slow holds the interpreter lock until it finishes (nothing in
+# the same process can interrupt it). So each is written to cost time linear in the page: a run
+# that can repeat without limit is anchored by a look-behind, so that a match can only begin at the
+# start of the run, and is possessive, so that the engine never backs into it. Without the anchor
+# the engine tries every start inside a run of n letters and scans to the end of the run from each
+# one: 64,000 letters (a 664-byte PDF) took 49 seconds. tests/test_pdf_repair.py times every
+# expression here on long runs of letters, digits, punctuation, spaces and line breaks.
 _LIGATURES = {
     "\ufb00": "ff", "\ufb01": "fi", "\ufb02": "fl", "\ufb03": "ffi", "\ufb04": "ffl",
     "\ufb05": "st", "\ufb06": "st",
@@ -42,10 +51,77 @@ _LIG_TABLE = str.maketrans(_LIGATURES)
 # characters some producers use for the hyphen drawn at a line end
 _HYPHENS = "-\u2010\u2011\u00ad"
 
-# word-fragment, hyphen, line break, lower-case continuation  ->  join, drop the hyphen
-_SPLIT_WORD = re.compile(rf"([A-Za-z]{{2,}})[{_HYPHENS}][ \t]*\n+[ \t]*([a-z]{{2,}})")
-# hyphen, line break, then a digit or capital: a real hyphen (GAO-16-\n552, 111-\n148) -> keep it, join
-_KEEP_HYPHEN = re.compile(rf"([A-Za-z0-9])[{_HYPHENS}][ \t]*\n+[ \t]*(?=[0-9A-Z])")
+# A hyphen that ends a line: the word fragment before it, the hyphen, ONE line break, then the first
+# token of the next line and the token after it on that line (at most 40 characters of each: all the
+# decision needs). One line break only: a blank line is a paragraph break, and a word is never broken
+# across paragraphs ("five-\n\nyear" must not become "fiveyear").
+_LINE_END_HYPHEN = re.compile(
+    rf"(?<![A-Za-z0-9])([A-Za-z0-9]++)([{_HYPHENS}])[ \t]*+\n[ \t]*+(?=(\S{{1,40}})(?:[ \t]++(\S{{1,40}}))?)"
+)
+
+# Line-end dehyphenation: is the hyphen one the typesetter added to break a word (drop it and join:
+# "regu-\nlation" -> "regulation") or part of the spelling (keep it: "state-\nof-the-art")? It
+# cannot be known from the text, so the rule keeps the hyphen whenever the compound reading is
+# plausible, because a wrongly kept hyphen ("regu-lation") costs a reader nothing while a wrongly
+# joined compound ("stateof-the-art", "Lopezde la Cruz") corrupts a name or a citation. It keeps it when
+#   1. the next line starts with a digit or a capital: GAO-\n16-552, 10-\nK, Smith-\nJones, 1981-\n1983
+#   2. the fragment is one character, holds a digit, or is an all-capitals acronym: e-\nmail, 5-\nyear,
+#      FDA-\napproved
+#   3. the fragment is a prefix that is nearly always hyphenated (non, anti, self, ...), or ends in the
+#      vowel the next line starts with (re-\nenacted, co-\noperate)
+#   4. the next line's first token is already hyphenated (state-\nof-the-art), or is "of" or "the" on its
+#      own, or is a name particle after a capitalised fragment and before a capitalised word or another
+#      particle (Lopez-\nde la Cruz, Garcia-\nde Leon)
+# and otherwise drops it, as it always did, except that "and" or "or" on its own is a suspended hyphen
+# ("pre-\nand post-trial" is "pre- and post-trial": the hyphen stays and so does the space). Particles are not accepted on their own because the last
+# syllable of an ordinary word is often one ("Sulli-\nvan", "gar-\nden", "or-\nder", "mo-\ndel"). A soft
+# hyphen (U+00AD) is the exception to 2-4: the typesetter chose that break and it is never part of a
+# spelling. Inside a URL a hyphen before a lower-case word is left alone: it is part of the address
+# wherever the line broke (_join_wrapped_urls joins a wrapped URL on its own evidence). If the next line
+# does not start with two lower-case letters (a quotation mark, a bracket, a single letter) the text is
+# left as it is.
+_STRONG_PREFIXES = frozenset(
+    "non anti self ex quasi semi vice half well ill cross e co post multi counter all".split()
+)
+_SUSPENDED_WORDS = frozenset("and or".split())     # "pre-\nand post-trial": a suspended hyphen, then a space
+_JOINING_WORDS = frozenset("of the".split())
+_PARTICLES = frozenset("de la le el del della di da du des van von der den dos das do".split())
+
+
+def _dehyphenate(m: re.Match) -> str:
+    frag, hyphen, nxt, after = m.group(1), m.group(2), m.group(3), m.group(4)
+    first = nxt[0]
+    if first.isdigit() or ("A" <= first <= "Z"):
+        return frag + "-"
+    # Inside a URL (judged by the 300 characters before the fragment) the hyphen is part of the address.
+    before = m.string[max(0, m.start(1) - 300): m.start(1)]
+    token = before[max(before.rfind(" "), before.rfind("\t"), before.rfind("\n")) + 1:]
+    if _URL_START.match(token):
+        return m.group(0)
+    if not (len(nxt) >= 2 and nxt[:2].isascii() and nxt[:2].isalpha() and nxt[:2].islower()):
+        return m.group(0)
+    if hyphen == "\u00ad":
+        return frag
+    low, word = frag.lower(), nxt.lower()
+    if word in _SUSPENDED_WORDS:
+        return frag + "- "           # the line break stood where the space was
+    if (
+        len(frag) == 1
+        or any(c.isdigit() for c in frag)
+        or (len(frag) >= 2 and frag.isupper())
+        or low in _STRONG_PREFIXES
+        or (len(frag) >= 2 and low[-1] in "aeiou" and nxt[0].lower() == low[-1])
+        or "-" in nxt
+        or word in _JOINING_WORDS
+        or (
+            word in _PARTICLES
+            and frag[0].isupper()
+            and after is not None
+            and (after[0].isupper() or after.lower() in _PARTICLES)
+        )
+    ):
+        return frag + "-"
+    return frag
 
 
 # pdfium writes U+0002 (get_text_bounded) or U+FFFE (get_text_range) where it removed a line-end hyphen
@@ -55,42 +131,71 @@ _CTRL = re.compile(r"[\x00-\x08\x0b\x0e-\x1f\x7f]")
 
 
 # the same marker followed by the line break that pdfium_layout keeps between rectangles
-_PDFIUM_HYPHEN_NL_LOWER = re.compile(r"[\x02\ufffe][ \t]*\n+[ \t]*(?=[a-z])")
-_PDFIUM_HYPHEN_NL_KEEP = re.compile(r"[\x02\ufffe][ \t]*\n+[ \t]*(?=[0-9A-Z])")
+_PDFIUM_HYPHEN_NL_LOWER = re.compile(r"[\x02\ufffe][ \t]*+\n[ \t]*+(?=[a-z])")
+_PDFIUM_HYPHEN_NL_KEEP = re.compile(r"[\x02\ufffe][ \t]*+\n[ \t]*+(?=[0-9A-Z])")
 
 
 _URL_START = re.compile(r"(?:https?://|www\.)", re.I)
 _CONT_CHARS = "/-_=&?#%"
-_CONT_TOKEN = re.compile(r"[A-Za-z0-9/_\-.%~#?=&:@+,;()]+")
+_CONT_TOKEN = re.compile(r"[A-Za-z0-9/_\-.%~#?=&:@+,;()]++")
+# The start of a new numbered, bulleted or footnote line: never a continuation of the URL above it.
+_NEW_ITEM = re.compile(
+    r"\s*+(?:\[\^?e?\d{1,4}\]|\(?\d{1,3}[.)][ \t]|\d{1,3}[ \t]++\S|[\u2022\u2013\u2014*\-][ \t]++\S|[A-Za-z][.)][ \t])"
+)
+# A wrapped URL is at most this long; beyond it nothing is joined (a real URL is under about 2,000).
+_MAX_URL_CHARS = 2000
+
+
+def _is_url_continuation(tok: str, nxt_line: str, nxt_parts: list[str]) -> bool:
+    """Does `nxt_line` carry on the URL `tok` that ends the line above it?
+
+    Only on strong evidence: the URL ends in / - _ = & ? # % and the next line's first token looks
+    like a path fragment (it has a digit, or one of / - _ = . &), or the next line's first token
+    starts with one of those characters. Never when the next line begins a numbered or bulleted
+    item or a footnote, and never when its first token is only a number of up to three digits (a
+    page number or the next footnote's number: "https://www.cdc.gov/nchs/" above a footer "3" must
+    stay as it is). A URL broken in the middle of a segment with no punctuation cannot be
+    recognised and is left alone."""
+    first = nxt_parts[0]
+    if _NEW_ITEM.match(nxt_line):
+        return False
+    if _URL_START.match(first) and not tok.endswith("//"):
+        return False                                  # another URL: two references, not one (but "https://" + "www.x.gov" is one)
+    body = first.rstrip(".,;)")
+    if not (body or first) or not _CONT_TOKEN.fullmatch(body or first):
+        return False
+    if body.isdigit():
+        # a long number ("...gao-24-\n106481", "?id=\n20220412") is a continuation; a short one is a
+        # page number or the next footnote's number
+        return tok[-1] in _CONT_CHARS and len(body) >= 4
+    if len(first) == 1 and first in _CONT_CHARS + "\u2013\u2014\u2022*":
+        return False                                  # a lone "-" or "/" is a bullet or a dash, not a path
+    starts_cont = first[0] in _CONT_CHARS
+    ends_open = tok[-1] in _CONT_CHARS and any(c.isdigit() or c in "/-_=.&" for c in body)
+    return starts_cont or ends_open
 
 
 def _join_wrapped_urls(text: str) -> str:
-    """Re-join a URL that the producer wrapped.  Only on strong evidence: the line's last token is a URL and
-    either it ends in / - _ = & ? # %  and the next line's first token looks like a path fragment (has a digit or
-    one of / - _ = . &), or the next line's first token starts with one of those characters.  A URL broken in the
-    middle of a segment with no punctuation cannot be recognised and is left alone."""
+    """Re-join a URL that the producer wrapped (see _is_url_continuation for the evidence).
+    Linear in the text: each line is split once, and only the last token is carried forward."""
     if "http" not in text and "www." not in text:
         return text
     lines = text.split("\n")
     out: list[str] = []
-    i = 0
-    while i < len(lines):
-        cur = lines[i]
-        while i + 1 < len(lines):
-            parts = cur.split()
+    i, n = 0, len(lines)
+    while i < n:
+        pieces = [lines[i]]
+        parts = lines[i].split()
+        tok = parts[-1] if parts else ""
+        while i + 1 < n and tok and _URL_START.match(tok) and len(tok) < _MAX_URL_CHARS:
             nxt_parts = lines[i + 1].split()
-            if not parts or not nxt_parts or not _URL_START.match(parts[-1]):
+            if not nxt_parts or not _is_url_continuation(tok, lines[i + 1], nxt_parts):
                 break
-            tok, first = parts[-1], nxt_parts[0]
-            body = first.rstrip(".,;)")
-            starts_cont = first[0] in _CONT_CHARS
-            ends_open = tok[-1] in _CONT_CHARS and any(c.isdigit() or c in "/-_=.&" for c in body)
-            if (starts_cont or ends_open) and _CONT_TOKEN.fullmatch(body or first):
-                cur = cur.rstrip() + lines[i + 1].lstrip()
-                i += 1
-            else:
-                break
-        out.append(cur)
+            pieces[-1] = pieces[-1].rstrip()
+            pieces.append(lines[i + 1].lstrip())
+            tok = tok + nxt_parts[0] if len(nxt_parts) == 1 else nxt_parts[-1]
+            i += 1
+        out.append("".join(pieces))
         i += 1
     return "\n".join(out)
 
@@ -103,8 +208,7 @@ def repair_text(text: str) -> str:
     text = text.replace("\x02", "-").replace("\ufffe", "-")   # GAO\x0216-552 -> GAO-16-552
     text = _CTRL.sub("", text)
     text = text.translate(_LIG_TABLE)
-    text = _SPLIT_WORD.sub(r"\1\2", text)
-    text = _KEEP_HYPHEN.sub(r"\1-", text)
+    text = _LINE_END_HYPHEN.sub(_dehyphenate, text)
     # a soft hyphen that survived inside a word was never printed
     text = text.replace("\u00ad", "")
     # U+2010/2011 inside words are plain hyphens for every regex downstream
@@ -121,6 +225,13 @@ _PAGE_LIKE = re.compile(r"^[\W_]*(page\s*)?#\s*((of|/|\|)\s*#)?[\W_]*$", re.I)
 _DATE_LIKE = re.compile(r"^#[/.-]#[/.-]#(,?\s*#:#(:#)?\s*(am|pm)?)?$", re.I)
 _NUM_ONLY = re.compile(r"^[\W_]*#[\W_]*$")
 
+# A running header or footer is a short line. A longer one is never grouped, never removed, and
+# never costs the time to normalise it.
+_MAX_RUNNING_LINE = 300
+# A page number has at most this many digits. int() of a longer run would also raise past Python's
+# 4,300-digit limit; such a line is no page number.
+_MAX_PAGE_DIGITS = 9
+
 _CITATION_LIKE = re.compile(
     r"\u00a7|\bId\.|\bIbid\b|\bsupra\b|\binfra\b"
     # volume + reporter / code + page
@@ -133,8 +244,24 @@ _CITATION_LIKE = re.compile(
 )
 
 
-def _normalise(line: str) -> str:
-    return _DIGITS.sub("#", _WS.sub(" ", line.strip()))
+def _key(line: str) -> str:
+    """What lines are grouped by across pages.
+
+    Each URL on the line is compared exactly: two footnotes that cite
+    congress.gov/bill/117th-congress/house-bill/1 and .../house-bill/2 are two citations, not one
+    running footer, while a Chrome footer that prints the same URL (and "3/8") on every page is
+    one. Everything else on the line has its digit runs replaced, so "Page 3 of 90" and "Page 4 of
+    90" are the same line; strip_running_lines then checks that the digits that differ really are
+    a page counter (_digit_fields_are_page_counters)."""
+    norm = _WS.sub(" ", line.strip())
+    parts: list[str] = []
+    at = 0
+    for m in _URL.finditer(norm):
+        parts.append(_DIGITS.sub("#", norm[at:m.start()]))
+        parts.append(m.group())
+        at = m.end()
+    parts.append(_DIGITS.sub("#", norm[at:]))
+    return "".join(parts)
 
 
 def _letter_count(s: str) -> int:
@@ -148,6 +275,53 @@ def _is_boilerplate(raw: str, key: str) -> bool:
 def _edge_indices(lines: list[str], k: int) -> set[int]:
     nonblank = [i for i, line in enumerate(lines) if line.strip()]
     return set(nonblank[:k]) | set(nonblank[-k:]) if nonblank else set()
+
+
+def _digit_fields_are_page_counters(raws: dict[int, str]) -> bool:
+    """`raws` maps a page index to a line. True if the lines differ only in digit runs that count
+    pages: a run is fine if it is the same on every page, or if on at least 80% of the pages it is
+    the page index plus one constant (the page number, a Bates number, "Page 7 of 25").
+
+    The lines are grouped with their digits blanked out, so without this check any lines of the
+    same shape ("Case 1:20-cv-0123 ... Page 7 of 25" and "Smith v. Jones, 5 U.S. 137" below
+    "Smith v. Jones, 6 U.S. 138") would be taken for one repeated line and all be removed."""
+    fields = [_DIGITS.findall(raw) for raw in raws.values()]
+    if len({len(f) for f in fields}) != 1:
+        return False
+    pages = list(raws)
+    for k in range(len(fields[0])):
+        values = [f[k] for f in fields]
+        if len(set(values)) == 1:
+            continue
+        if any(len(v) > _MAX_PAGE_DIGITS for v in values):
+            return False
+        offsets = Counter(int(v) - pi for v, pi in zip(values, pages, strict=True))
+        if offsets.most_common(1)[0][1] < 0.8 * len(values):
+            return False
+    return True
+
+
+_extractor = None
+
+
+def _citation_veto(line: str) -> bool:
+    """True if the citation extractor reads `line` as a citation (other than a bare web address,
+    which a repeated footer legitimately is). Used as strip_running_lines's `veto`, so that a
+    footnote is never removed as a running footer because it repeats: _CITATION_LIKE knows the
+    common forms, the extractor knows the rest ("47 CFR 54.101", "FRCP 12(b)(6)", "HR 1234").
+
+    The extractor is imported on first use, which is the first time a line is about to be
+    removed, so a file with no running lines never pays for it (about 0.2 s). A line the extractor
+    cannot judge stays."""
+    global _extractor
+    try:
+        if _extractor is None:
+            from .extractor import CitationExtractor
+
+            _extractor = CitationExtractor()
+        return any(c.type.value != "website" for c in _extractor.extract_all(line))
+    except Exception:
+        return True
 
 
 def strip_running_lines(
@@ -169,6 +343,9 @@ def strip_running_lines(
     `veto(line) -> True` lets the caller protect additional lines (for example, anything the citation
     extractor recognises).  With `return_report=True` the result is `(pages, report)` where report maps
     each removed normalised line to the number of pages it was removed from.
+
+    A line is removed only if it repeats on enough pages (see the parameters), is short, is not a
+    citation, and, if its digits differ from page to page, they count pages (_key, _digit_fields_are_page_counters).
     """
     n_text_pages = sum(1 for p in pages if p and p.strip())
     if n_text_pages < boilerplate_min_pages:
@@ -177,41 +354,48 @@ def strip_running_lines(
     split = [p.split("\n") for p in pages]
     zones = [_edge_indices(lines, edge_lines) for lines in split]
 
-    pages_with: dict[str, set[int]] = defaultdict(set)
-    sample: dict[str, str] = {}
+    raws: dict[str, dict[int, str]] = defaultdict(dict)     # key -> page index -> the line as printed
     page_number_candidates: list[tuple[int, int, int]] = []     # (page index, line index, value)
     for pi, (lines, zone) in enumerate(zip(split, zones, strict=True)):
         for li in zone:
             raw = lines[li]
-            key = _normalise(raw)
+            if len(raw) > _MAX_RUNNING_LINE:
+                continue
+            key = _key(raw)
             if not key:
                 continue
             if _NUM_ONLY.match(key):
                 # a bare number is judged below, on its own rule (it must climb with the page index)
                 m = _DIGITS.search(raw)
-                if m:
+                if m and len(m.group()) <= _MAX_PAGE_DIGITS:
                     page_number_candidates.append((pi, li, int(m.group())))
                 continue
-            pages_with[key].add(pi)
-            sample.setdefault(key, raw)
+            raws[key][pi] = raw
 
     running: set[str] = set()
-    for key, pset in pages_with.items():
-        raw = sample[key]
-        count = len(pset)
+    for key, by_page in raws.items():
+        count = len(by_page)
         if count < min_count:
             continue
-        if protect_citations and _CITATION_LIKE.search(raw):
-            continue
-        if veto is not None and veto(raw):
-            continue
+        samples = list(by_page.values())
+        raw = samples[0]
         if protect_short and _letter_count(key) < 3 and not _is_boilerplate(raw, key):
             continue                                       # "Id.", "Ex. #", "Tr." and friends
         if _is_boilerplate(raw, key):
-            if n_text_pages >= boilerplate_min_pages and count >= max(min_count, math.ceil(boilerplate_fraction * n_text_pages)):
-                running.add(key)
-        elif n_text_pages >= min_pages and count >= max(min_count, math.ceil(min_fraction * n_text_pages)):
-            running.add(key)
+            repeats = n_text_pages >= boilerplate_min_pages and count >= max(min_count, math.ceil(boilerplate_fraction * n_text_pages))
+        else:
+            repeats = n_text_pages >= min_pages and count >= max(min_count, math.ceil(min_fraction * n_text_pages))
+        if not repeats or not _digit_fields_are_page_counters(by_page):
+            continue
+        # Last, and only for a line that is about to be removed: nothing that holds a citation is
+        # ever removed, however often it repeats. (`veto` may be slow, such as the citation
+        # extractor, which is why it is asked only now.)
+        if protect_citations and any(_CITATION_LIKE.search(line) for line in samples):
+            continue
+        # (the lines of one group have one shape, so three of them are enough to ask about)
+        if veto is not None and any(veto(line) for line in (samples[0], samples[len(samples) // 2], samples[-1])):
+            continue
+        running.add(key)
 
     # page numbers: a first/last line whose value is (page index + a constant offset) on enough pages
     drop_numbers: set[tuple[int, int]] = set()
@@ -230,8 +414,8 @@ def strip_running_lines(
             if (pi, li) in drop_numbers:
                 removed["#"] += 1
                 continue
-            if li in zone:
-                key = _normalise(raw)
+            if li in zone and len(raw) <= _MAX_RUNNING_LINE:
+                key = _key(raw)
                 if key in running:
                     removed[key] += 1
                     continue
@@ -687,7 +871,7 @@ def read_pdf(content: bytes, *, max_pages: int | None = None, max_chars: int | N
     if b"/Encrypt" in content:
         warnings.append("This PDF is encrypted, so some text may be missing.")
 
-    pages = strip_running_lines(pages)
+    pages = strip_running_lines(pages, veto=_citation_veto)
     text = "\n\n".join(p for p in pages if p.strip())
     return PdfResult(text, len(pages), warnings, engine)
 

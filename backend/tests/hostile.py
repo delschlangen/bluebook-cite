@@ -161,18 +161,25 @@ def missing_root_bomb_pdf(mb: int = 200) -> bytes:
     return pdf_bytes(_page_objects(_stream_of(deflate_repeated(b" ", mb * 1024 * 1024))), root=None)
 
 
-def pages_pdf(real_pages: int, declared: int, text: str = "A page of ordinary text, long enough to count as text.") -> bytes:
-    """`real_pages` pages whose /Count says `declared`."""
-    kids = " ".join(f"{6 + i} 0 R" for i in range(real_pages))
+_WORDS = ["alpha", "bravo", "charlie", "delta", "echo", "foxtrot", "golf", "hotel", "india", "juliet", "kilo", "lima", "mike",
+          "november", "oscar", "papa", "quebec", "romeo", "sierra", "tango", "uniform", "victor", "whiskey", "xray", "yankee", "zulu"]
+
+
+def pages_pdf(real_pages: int, declared: int) -> bytes:
+    """`real_pages` pages, each with a line of its own ("A page of ordinary text: ..."), whose
+    /Count says `declared`."""
+    kids = " ".join(f"{6 + 2 * i} 0 R" for i in range(real_pages))
     objects = {
         1: b"<< /Type /Catalog /Pages 2 0 R >>",
         2: f"<< /Type /Pages /Kids [{kids}] /Count {declared} >>".encode(),
-        4: flate_stream(b"", f"BT /F1 12 Tf 72 700 Td ({text}) Tj ET".encode()),
         5: b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
     }
     for i in range(real_pages):
-        objects[6 + i] = (b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] "
-                          b"/Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>")
+        w = _WORDS
+        line = f"A page of ordinary text: the {w[i % 26]} panel held that the {w[(i * 3 + 1) % 26]} rule governs the {w[(i * 7 + 2) % 26]} claim in count {i}."
+        objects[6 + 2 * i] = (f"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] "
+                              f"/Resources << /Font << /F1 5 0 R >> >> /Contents {7 + 2 * i} 0 R >>").encode()
+        objects[7 + 2 * i] = flate_stream(b"", f"BT /F1 12 Tf 72 700 Td ({line}) Tj ET".encode())
     return pdf_bytes(objects)
 
 
@@ -253,3 +260,28 @@ def big_word_docx(chars: int, per_paragraph: int = 400) -> bytes:
     unit = f'<w:p><w:pPr><w:spacing w:after="120"/></w:pPr>{runs}</w:p>'.encode()
     count = max(1, chars // per_paragraph)
     return _zip_with_streamed_part("word/document.xml", [_HEAD, *_repeat(unit, count), _TAIL])
+
+
+# --- running code with a hard stop ---------------------------------------------------------------
+
+
+def run_python(code: str, timeout: float = 90.0):
+    """Run `code` in a fresh interpreter (cwd: the backend) and return the finished process.
+
+    An in-process time assertion cannot catch code that holds the interpreter lock (a regular
+    expression stuck in backtracking never lets the assertion run), so each hostile case that could
+    do that runs here, where a regression becomes a failed test after `timeout` seconds instead of
+    a run that never ends."""
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    import pytest
+
+    try:
+        return subprocess.run(
+            [sys.executable, "-c", code], cwd=Path(__file__).resolve().parents[1],
+            capture_output=True, text=True, timeout=timeout,
+        )
+    except subprocess.TimeoutExpired:
+        pytest.fail(f"did not finish within {timeout:.0f} s (the code under test was probably stuck in a regular expression)")
