@@ -5,11 +5,20 @@ building real long documents and measuring, not by reading the code.
 """
 
 import asyncio
+import json
+import re
+import time
+from pathlib import Path
 
 import pytest
+from fastapi.testclient import TestClient
 
 import app.main as main
+import app.services.pdf_text as pdf_text
 from app.models.citation import Citation, CitationStatus, CitationType
+from tests.docfactory import make_docx, make_pdf_pages
+
+ORIGIN = "https://delschlangen.com"
 
 
 def _incomplete_case(n: int, kind: str | None = None) -> Citation:
@@ -197,3 +206,154 @@ class TestLookupPhaseKeepsFinishedWork:
 
         assert fake_lookup.calls == []
         assert (summary.eligible, summary.completed, summary.skipped) == (0, 0, 0)
+
+
+# --- long PDFs through the real endpoints ------------------------------------------------------
+
+FOOTER = "https://orionpolicy.org/how-congress-should-regulate-autonomous-agentic-ai-cyber-risk/"
+
+
+def _pdf(pages: int, footer: str | None = None, cite_every: int = 1) -> bytes:
+    out = []
+    for p in range(pages):
+        page = [
+            (720 - 16 * i, f"Body text of page {p + 1}, paragraph {i}, written to be unremarkable.")
+            for i in range(20)
+        ]
+        if p % cite_every == 0:
+            page.append((400, f"See Brown v. Board of Education, 347 U.S. {483 + p} (1954)."))
+        if footer:
+            page.append((40, footer))
+        out.append(page)
+    return make_pdf_pages(out)
+
+
+@pytest.fixture
+def http():
+    with TestClient(main.app, raise_server_exceptions=False) as c:
+        yield c
+
+
+class TestLongPdfsThroughTheEndpoints:
+    def test_a_long_pdf_uploads_and_its_citations_are_found(self, http):
+        data = _pdf(250)
+        started = time.monotonic()
+        r = http.post(
+            "/api/upload", files={"file": ("long.pdf", data, "application/pdf")},
+            headers={"Origin": ORIGIN},
+        )
+        assert r.status_code == 200, r.text
+        assert time.monotonic() - started < 30
+        body = r.json()
+        assert body["format"] == "pdf"
+        assert "page 250" in body["full_text"]
+
+        a = http.post(
+            "/api/analyze",
+            json={"document_id": body["document_id"], "text": body["full_text"], "filename": "long.pdf"},
+            headers={"Origin": ORIGIN},
+        )
+        assert a.status_code == 200, a.text
+        assert a.json()["stats"]["total_citations"] >= 250
+
+    def test_a_repeated_footer_url_does_not_become_a_citation_on_every_page(self, http):
+        """The reported case: a 4-page PDF with the page's URL in every footer produced four
+        'Website' citations, all needing review. In a 300-page document it would be 300."""
+        data = _pdf(8, footer=FOOTER, cite_every=100)
+        r = http.post("/api/upload", files={"file": ("p.pdf", data, "application/pdf")})
+        text = r.json()["full_text"]
+        assert FOOTER not in text
+
+        a = http.post("/api/analyze", json={"document_id": "d", "text": text, "filename": "p.pdf"})
+        websites = [c for c in a.json()["analysis"]["citations"] if c["type"] == "website"]
+        assert websites == []
+
+    def test_a_pdf_over_the_page_limit_is_refused_with_the_limit_stated(self, http, monkeypatch):
+        monkeypatch.setattr(pdf_text, "MAX_PDF_PAGES", 25)
+        r = http.post(
+            "/api/upload", files={"file": ("long.pdf", _pdf(40), "application/pdf")},
+            headers={"Origin": ORIGIN},
+        )
+        assert r.status_code == 413
+        assert "40 pages" in r.json()["detail"]
+        assert "25-page limit" in r.json()["detail"]
+        # 413 must be readable by the page, not an opaque network error
+        assert r.headers["access-control-allow-origin"] == ORIGIN
+
+    def test_a_pdf_over_the_text_limit_is_refused_with_the_limit_stated(self, http, monkeypatch):
+        monkeypatch.setattr(pdf_text, "MAX_TEXT_CHARS", 5000)
+        r = http.post(
+            "/api/upload", files={"file": ("dense.pdf", _pdf(60), "application/pdf")},
+            headers={"Origin": ORIGIN},
+        )
+        assert r.status_code == 413
+        assert "5,000-character limit" in r.json()["detail"]
+        assert r.headers["access-control-allow-origin"] == ORIGIN
+
+    def test_an_unreadable_pdf_is_a_415_with_advice_not_a_500(self, http):
+        r = http.post(
+            "/api/upload", files={"file": ("bad.pdf", b"%PDF-1.4\nnot really a pdf", "application/pdf")},
+            headers={"Origin": ORIGIN},
+        )
+        assert r.status_code == 415
+        assert "damaged" in r.json()["detail"]
+        assert r.headers["access-control-allow-origin"] == ORIGIN
+
+    def test_a_long_word_file_with_hundreds_of_footnotes_uploads(self, http):
+        paragraphs = [(f"Paragraph {i} of the argument.", [100 + i]) for i in range(300)]
+        notes = {100 + i: f"Brown v. Board of Education, 347 U.S. {i + 1} (1954)." for i in range(300)}
+        data = make_docx(paragraphs, footnotes=notes)
+        r = http.post("/api/upload", files={"file": ("long.docx", data, "application/octet-stream")})
+        assert r.status_code == 200, r.text
+        assert r.json()["footnote_count"] == 300
+
+
+class TestRealPdfsEndToEnd:
+    """Real footnoted PDFs written by Chromium and reportlab, uploaded and analysed through the
+    endpoints. The footnote numbers come from the PDF reader marking each footnote in the same
+    syntax the Word reader writes, which the extractor then trusts over its digit heuristic."""
+
+    FIXTURES = Path(__file__).parent / "fixtures" / "pdf"
+
+    @staticmethod
+    def _squash(s: str) -> str:
+        return re.sub(r"[^0-9a-z]", "", s.lower())
+
+    @pytest.mark.parametrize("name", ["a_lawreview_chromium", "a2_lawreview_reportlab"])
+    def test_footnote_numbers_are_right_for_real_law_review_pdfs(self, http, name):
+        truth = json.loads((self.FIXTURES / f"{name}.truth.json").read_text())
+        up = http.post(
+            "/api/upload",
+            files={"file": (f"{name}.pdf", (self.FIXTURES / f"{name}.pdf").read_bytes(), "application/pdf")},
+        ).json()
+        found = http.post(
+            "/api/analyze", json={"document_id": "d", "text": up["full_text"], "filename": name}
+        ).json()["analysis"]["citations"]
+
+        expected = [c for c in truth["cites"] if c["kind"] != "id" and c.get("footnote")]
+        assert len(expected) > 30
+        right = 0
+        for want in expected:
+            wanted = self._squash(want["text"])
+            for got in found:
+                have = self._squash(got["raw_text"])
+                if have and (have in wanted or wanted in have) and got["footnote_number"] == want["footnote"]:
+                    right += 1
+                    break
+        assert right / len(expected) >= 0.95, f"{right} of {len(expected)} footnote numbers right"
+
+    def test_a_policy_paper_with_a_footer_on_every_page_yields_only_its_real_citations(self, http):
+        name = "b_policy_chrome_hf"
+        up = http.post(
+            "/api/upload",
+            files={"file": (f"{name}.pdf", (self.FIXTURES / f"{name}.pdf").read_bytes(), "application/pdf")},
+        ).json()
+        found = http.post(
+            "/api/analyze", json={"document_id": "d", "text": up["full_text"], "filename": name}
+        ).json()["analysis"]["citations"]
+
+        # The footer URL ("orionpolicy.org/...") repeats on every page and is not a source.
+        assert not any("orionpolicy.org" in c["raw_text"] for c in found)
+        truth = json.loads((self.FIXTURES / f"{name}.truth.json").read_text())
+        real_websites = [c for c in truth["cites"] if c["kind"] == "website"]
+        assert sum(1 for c in found if c["type"] == "website") <= len(real_websites)

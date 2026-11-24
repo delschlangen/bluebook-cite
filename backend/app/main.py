@@ -12,6 +12,7 @@ from fastapi import Body, FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
+from .limits import MAX_UPLOAD_BYTES
 from .models.citation import (
     AnalysisResponse,
     AnalysisStats,
@@ -26,7 +27,7 @@ from .services.bluebook_rules import BluebookFormatter
 from .services.context_analyzer import DocumentContextAnalyzer
 from .services.extractor import CitationExtractor
 from .services.lookup_service import CitationCompleter, LegalLookupService
-from .services.parser import DocumentParser, UnsupportedDocumentError
+from .services.parser import DocumentParser, DocumentTooLongError, UnsupportedDocumentError
 from .services.repair import CitationRepairer
 from .services.source_finder import ClaimDetector, SourceFinder
 from .services.spec_engine import STYLES
@@ -47,8 +48,8 @@ MAX_LOOKUPS_PER_DOCUMENT = int(os.getenv("MAX_LOOKUPS_PER_DOCUMENT", "200"))
 
 # Uploads are unauthenticated, so the body is read with a hard cap rather than
 # pulled into memory in full. Content-Type is client-supplied and cannot be
-# trusted on its own; the parser validates the actual bytes.
-MAX_UPLOAD_BYTES = int(os.getenv("MAX_UPLOAD_MB", "10")) * 1024 * 1024
+# trusted on its own; the parser validates the actual bytes. The limit itself
+# lives in limits.py with every other one.
 
 # The repair endpoint takes one citation, not a document. The cap keeps it
 # cheap and steers whole-document work to the upload path.
@@ -214,6 +215,10 @@ async def upload_document(file: UploadFile = File(...)):
         parsed = await asyncio.to_thread(
             parser.parse_document, content, file.filename
         )
+    except DocumentTooLongError as e:
+        # 413, not 415: the file is a kind we read, it is just too long. The message
+        # states the limit and what to do.
+        raise HTTPException(status_code=413, detail=str(e)) from e
     except UnsupportedDocumentError as e:
         # The message already says what to do about it.
         raise HTTPException(status_code=415, detail=str(e)) from e

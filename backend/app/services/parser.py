@@ -44,6 +44,10 @@ class UnsupportedDocumentError(ValueError):
     """The file is a kind this tool cannot read. The message says what to do."""
 
 
+class DocumentTooLongError(UnsupportedDocumentError):
+    """Over the page or text limit. The server answers 413 so the page can state the limit."""
+
+
 @dataclass
 class ParsedDocument:
     text: str
@@ -160,24 +164,22 @@ class DocumentParser:
     # PDF ------------------------------------------------------------------
 
     def _parse_pdf(self, content: bytes) -> ParsedDocument:
-        import pdfplumber
+        # pdfium page by page (memory stays flat however long the file is), pdfminer.six
+        # only as a second opinion, and the page limit checked before any page is read.
+        # See services/pdf_text.py for why this is not pdfplumber.
+        from .pdf_text import PdfReadError, PdfTooLongError, read_pdf
 
-        parts: list[str] = []
-        warnings: list[str] = []
         try:
-            with pdfplumber.open(io.BytesIO(content)) as pdf:
-                if getattr(pdf, "doc", None) is not None and getattr(pdf.doc, "encryption", None):
-                    warnings.append("This PDF is encrypted, so some text may be missing.")
-                for page in pdf.pages:
-                    page_text = page.extract_text()
-                    if page_text:
-                        parts.append(page_text)
-        except Exception as exc:  # pdfminer raises many unrelated types
+            result = read_pdf(content)
+        except PdfTooLongError as exc:
+            raise DocumentTooLongError(str(exc)) from exc
+        except PdfReadError as exc:
+            raise UnsupportedDocumentError(str(exc)) from exc
+        except Exception as exc:  # a parser bug must not become a 500 the page cannot read
             raise UnsupportedDocumentError(
                 "This PDF could not be read. It may be damaged or password protected."
             ) from exc
-
-        return ParsedDocument(text="\n\n".join(parts), format="pdf", warnings=warnings)
+        return ParsedDocument(text=result.text, format="pdf", warnings=result.warnings)
 
     # DOCX -----------------------------------------------------------------
 
