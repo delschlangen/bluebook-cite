@@ -17,6 +17,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
+import httpx
 import pytest
 from fastapi.testclient import TestClient
 
@@ -398,6 +399,106 @@ class TestStatusesAndMessages:
         assert r.status_code == 503
         assert r.headers["retry-after"]
         assert "document reader" in r.json()["detail"]
+
+
+# --- a person who gives up -----------------------------------------------------------------------
+
+
+def _children() -> set[int]:
+    """Process ids of this process's children (zombies included, so "reaped" is proven too).
+    Counted by parentage, not by name: another test run on the same machine has readers of its own."""
+    me, found = os.getpid(), set()
+    for entry in os.listdir("/proc"):
+        if not entry.isdigit():
+            continue
+        try:
+            with open(f"/proc/{entry}/stat") as handle:
+                after_name = handle.read().rsplit(")", 1)[1].split()
+        except (OSError, IndexError):
+            continue
+        if int(after_name[1]) == me:
+            found.add(int(entry))
+    return found
+
+
+@pytest.mark.skipif(not os.path.exists("/proc/self/status"), reason="needs /proc")
+class TestAnAbandonedUploadReleasesItsChild:
+    """A phone that locks, or a person who presses reset, drops the connection. The child kept
+    reading for up to the wall-clock limit and the upload kept its place in the line, so two such
+    attempts made the third person's upload a "busy" 503."""
+
+    @staticmethod
+    async def _upload_then_disconnect(filename: str, wait_for_child: bool):
+        before = _children()
+        boundary = "xxBOUNDARYxx"
+        body = (
+            f"--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; "
+            f"filename=\"{filename}\"\r\nContent-Type: application/octet-stream\r\n\r\nhello\r\n"
+            f"--{boundary}--\r\n"
+        ).encode()
+        sent_body = False
+        gone = asyncio.Event()
+
+        async def receive():
+            nonlocal sent_body
+            if not sent_body:
+                sent_body = True
+                return {"type": "http.request", "body": body, "more_body": False}
+            await gone.wait()
+            return {"type": "http.disconnect"}
+
+        answers = []
+
+        async def send(message):
+            answers.append(message)
+
+        scope = {
+            "type": "http", "method": "POST", "path": "/api/upload", "headers": [
+                (b"content-type", f"multipart/form-data; boundary={boundary}".encode()),
+                (b"content-length", str(len(body)).encode()),
+            ],
+            "query_string": b"", "http_version": "1.1", "scheme": "http",
+            "server": ("test", 80), "client": ("1.2.3.4", 1), "root_path": "",
+        }
+        request = asyncio.ensure_future(main.app(scope, receive, send))
+        if wait_for_child:
+            for _ in range(200):
+                if _children() - before:
+                    break
+                await asyncio.sleep(0.05)
+            assert _children() - before, "the child never started"
+        gone.set()
+        started = time.monotonic()
+        await asyncio.wait_for(request, timeout=10)
+        status = next(m["status"] for m in answers if m["type"] == "http.response.start")
+        return status, time.monotonic() - started, before
+
+    @pytest.mark.asyncio
+    async def test_the_child_is_killed_and_its_place_freed_when_the_client_goes(self, fake, monkeypatch):
+        monkeypatch.setattr(limits, "PARSE_WALL_S", 60.0)  # the wall clock must not be what ends it
+        status, took, before = await self._upload_then_disconnect("hang", wait_for_child=True)
+
+        assert status == 499, "an abandoned upload is logged as a client that left, not as an error"
+        assert took < 3, "the handler kept waiting for a child nobody wanted"
+        for _ in range(100):
+            if not _children() - before:
+                break
+            await asyncio.sleep(0.05)
+        assert not _children() - before, "the child outlived the person who asked for it"
+        assert sandbox.stats() == {"running": 0, "waiting": 0}
+
+    @pytest.mark.asyncio
+    async def test_a_person_still_there_is_unaffected(self, fake):
+        """The watcher polls the connection while the child runs; a client that stays is answered."""
+        transport = httpx.ASGITransport(app=main.app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://t") as client:
+            r = await asyncio.wait_for(
+                client.post("/api/upload", files={"file": ("sleep|1.2", b"hello", "text/plain")}),
+                timeout=20,
+            )
+        # The stand-in answers "slept", which is real text, so this is the ordinary success path.
+        assert r.status_code == 200, r.text
+        assert r.json()["full_text"] == "slept"
 
 
 # --- the parent stays small --------------------------------------------------------------------

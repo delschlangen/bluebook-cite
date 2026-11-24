@@ -270,7 +270,7 @@ async def health_check():
 
 
 @app.post("/api/upload", response_model=UploadResponse)
-async def upload_document(file: UploadFile = File(...)):
+async def upload_document(request: Request, file: UploadFile = File(...)):
     """Upload a legal document for citation analysis.
 
     The format is detected from the file's bytes. The Content-Type the browser
@@ -292,7 +292,15 @@ async def upload_document(file: UploadFile = File(...)):
         # this one: a hostile or merely unlucky PDF can abort native code or hold the
         # interpreter lock in a regular expression, and neither a thread nor a deadline can
         # stop that. A child can be killed, and the server only waits for it.
-        parsed = await parse_isolated(content, file.filename, max_text_chars=MAX_TEXT_CHARS)
+        #
+        # A person who gives up (closes the tab, locks the phone) must not keep a child, and a
+        # place in the line of uploads, for up to 35 seconds: _bounded drops the work, and
+        # parse_isolated kills its child when it is cancelled.
+        parsed = await _bounded(
+            request, parse_isolated(content, file.filename, max_text_chars=MAX_TEXT_CHARS)
+        )
+    except _ClientGone:
+        return Response(status_code=499)  # nobody is listening; this is only for the log
     except ParseBusyError as e:
         # Not a problem with the file, and not 415: say the server is busy and when to retry.
         raise HTTPException(
