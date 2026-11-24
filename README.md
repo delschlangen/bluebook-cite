@@ -144,7 +144,7 @@ and a file over the size limit is refused in the browser before anything is sent
 
 Each can be changed per environment without a code change (`MAX_UPLOAD_MB`, `MAX_TEXT_CHARS`,
 `MAX_PDF_PAGES`, `MAX_CITATIONS_RETURNED`, `MAX_CLAIMS_RETURNED`, `ANALYSIS_DEADLINE_SECONDS`,
-`MAX_QUEUED_ANALYSES`, and the document-reading limits below; see
+`MAX_QUEUED_ANALYSES`, and the document-reading and request limits below; see
 [`backend/app/limits.py`](backend/app/limits.py)), and `/health` publishes the values in force so
 a client can show the number that is actually enforced.
 
@@ -228,10 +228,42 @@ document preview shows one window of text, because thousands of cards made a pho
 (4,000 citations took 3.9 s to first paint on a throttled phone).
 
 **Staying responsive.** The analysis is CPU work, so it runs in a worker thread, one document at
-a time, and every error the server can produce, including an unexpected one, is a JSON response
-that carries CORS headers (a browser hides a response without them and can only say "could not
-reach the server"). `/health` includes a `boot_id` that changes when the process restarts, so a
-client can tell a crash from a dropped connection.
+a time. Every error the server can produce, including an unexpected one, is a JSON response that
+carries CORS headers (a browser hides a response without them and can only say "could not reach
+the server"), and every response carries `X-Boot-Id`. Request bodies are counted as they arrive
+and never trusted from their headers: a body sent in chunks with no declared length is cut off at
+the limit with a 413 that states it (`/api/upload` allows the file limit, `/api/analyze` the text
+limit, every other endpoint `MAX_SMALL_BODY_KB`). When a person closes the tab their place in
+the analysis queue and their outside lookups are released at once; a job already running on the
+processor finishes first, because a thread cannot be stopped. A text with more than `MAX_CITATIONS_ANALYZED` citations (a text of bare "Id.", for
+example) is refused with the limit stated instead of being built in memory. Lookup results are
+counted where the request is made, so the response says how many were found and how many failed
+(`lookup.matched`, `lookup.failed`) and "the sources refused us" is no longer reported as
+"nothing found".
+
+Two last-resort checks exist because a regular expression holds the interpreter lock for the
+whole of one match, and nothing inside Python can interrupt it: not a deadline, not a timer, not
+another thread. `EVENT_LOOP_STALL_EXIT_S` (45 s) ends the process if the event loop has not run
+for that long, and `CPU_JOB_MAX_S` (180 s) ends it if an analysis thread outlives its request by
+that long, since a thread cannot be killed and would hold the single analysis slot. Both print
+every thread's stack first, which names the pattern, and the host restarts the process; the page
+sees a new `boot_id` and says the server restarted. Set either to `0` to turn it off (a laptop
+that sleeps for a minute would otherwise end a local server). They are a net under the fixes, not
+a substitute: `tests/test_regex_floods.py` runs every regular expression in the app over about
+fifty floods of one repeated shape in a killable subprocess and fails on any that takes over a
+second on 30,000 characters. That is a sample of shapes, not a proof, and the net remains because
+of it.
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `MAX_SMALL_BODY_KB` | `1024` | request body for every endpoint except upload and analyze |
+| `MAX_CITATIONS_ANALYZED` | `50000` | citations one analysis will build; more is a 413 |
+| `MAX_CLAIMS_FOR_SOURCES` | `25` | claims the legacy source-finding endpoints search outside sources for |
+| `EVENT_LOOP_STALL_EXIT_S` | `45` | end the process if the event loop stalls this long (`0` = off) |
+| `CPU_JOB_MAX_S` | `180` | end the process if one analysis thread runs this long (`0` = off) |
+
+`python-multipart` is pinned to 0.0.34 on purpose: version 0.0.6 spends minutes parsing a hostile
+`Content-Type` header on the event loop, and `tests/test_http_layer.py` fails against it.
 
 ## Two styles
 
