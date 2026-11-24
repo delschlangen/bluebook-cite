@@ -145,11 +145,27 @@ class TestDeclaredSizeIsCheckedBeforeReadingTheBody:
         )
         assert r.status_code != 413 or "MB" not in r.json().get("detail", "")
 
-    def test_endpoints_without_a_special_limit_are_untouched(self, http):
+    def test_an_endpoint_that_takes_a_small_object_refuses_a_large_declared_body(self, http):
         r = http.post(
             "/api/format",
             content=b"{}",
-            headers={"Content-Length": "999999999", "Content-Type": "application/json"},
+            headers={
+                "Content-Length": str(limits.MAX_SMALL_BODY_BYTES + 1),
+                "Content-Type": "application/json",
+                "Origin": ORIGIN,
+            },
+        )
+        assert r.status_code == 413
+        assert r.headers["access-control-allow-origin"] == ORIGIN
+
+    def test_a_small_body_to_the_same_endpoint_is_not_refused(self, http):
+        r = http.post(
+            "/api/format",
+            content=b"{}",
+            headers={
+                "Content-Length": "2",
+                "Content-Type": "application/json",
+            },
         )
         assert r.status_code != 413
 

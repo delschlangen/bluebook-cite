@@ -154,6 +154,12 @@ class LookupSummary(BaseModel):
     completed: int = 0         # lookups that ran to the end (whether or not they found anything)
     skipped: int = 0           # eligible but not attempted or not finished in time
     budget_exhausted: bool = False
+    # Of the lookups that ran to the end: how many found a usable match, and how many could not
+    # be asked at all (every request to the sources failed: down, blocked or rate limited). The
+    # rest asked and found no such record. `completed` alone cannot tell the three apart, and
+    # "looked up 200" is false assurance when none of them could be.
+    matched: int = 0
+    failed: int = 0
 
 
 class AnalysisResponse(BaseModel):

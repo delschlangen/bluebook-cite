@@ -81,15 +81,26 @@ PATTERNS: dict[str, Pattern] = {
         r"(?!\s*[\d,]*\s*\()"
     ),
 
-    # Incomplete case: just Party v. Party (missing reporter info)
+    # Incomplete case: just Party v. Party (missing reporter info).
+    #
+    # The second party is an atomic group: once it has matched the whole name it is never
+    # shortened. It used to be followed by a negative lookahead that refused a reporter citation
+    # after it (", 5 U.S."); when the lookahead failed the engine did not give up, it backed off
+    # one letter at a time until it found a place where the lookahead passed, so "Roe v. Wade,
+    # 410 U.S. ___ (1973)" was reported as "Roe v. Wad" and the lookup searched for a case that
+    # does not exist. The citation is now reported with the names whole; what follows them was not
+    # recognised as a reporter citation by the fuller patterns, which already had their turn.
     "case_incomplete": re.compile(
-        rf"({_PARTY})\s+v\.?\s+({_PARTY})"
-        r"(?!\s*,\s*\d+\s+[A-Z])"
+        rf"({_PARTY})\s+v\.?\s+(?>({_PARTY}))"
     ),
 
     # Federal statutes: Title U.S.C. § Section
+    # The lookbehind keeps a match from starting in the middle of a run of digits. Without it a
+    # failed match retried from every digit of the run, and each retry read to the end of it:
+    # quadratic, so 32,000 digits took 7 s and 100,000 never finished, with the interpreter lock
+    # held the whole time (nothing else on the server could run).
     "statute_usc": re.compile(
-        r"(\d+)\s+U\.?S\.?C\.?\s*§+\s*(\d+[a-z]?)(?:\(([^)]+)\))?"
+        r"(?<!\d)(\d+)\s+U\.?S\.?C\.?\s*§+\s*(\d+[a-z]?)(?:\(([^)]+)\))?"
     ),
 
     # State statutes (generic pattern)

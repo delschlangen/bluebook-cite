@@ -11,18 +11,16 @@ from contextlib import asynccontextmanager
 
 from fastapi import Body, FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import Response
 from starlette.middleware.gzip import GZipMiddleware
 
-from . import limits
+from . import limits, watchdog
+from .asgi import BodyLimit, BootIdHeader, JsonErrors
 from .limits import (
-    MAX_ANALYZE_BODY_BYTES,
     MAX_CITATIONS_RETURNED,
     MAX_CLAIMS_RETURNED,
     MAX_TEXT_CHARS,
     MAX_UPLOAD_BYTES,
-    MAX_UPLOAD_MB,
-    UPLOAD_ENVELOPE_BYTES,
     too_long_message,
 )
 from .models.citation import (
@@ -37,8 +35,8 @@ from .models.citation import (
 )
 from .services.bluebook_rules import BluebookFormatter
 from .services.context_analyzer import DocumentContextAnalyzer
-from .services.extractor import CitationExtractor
-from .services.lookup_service import CitationCompleter, LegalLookupService
+from .services.extractor import CitationExtractor, TooManyCitationsError
+from .services.lookup_service import CitationCompleter, LegalLookupService, tally_lookups
 from .services.parser import DocumentParser, DocumentTooLongError, UnsupportedDocumentError
 from .services.repair import CitationRepairer
 from .services.source_finder import ClaimDetector, SourceFinder
@@ -60,6 +58,14 @@ ANALYSIS_DEADLINE_SECONDS = float(os.getenv("ANALYSIS_DEADLINE_SECONDS", "90"))
 # Analyses allowed to wait behind the one that is running. Beyond that the server says it is
 # busy (503) instead of stacking up work that would all time out together.
 MAX_QUEUED_ANALYSES = int(os.getenv("MAX_QUEUED_ANALYSES", "2"))
+
+# Claims the legacy source-finding endpoints will search outside sources for, per request. They
+# search one claim after another, so the number bounds the time as well as the load on the
+# free public APIs.
+MAX_CLAIMS_FOR_SOURCES = int(os.getenv("MAX_CLAIMS_FOR_SOURCES", "25"))
+
+# How often a running request checks that the person is still there.
+DISCONNECT_POLL_SECONDS = 0.5
 
 # Cap on how many citations one document may send to outside lookups. Time alone
 # is not a safe bound: with fast upstreams a very long document could still queue
@@ -146,13 +152,16 @@ async def _cpu(fn, *args):
     """Run CPU-bound `fn` in a thread, one at a time, holding the slot until it truly ends."""
     gate = _cpu_gate()
     await gate.acquire()
+    watchdog.cpu_job_started()
     try:
         future = asyncio.ensure_future(asyncio.to_thread(fn, *args))
     except BaseException:
+        watchdog.cpu_job_finished()
         gate.release()
         raise
 
     def finished(done: asyncio.Future) -> None:
+        watchdog.cpu_job_finished()
         gate.release()
         if not done.cancelled():
             done.exception()  # mark retrieved: nobody may be waiting if the request timed out
@@ -169,7 +178,10 @@ async def lifespan(app: FastAPI):
     covers the hosts that do not.
     """
     get_lookup_service()
+    guard = asyncio.create_task(watchdog.run())
     yield
+    guard.cancel()
+    await asyncio.gather(guard, return_exceptions=True)
     global _lookup_service
     if _lookup_service is not None:
         await _lookup_service.close()
@@ -185,64 +197,22 @@ app = FastAPI(
 log = logging.getLogger("bluebook")
 
 
-# Registered BEFORE CORSMiddleware, which makes it the inner layer: an unhandled error
-# becomes a JSON 500 that then passes through CORS and so carries
-# Access-Control-Allow-Origin. Without this, Starlette's outermost error handler answers a
-# bare text 500 with no CORS headers. A browser hides such a response entirely, so the page
-# can only report "could not reach the server" for what is really a bug with a stack trace.
-@app.middleware("http")
-async def json_errors(request: Request, call_next):
-    try:
-        return await call_next(request)
-    except Exception as exc:  # noqa: BLE001 - this is the last line of defence by design
-        error_id = uuid.uuid4().hex[:8]
-        log.exception("unhandled error %s on %s", error_id, request.url.path)
-        if isinstance(exc, MemoryError):
-            what = "The server ran out of memory while processing this document."
-        else:
-            what = "The server hit an unexpected error while processing this request."
-        return JSONResponse(
-            {"detail": f"{what} (error {error_id})", "error_id": error_id},
-            status_code=500,
-        )
-
-
 # Identifies this process. A page that saw one boot_id and then, after a failed request, a
 # different one knows the server restarted in between (a crash or an out-of-memory kill) and can
-# say so, instead of guessing at "could not reach the server".
+# say so, instead of guessing at "could not reach the server". It is on every response
+# (X-Boot-Id) as well as in /health, so the id the page remembers is the one from just before a
+# request that failed.
 BOOT_ID = uuid.uuid4().hex[:12]
 STARTED_AT = time.time()
 
-
-def _body_limit(path: str) -> int | None:
-    """The largest request body each endpoint will read, or None for no special limit."""
-    if path == "/api/upload":
-        return MAX_UPLOAD_BYTES + UPLOAD_ENVELOPE_BYTES
-    if path == "/api/analyze":
-        return MAX_ANALYZE_BODY_BYTES
-    return None
-
-
-# Rejects an oversized request from its declared Content-Length, before the body is read.
-# Without this a 100 MB upload is received and spooled to disk in full before the handler can
-# say 413, and a 100 MB JSON body is held in memory (about 3.5 times its size) while the event
-# loop is busy parsing it. Registered before CORS so the 413 is readable by the page.
-@app.middleware("http")
-async def reject_oversized_bodies(request: Request, call_next):
-    limit = _body_limit(request.url.path)
-    declared = request.headers.get("content-length", "")
-    if limit is not None and declared.isdigit() and int(declared) > limit:
-        mb = int(declared) / (1024 * 1024)
-        if request.url.path == "/api/upload":
-            detail = f"This file is {mb:.1f} MB. The limit is {MAX_UPLOAD_MB} MB."
-        else:
-            detail = (
-                f"This document's text is {mb:.1f} MB, which is too large to analyze. "
-                f"The text limit is {MAX_TEXT_CHARS:,} characters."
-            )
-        return JSONResponse({"detail": detail}, status_code=413)
-    return await call_next(request)
-
+# Each add_middleware wraps everything added before it, so the last one is the outermost. The
+# order matters: errors and the body limit answer INSIDE CORS, so the page can read them (a
+# browser hides a response that has no Access-Control-Allow-Origin, and the page could only say
+# "could not reach the server" for what is really a 413 or a bug). See asgi.py for why these
+# are written as plain ASGI middleware.
+app.add_middleware(BodyLimit)
+app.add_middleware(JsonErrors)
+app.add_middleware(BootIdHeader, boot_id=BOOT_ID)
 
 # The analysis of a long document is a large block of repetitive JSON, and the document text
 # comes back with the upload; both compress about ten to one, which matters on a phone.
@@ -258,6 +228,8 @@ app.add_middleware(
     allow_credentials=False,
     allow_methods=["GET", "POST", "OPTIONS"],
     allow_headers=["Content-Type"],
+    # Without this a script cannot read these two headers off a cross-origin response.
+    expose_headers=["X-Boot-Id", "Retry-After"],
 )
 
 
@@ -395,6 +367,8 @@ async def _complete_citations(citations):
     to_look_up = eligible[:MAX_LOOKUPS_PER_DOCUMENT]
 
     finished: dict[int, Citation] = {}
+    matched = 0
+    failed = 0
     budget_exhausted = False
 
     if to_look_up:
@@ -402,21 +376,39 @@ async def _complete_citations(citations):
         semaphore = asyncio.Semaphore(MAX_CONCURRENT_LOOKUPS)
 
         async def complete_one(citation):
+            nonlocal matched, failed
             async with semaphore:
-                try:
-                    finished[id(citation)] = await completer.complete_citation(citation)
-                except Exception:
-                    # A failed enrichment must not fail the document. The
-                    # citation is still returned exactly as it was found.
-                    finished[id(citation)] = citation
+                with tally_lookups() as tally:
+                    try:
+                        done = await completer.complete_citation(citation)
+                    except Exception:
+                        # A failed enrichment must not fail the document. The
+                        # citation is still returned exactly as it was found.
+                        finished[id(citation)] = citation
+                        failed += 1
+                        return
+                finished[id(citation)] = done
+                results = getattr(done, "lookup_results", None)
+                if results and results.get("found"):
+                    matched += 1
+                elif tally.unreachable:
+                    # Every request made for this citation failed, so "not found" would be
+                    # false: the sources were never asked.
+                    failed += 1
 
         tasks = [asyncio.create_task(complete_one(c)) for c in to_look_up]
-        _, pending = await asyncio.wait(tasks, timeout=COMPLETION_BUDGET_SECONDS)
-        if pending:
-            budget_exhausted = True
-            for task in pending:
+        try:
+            _, pending = await asyncio.wait(tasks, timeout=COMPLETION_BUDGET_SECONDS)
+            if pending:
+                budget_exhausted = True
+        finally:
+            # On the time budget, and equally when the request is abandoned or passes its
+            # deadline while waiting here: nothing may keep running in the background. (asyncio.wait
+            # does not cancel what it waits for when the waiter itself is cancelled, so a 504
+            # used to leave up to 200 outside requests running and feeding the semaphore.)
+            for task in tasks:
                 task.cancel()
-            await asyncio.gather(*pending, return_exceptions=True)
+            await asyncio.gather(*tasks, return_exceptions=True)
 
     def finalize() -> list:
         done = []
@@ -433,13 +425,29 @@ async def _complete_citations(citations):
         completed=len(finished),
         skipped=len(eligible) - len(finished),
         budget_exhausted=budget_exhausted,
+        matched=matched,
+        failed=failed,
     )
     return completed, summary
 
 
+async def _extract(text: str) -> list[Citation]:
+    """Find the citations, or refuse a text with more than one analysis will build."""
+    try:
+        return await _cpu(extractor.extract_all, text)
+    except TooManyCitationsError as e:
+        raise HTTPException(
+            status_code=413,
+            detail=(
+                f"This document has {e}, which is more than one analysis can handle. "
+                "Split it at a chapter or section boundary and check the parts one at a time."
+            ),
+        ) from e
+
+
 async def _analyze(document_id: str, text: str, filename: str) -> AnalysisResponse:
     """The whole analysis. Its CPU stages run in a worker thread; the lookups stay on the loop."""
-    citations = await _cpu(extractor.extract_all, text)
+    citations = await _extract(text)
 
     completed_citations, lookup_summary = await _complete_citations(citations)
 
@@ -491,35 +499,52 @@ async def _analyze(document_id: str, text: str, filename: str) -> AnalysisRespon
     )
 
 
-@app.post("/api/analyze", response_model=AnalysisResponse)
-async def analyze_citations(
-    document_id: str = Body(...),
-    text: str = Body(...),
-    filename: str = Body(default="document"),
-):
-    """Extract and analyze all citations in the document."""
+_BUSY_DETAIL = "The server is busy analyzing other documents. Please try again in a minute."
+
+
+@asynccontextmanager
+async def _admitted():
+    """Count a request in, or refuse it as busy.
+
+    One analysis runs at a time and a few may wait. Past that the work would all time out
+    together, so say the server is busy while a retry can still succeed."""
     global _active_analyses
-
-    # The same limit the upload enforces. This endpoint is public and takes the text directly,
-    # so it cannot rely on the upload having checked.
-    if len(text) > MAX_TEXT_CHARS:
-        raise HTTPException(status_code=413, detail=too_long_message(len(text), MAX_TEXT_CHARS))
-
-    # One analysis runs at a time and a few may wait. Past that the work would all time out
-    # together, so say the server is busy while a retry can still succeed.
     if _active_analyses >= 1 + MAX_QUEUED_ANALYSES:
-        raise HTTPException(
-            status_code=503,
-            detail="The server is busy analyzing other documents. Please try again in a minute.",
-            headers={"Retry-After": "30"},
-        )
-
+        raise HTTPException(status_code=503, detail=_BUSY_DETAIL, headers={"Retry-After": "30"})
     _active_analyses += 1
     try:
-        return await asyncio.wait_for(
-            _analyze(document_id, text, filename), timeout=ANALYSIS_DEADLINE_SECONDS
+        yield
+    finally:
+        _active_analyses -= 1
+
+
+class _ClientGone(Exception):
+    """The person closed the page, locked the phone or pressed reset while their request ran."""
+
+
+async def _until_client_disconnects(request: Request) -> None:
+    while not await request.is_disconnected():
+        await asyncio.sleep(DISCONNECT_POLL_SECONDS)
+
+
+async def _bounded(request: Request, work):
+    """Await `work` until it finishes, the deadline passes (504), or the client is gone.
+
+    A client that has gone cannot be answered, so what it asked for is dropped: its lookups are
+    cancelled and the stages not yet started are never begun. (A stage already running in a
+    thread cannot be stopped, but it was the only thing left to wait for. Before this, every
+    abandoned request ran to the end and kept its place in the queue, so a phone that resets
+    twice was told the server was busy with other people's documents.)"""
+    job = asyncio.ensure_future(work)
+    watcher = asyncio.ensure_future(_until_client_disconnects(request))
+    try:
+        done, _ = await asyncio.wait(
+            {job, watcher}, timeout=ANALYSIS_DEADLINE_SECONDS, return_when=asyncio.FIRST_COMPLETED
         )
-    except TimeoutError:
+        if job in done:
+            return job.result()
+        if watcher in done:
+            raise _ClientGone
         raise HTTPException(
             status_code=504,
             detail=(
@@ -527,9 +552,34 @@ async def analyze_citations(
                 f"{ANALYSIS_DEADLINE_SECONDS:g}-second limit. Try a shorter document, or split "
                 "it at a chapter or section boundary and check the parts one at a time."
             ),
-        ) from None
+        )
     finally:
-        _active_analyses -= 1
+        job.cancel()
+        watcher.cancel()
+        await asyncio.gather(job, watcher, return_exceptions=True)
+
+
+def _require_text_within_limit(text: str) -> None:
+    # The same limit the upload enforces. These endpoints are public and take the text directly,
+    # so they cannot rely on the upload having checked.
+    if len(text) > MAX_TEXT_CHARS:
+        raise HTTPException(status_code=413, detail=too_long_message(len(text), MAX_TEXT_CHARS))
+
+
+@app.post("/api/analyze", response_model=AnalysisResponse)
+async def analyze_citations(
+    request: Request,
+    document_id: str = Body(...),
+    text: str = Body(...),
+    filename: str = Body(default="document"),
+):
+    """Extract and analyze all citations in the document."""
+    _require_text_within_limit(text)
+    async with _admitted():
+        try:
+            return await _bounded(request, _analyze(document_id, text, filename))
+        except _ClientGone:
+            return Response(status_code=499)  # nobody is listening; this is only for the log
 
 
 @app.post("/api/format")
@@ -624,6 +674,7 @@ async def complete_from_text(text: str = Body(..., embed=True)):
 
 @app.post("/api/find-sources")
 async def find_sources(
+    request: Request,
     text: str = Body(...),
     max_suggestions: int = Body(default=3),
 ):
@@ -633,24 +684,35 @@ async def find_sources(
     Analyzes the text for claims that need citations and
     searches legal databases for relevant sources.
     """
-    source_finder = SourceFinder(get_lookup_service())
+    _require_text_within_limit(text)
 
-    # First detect claims
-    claim_detector = ClaimDetector()
-    claims = claim_detector.detect_unsourced_claims(text, [])
+    async def work():
+        source_finder = SourceFinder(get_lookup_service())
 
-    # Find sources for each claim
-    enriched_claims = await source_finder.find_sources_for_claims(claims, max_suggestions)
+        # First detect claims (CPU work: off the event loop, one job at a time)
+        claims = await _cpu(ClaimDetector().detect_unsourced_claims, text, [])
 
-    return {
-        "total_claims": len(claims),
-        "claims_with_sources": sum(1 for c in enriched_claims if c.get("suggested_sources")),
-        "claims": enriched_claims,
-    }
+        # Find sources for each claim, a bounded number of them
+        enriched_claims = await source_finder.find_sources_for_claims(
+            claims, max_suggestions, max_claims=MAX_CLAIMS_FOR_SOURCES
+        )
+        return {
+            "total_claims": len(claims),
+            "claims_searched": len(enriched_claims),
+            "claims_with_sources": sum(1 for c in enriched_claims if c.get("suggested_sources")),
+            "claims": enriched_claims,
+        }
+
+    async with _admitted():
+        try:
+            return await _bounded(request, work())
+        except _ClientGone:
+            return Response(status_code=499)
 
 
 @app.post("/api/analyze-comprehensive")
 async def analyze_comprehensive(
+    request: Request,
     document_id: str = Body(...),
     text: str = Body(...),
     filename: str = Body(default="document"),
@@ -664,63 +726,71 @@ async def analyze_comprehensive(
     - Short form suggestions
     - Unsourced claim detection with source suggestions
     - Citation summary statistics
+
+    The page does not use this; /api/analyze is the endpoint it calls. It stays for callers that
+    do, under the same limits as /api/analyze (text size, one analysis at a time with a short
+    queue, a deadline, and a bounded number of outside lookups).
     """
-    # Extract citations
-    citations = extractor.extract_all(text)
+    _require_text_within_limit(text)
 
-    # Complete incomplete citations using smart lookup
-    completer = CitationCompleter(get_lookup_service())
-    completed_citations = []
+    async def work():
+        citations = await _extract(text)
 
-    for citation in citations:
-        if citation.status.value in ["incomplete", "needs_verification"]:
-            citation = await completer.complete_citation(citation)
+        # Complete incomplete citations, concurrently and under the lookup budget; this also
+        # fills in each citation's suggested correction.
+        completed_citations, lookup_summary = await _complete_citations(citations)
 
-        # Generate formatted suggestion
-        citation.suggested_correction = formatter.format_citation(citation)
-        completed_citations.append(citation)
+        def analyse():
+            context_analyzer = DocumentContextAnalyzer()
+            return (
+                context_analyzer.analyze_citation_sequence(completed_citations),
+                context_analyzer.get_citation_summary(completed_citations),
+            )
 
-    # Analyze citation sequence for short forms
-    context_analyzer = DocumentContextAnalyzer()
-    short_form_suggestions = context_analyzer.analyze_citation_sequence(completed_citations)
+        short_form_suggestions, citation_summary = await _cpu(analyse)
 
-    # Get citation summary
-    citation_summary = context_analyzer.get_citation_summary(completed_citations)
+        unsourced_analysis = None
+        if find_sources:
+            source_finder = SourceFinder(get_lookup_service())
+            citation_positions = [(c.position_start, c.position_end) for c in completed_citations]
+            unsourced_analysis = await source_finder.analyze_document_for_sources(
+                text, citation_positions, max_claims=MAX_CLAIMS_FOR_SOURCES
+            )
 
-    # Detect and find sources for unsourced claims
-    unsourced_analysis = None
-    if find_sources:
-        source_finder = SourceFinder(get_lookup_service())
-        citation_positions = [(c.position_start, c.position_end) for c in completed_citations]
-        unsourced_analysis = await source_finder.analyze_document_for_sources(
-            text, citation_positions
+        stats = AnalysisStats(
+            total_citations=len(completed_citations),
+            complete=sum(1 for c in completed_citations if c.status.value == "complete"),
+            incomplete=sum(1 for c in completed_citations if c.status.value == "incomplete"),
+            needs_verification=sum(
+                1 for c in completed_citations if c.status.value == "needs_verification"
+            ),
+            unsourced_claims=unsourced_analysis["total_claims"] if unsourced_analysis else 0,
         )
 
-    # Calculate stats
-    stats = AnalysisStats(
-        total_citations=len(completed_citations),
-        complete=sum(1 for c in completed_citations if c.status.value == "complete"),
-        incomplete=sum(1 for c in completed_citations if c.status.value == "incomplete"),
-        needs_verification=sum(1 for c in completed_citations if c.status.value == "needs_verification"),
-        unsourced_claims=unsourced_analysis["total_claims"] if unsourced_analysis else 0,
-    )
+        analysis = DocumentAnalysis(
+            document_id=document_id,
+            filename=filename,
+            total_footnotes=max((c.footnote_number or 0) for c in completed_citations)
+            if completed_citations
+            else 0,
+            citations=completed_citations,
+            unsourced_claims=[],  # Simplified, full data in unsourced_analysis
+        )
 
-    # Build analysis
-    analysis = DocumentAnalysis(
-        document_id=document_id,
-        filename=filename,
-        total_footnotes=max((c.footnote_number or 0) for c in completed_citations) if completed_citations else 0,
-        citations=completed_citations,
-        unsourced_claims=[],  # Simplified, full data in unsourced_analysis
-    )
+        return {
+            "analysis": analysis.model_dump(),
+            "short_form_suggestions": short_form_suggestions,
+            "stats": stats.model_dump(),
+            "citation_summary": citation_summary,
+            "unsourced_analysis": unsourced_analysis,
+            "lookup": lookup_summary.model_dump(),
+        }
 
-    return {
-        "analysis": analysis.model_dump(),
-        "short_form_suggestions": short_form_suggestions,
-        "stats": stats.model_dump(),
-        "citation_summary": citation_summary,
-        "unsourced_analysis": unsourced_analysis,
-    }
+    async with _admitted():
+        try:
+            return await _bounded(request, work())
+        except _ClientGone:
+            return Response(status_code=499)
 
 
 @app.post("/api/search")

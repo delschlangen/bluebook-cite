@@ -34,6 +34,9 @@ UPLOAD_ENVELOPE_BYTES = 64 * 1024
 # Characters are at most 4 bytes in UTF-8 but ordinary text is 1 to 2, so this is generous.
 MAX_ANALYZE_BODY_BYTES = _number("MAX_ANALYZE_BODY_MB", "6") * 1024 * 1024
 
+# Every other endpoint takes one small JSON object (a citation, a few lines of pasted text).
+MAX_SMALL_BODY_BYTES = _number("MAX_SMALL_BODY_KB", "1024") * 1024
+
 MAX_TEXT_CHARS = _number("MAX_TEXT_CHARS", "1500000")
 MAX_PDF_PAGES = _number("MAX_PDF_PAGES", "400")
 
@@ -43,6 +46,11 @@ PDF_TIME_BUDGET_S = _number("PDF_TIME_BUDGET_S", "25", float)
 
 # Pages re-read with the second PDF reader after the first one's text looked garbled.
 MAX_PDF_FALLBACK_PAGES = 25
+
+# How many citations one analysis will build. Each costs about 2 KB, and the text limit alone
+# would allow 375,000 of them (a text of bare "Id."): 800 MB before anything is capped for the
+# response. A real 500-page document has a few thousand.
+MAX_CITATIONS_ANALYZED = _number("MAX_CITATIONS_ANALYZED", "50000")
 
 # How many claims and citations one response may carry. Further ones are counted, not sent:
 # the page cannot usefully show thousands and a phone cannot render them.

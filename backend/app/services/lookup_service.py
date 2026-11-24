@@ -9,9 +9,12 @@ Enhanced with:
 - Multiple fallback sources
 """
 
+import contextvars
 import difflib
 import os
 import re
+from collections.abc import Iterator
+from contextlib import contextmanager
 from typing import Any
 from urllib.parse import urlparse
 
@@ -71,6 +74,111 @@ def match_score(query: str, candidate: str) -> float:
     return round((recall * 0.7) + (ratio * 0.3), 4)
 
 
+# The metadata of a page is in its head. A page can be up to 2 MB (see safe_fetch), and these
+# patterns scan for a tag and then for an attribute inside it; on a page made of unclosed
+# "<meta " tags every one of them read to the end of the page, so the work grew with the square
+# of its size. The head of a real page is a few kilobytes, so only the start is read, and a tag
+# is never taken to be longer than a tag can sensibly be nor to contain the start of another.
+_HEAD_CHARS = 100_000
+_TAG = r"[^<>]{1,400}"
+_TITLE = re.compile(r"<title[^>]{0,200}>([^<]{1,1000})</title>", re.IGNORECASE)
+_AUTHOR = re.compile(
+    rf"<meta{_TAG}name=[\"']author[\"']{_TAG}content=[\"']([^\"']{{1,300}})[\"']", re.IGNORECASE
+)
+_AUTHOR_CONTENT_FIRST = re.compile(
+    rf"<meta{_TAG}content=[\"']([^\"']{{1,300}})[\"']{_TAG}name=[\"']author[\"']", re.IGNORECASE
+)
+_PUBLISHED = re.compile(
+    rf"<meta{_TAG}(?:property=[\"']article:published_time[\"']|name=[\"']date[\"']){_TAG}"
+    rf"content=[\"']([^\"']{{1,100}})[\"']",
+    re.IGNORECASE,
+)
+_SITE_NAME = re.compile(
+    rf"<meta{_TAG}property=[\"']og:site_name[\"']{_TAG}content=[\"']([^\"']{{1,200}})[\"']",
+    re.IGNORECASE,
+)
+
+
+def page_metadata(html: str, url: str) -> tuple[str | None, str | None, str | None, str]:
+    """(title, author, publication date, site name) from a page's HTML."""
+    head = html[:_HEAD_CHARS]
+    title_match = _TITLE.search(head)
+    title = title_match.group(1).strip() if title_match else None
+
+    author_match = _AUTHOR.search(head) or _AUTHOR_CONTENT_FIRST.search(head)
+    author = author_match.group(1).strip() if author_match else None
+
+    date_match = _PUBLISHED.search(head)
+    pub_date = date_match.group(1)[:10] if date_match else None
+
+    site_match = _SITE_NAME.search(head)
+    site_name = site_match.group(1) if site_match else urlparse(url).netloc
+    return title, author, pub_date, site_name
+
+
+class LookupTally:
+    """What the outside requests made while looking up ONE citation did.
+
+    The lookup methods turn every failure into "not found", so from the result alone a source
+    that was down looks the same as a source that had no such record. The page was then told
+    "looked up 200 of 218" when nothing had been reachable at all. Counting at the point where
+    the request is made keeps the two apart.
+    """
+
+    __slots__ = ("ok", "failed")
+
+    def __init__(self) -> None:
+        self.ok = 0        # requests the source answered, including "no such record"
+        self.failed = 0    # requests that got no usable answer (error, timeout, blocked, rate limit)
+
+    @property
+    def unreachable(self) -> bool:
+        """Every request that was made failed: the sources could not be asked."""
+        return self.failed > 0 and self.ok == 0
+
+
+_current_tally: contextvars.ContextVar[LookupTally | None] = contextvars.ContextVar(
+    "lookup_tally", default=None
+)
+
+
+@contextmanager
+def tally_lookups() -> Iterator[LookupTally]:
+    """Count the outside requests made, by this task and the ones it starts, inside the block."""
+    tally = LookupTally()
+    token = _current_tally.set(tally)
+    try:
+        yield tally
+    finally:
+        _current_tally.reset(token)
+
+
+def note_request(ok: bool) -> None:
+    tally = _current_tally.get()
+    if tally is not None:
+        if ok:
+            tally.ok += 1
+        else:
+            tally.failed += 1
+
+
+# Statuses that mean "could not ask", as opposed to "asked, and there is no such record" (404).
+_UNUSABLE_STATUSES = {403, 407, 429}
+
+
+class _TalliedClient(httpx.AsyncClient):
+    """An HTTP client that reports each request's outcome to the current LookupTally."""
+
+    async def send(self, request: httpx.Request, **kwargs: Any) -> httpx.Response:
+        try:
+            response = await super().send(request, **kwargs)
+        except Exception:
+            note_request(False)
+            raise
+        note_request(response.status_code < 500 and response.status_code not in _UNUSABLE_STATUSES)
+        return response
+
+
 class LegalLookupService:
     """
     Integrates with free legal databases to look up and verify citations.
@@ -100,7 +208,7 @@ class LegalLookupService:
         error. Better to fail one lookup fast and report it honestly.
         """
         if self.client is None or self.client.is_closed:
-            self.client = httpx.AsyncClient(
+            self.client = _TalliedClient(
                 timeout=httpx.Timeout(
                     connect=5.0,
                     read=LOOKUP_READ_TIMEOUT,
@@ -418,37 +526,7 @@ class LegalLookupService:
             response = await safe_get(client, citation.url)
 
             if response.status_code == 200:
-                html = response.text
-
-                # Extract title
-                title_match = re.search(r'<title[^>]*>([^<]+)</title>', html, re.IGNORECASE)
-                title = title_match.group(1).strip() if title_match else None
-
-                # Extract meta author
-                author_match = re.search(
-                    r'<meta[^>]+name=["\']author["\'][^>]+content=["\']([^"\']+)["\']',
-                    html, re.IGNORECASE
-                )
-                if not author_match:
-                    author_match = re.search(
-                        r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+name=["\']author["\']',
-                        html, re.IGNORECASE
-                    )
-                author = author_match.group(1).strip() if author_match else None
-
-                # Extract publication date
-                date_match = re.search(
-                    r'<meta[^>]+(?:property=["\']article:published_time["\']|name=["\']date["\'])[^>]+content=["\']([^"\']+)["\']',
-                    html, re.IGNORECASE
-                )
-                pub_date = date_match.group(1)[:10] if date_match else None
-
-                # Get site name from og:site_name or domain
-                site_match = re.search(
-                    r'<meta[^>]+property=["\']og:site_name["\'][^>]+content=["\']([^"\']+)["\']',
-                    html, re.IGNORECASE
-                )
-                site_name = site_match.group(1) if site_match else urlparse(citation.url).netloc
+                title, author, pub_date, site_name = page_metadata(response.text, citation.url)
 
                 results["found"] = True
                 results["data"] = {

@@ -15,6 +15,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 import app.main as main
+from app.asgi import JsonErrors
 from app.main import app
 
 ORIGIN = "https://delschlangen.com"
@@ -226,8 +227,14 @@ class TestUnexpectedErrorsAreReadableByThePage:
         """A phone that disconnects mid-request cancels the task. Turning that into a
         500 response would hide the cancellation from the server."""
 
-        async def call_next(request):
+        async def application(scope, receive, send):
             raise asyncio.CancelledError()
 
+        sent = []
+
+        async def send(message):
+            sent.append(message)
+
         with pytest.raises(asyncio.CancelledError):
-            await main.json_errors(None, call_next)
+            await JsonErrors(application)({"type": "http", "path": "/x"}, None, send)
+        assert sent == []  # no response was made up for a request that was cancelled

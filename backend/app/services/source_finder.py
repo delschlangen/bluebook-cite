@@ -7,6 +7,7 @@ Enhanced with:
 - Suggested citation generation
 """
 
+import asyncio
 import re
 from bisect import bisect_left
 from typing import Any
@@ -36,9 +37,11 @@ class ClaimDetector:
         r"[Ii]t is (?:well[- ])?(?:established|settled)\s+(?:law\s+)?that",
     ]
 
+    # A number starts where the previous character is not part of a number. Without the
+    # lookbehind a failed match retried from every digit of a long run, quadratic in its length.
     STATISTICAL_PATTERNS = [
-        r"\d+(?:\.\d+)?%",
-        r"\d+(?:,\d{3})*(?:\.\d+)?\s+(?:people|individuals|cases|incidents|dollars)",
+        r"(?<![\d.])\d+(?:\.\d+)?%",
+        r"(?<![\d,.])\d+(?:,\d{3})*(?:\.\d+)?\s+(?:people|individuals|cases|incidents|dollars)",
         r"(?:approximately|about|nearly|over|under|more than|less than)\s+\d+",
         r"(?:majority|minority|plurality)\s+of",
         r"(?:[Ss]tudies|[Rr]esearch|[Dd]ata|[Ee]vidence)\s+(?:show|indicate|suggest|demonstrate)",
@@ -241,16 +244,18 @@ class SourceFinder:
     async def find_sources_for_claims(
         self,
         claims: list[UnsourcedClaim],
-        max_suggestions: int = 3
+        max_suggestions: int = 3,
+        max_claims: int | None = None,
     ) -> list[dict[str, Any]]:
         """
         Find potential sources for a list of unsourced claims.
 
-        Returns enriched claims with suggested sources.
+        Returns enriched claims with suggested sources. Claims are searched one after another,
+        so `max_claims` bounds how many are searched; the rest are left out of the result.
         """
         results = []
 
-        for claim in claims:
+        for claim in claims[:max_claims]:
             result = await self.find_sources_for_claim(claim, max_suggestions)
             results.append(result)
 
@@ -481,7 +486,8 @@ class SourceFinder:
     async def analyze_document_for_sources(
         self,
         text: str,
-        existing_citations: list[tuple[int, int]]
+        existing_citations: list[tuple[int, int]],
+        max_claims: int | None = None,
     ) -> dict[str, Any]:
         """
         Comprehensive analysis of a document's unsourced claims
@@ -490,11 +496,13 @@ class SourceFinder:
         Returns:
             Dict with claims, sources, and statistics
         """
-        # Detect unsourced claims
-        claims = self.claim_detector.detect_unsourced_claims(text, existing_citations)
+        # Detect unsourced claims. This is CPU work, so it runs off the event loop.
+        claims = await asyncio.to_thread(
+            self.claim_detector.detect_unsourced_claims, text, existing_citations
+        )
 
         # Find sources for each claim
-        enriched_claims = await self.find_sources_for_claims(claims)
+        enriched_claims = await self.find_sources_for_claims(claims, max_claims=max_claims)
 
         # Calculate statistics
         claims_with_sources = sum(

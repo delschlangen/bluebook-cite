@@ -5,6 +5,7 @@ Citation extraction engine using regex patterns.
 import re
 from bisect import bisect_left, bisect_right
 
+from .. import limits
 from ..models.citation import Citation, CitationStatus, CitationType
 from ..utils.bluebook_patterns import PATTERNS
 from ..utils.text_normalize import normalize_text
@@ -22,18 +23,33 @@ LEGAL_NAME_PREFIXES = (
 )
 
 
+class TooManyCitationsError(Exception):
+    """The text holds more citations than one analysis will build."""
+
+    def __init__(self, limit: int):
+        super().__init__(f"more than {limit:,} citations")
+        self.limit = limit
+
+
 class SpanIndex:
     """Disjoint [start, end) spans kept sorted, so an overlap test is O(log n).
 
     Every caller only appends a span after _overlaps() said no, so the spans are
     pairwise disjoint and sorting by start also sorts by end.
+
+    Every citation found claims one span, so `limit` is also a limit on how many citations are
+    built. Each costs about 2 KB, and a text at the size limit can hold 375,000 bare "Id."
+    (about 800 MB) before the 2,000 shown are chosen; real documents hold a few thousand.
     """
 
-    def __init__(self):
+    def __init__(self, limit: int | None = None):
         self.starts: list[int] = []
         self.ends: list[int] = []
+        self.limit = limit
 
     def append(self, span: tuple[int, int]) -> None:
+        if self.limit is not None and len(self.starts) >= self.limit:
+            raise TooManyCitationsError(self.limit)
         start, end = span
         i = bisect_left(self.starts, start)
         self.starts.insert(i, start)
@@ -125,8 +141,8 @@ class CitationExtractor:
         text = normalize_text(text)
         citations = []
 
-        # Track positions to avoid duplicate matches
-        matched_spans = SpanIndex()
+        # Track positions to avoid duplicate matches (and to bound how many citations are built)
+        matched_spans = SpanIndex(limit=limits.MAX_CITATIONS_ANALYZED)
 
         # The data-driven types go first so they claim their spans before the older,
         # looser patterns can read part of the same text as something else (a book,
