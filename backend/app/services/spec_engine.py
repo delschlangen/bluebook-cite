@@ -18,6 +18,7 @@ Transforms are listed in TRANSFORMS and mirrored exactly in the browser engine.
 from __future__ import annotations
 
 import re
+from bisect import bisect_left
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
@@ -84,6 +85,31 @@ class Match:
     @property
     def length(self) -> int:
         return self.end - self.start
+
+
+def choose_non_overlapping(candidates: list[Match]) -> list[Match]:
+    """Keep the best candidate for each stretch of text, in document order.
+
+    Longest first, then higher priority, then the earlier (more specific) pattern, then the
+    earlier position. A candidate is dropped if it overlaps one already chosen. Chosen spans are
+    disjoint, so they are kept sorted and a candidate only has to be compared with its one
+    possible neighbour; testing it against every chosen span was quadratic in the number of
+    citations.
+    """
+    ordered = sorted(candidates, key=lambda m: (-m.length, -m.priority, m.pattern_index, m.start))
+    chosen: list[Match] = []
+    starts: list[int] = []
+    ends: list[int] = []
+    for cand in ordered:
+        i = bisect_left(starts, cand.end)
+        if i > 0 and ends[i - 1] > cand.start:
+            continue
+        j = bisect_left(starts, cand.start)
+        starts.insert(j, cand.start)
+        ends.insert(j, cand.end)
+        chosen.append(cand)
+    chosen.sort(key=lambda m: m.start)
+    return chosen
 
 
 @dataclass
@@ -158,15 +184,7 @@ class Engine:
         for compiled in self.types.values():
             candidates.extend(self._scan(compiled, text, document=True))
 
-        # Longest first, then higher priority, then earlier pattern (more specific).
-        candidates.sort(key=lambda m: (-m.length, -m.priority, m.pattern_index, m.start))
-        chosen: list[Match] = []
-        for cand in candidates:
-            if any(not (cand.end <= c.start or cand.start >= c.end) for c in chosen):
-                continue
-            chosen.append(cand)
-        chosen.sort(key=lambda m: m.start)
-        return chosen
+        return choose_non_overlapping(candidates)
 
     def best_match(self, text: str) -> Match | None:
         """The single best reading of one pasted citation.

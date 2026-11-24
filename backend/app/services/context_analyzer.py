@@ -236,6 +236,12 @@ class DocumentContextAnalyzer:
         Per Rule 3.5, use 'infra' to refer to material that appears later
         in the document.
         """
+        # `seen` is keyed by _get_citation_key() ("case:...", "statute:...", ...), never by
+        # "first:<id>", so the lookup below can only ever return None and nothing is added.
+        # Skip the O(n^2) scan when that holds (it always does today).
+        if not any(k.startswith("first:") for k in seen):
+            return suggestions
+
         # Find citations that are referenced before their first appearance
         for i, suggestion in enumerate(suggestions):
             if suggestion["short_form_type"] == "full":

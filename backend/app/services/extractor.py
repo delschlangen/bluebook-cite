@@ -3,6 +3,7 @@ Citation extraction engine using regex patterns.
 """
 
 import re
+from bisect import bisect_left, bisect_right
 
 from ..models.citation import Citation, CitationStatus, CitationType
 from ..utils.bluebook_patterns import PATTERNS
@@ -19,6 +20,31 @@ LEGAL_NAME_PREFIXES = (
     "matter of ",
     "estate of ",
 )
+
+
+class SpanIndex:
+    """Disjoint [start, end) spans kept sorted, so an overlap test is O(log n).
+
+    Every caller only appends a span after _overlaps() said no, so the spans are
+    pairwise disjoint and sorting by start also sorts by end.
+    """
+
+    def __init__(self):
+        self.starts: list[int] = []
+        self.ends: list[int] = []
+
+    def append(self, span: tuple[int, int]) -> None:
+        start, end = span
+        i = bisect_left(self.starts, start)
+        self.starts.insert(i, start)
+        self.ends.insert(i, end)
+
+    def overlaps(self, start: int, end: int) -> bool:
+        i = bisect_left(self.starts, end)      # spans that begin before `end`
+        return i > 0 and self.ends[i - 1] > start
+
+    def __len__(self) -> int:
+        return len(self.starts)
 
 
 class CitationExtractor:
@@ -100,7 +126,7 @@ class CitationExtractor:
         citations = []
 
         # Track positions to avoid duplicate matches
-        matched_spans: list[tuple[int, int]] = []
+        matched_spans = SpanIndex()
 
         # The data-driven types go first so they claim their spans before the older,
         # looser patterns can read part of the same text as something else (a book,
@@ -126,6 +152,8 @@ class CitationExtractor:
 
     def _overlaps(self, start: int, end: int, spans: list[tuple[int, int]]) -> bool:
         """Check if span overlaps with any existing span."""
+        if isinstance(spans, SpanIndex):
+            return spans.overlaps(start, end)
         for s_start, s_end in spans:
             if not (end <= s_start or start >= s_end):
                 return True
@@ -435,16 +463,13 @@ class CitationExtractor:
                 footnote_positions.append((int(match.group(1)), match.start()))
 
         footnote_positions.sort(key=lambda x: x[1])
+        fn_positions = [pos for _, pos in footnote_positions]
+        fn_numbers = [num for num, _ in footnote_positions]
 
-        # Assign footnote numbers based on proximity
+        # Nearest footnote marker at or before each citation: a binary search per
+        # citation instead of a scan from the top of the document.
         for citation in citations:
-            # Find the nearest footnote marker before this citation
-            current_footnote = 0
-            for fn_num, fn_pos in footnote_positions:
-                if fn_pos <= citation.position_start:
-                    current_footnote = fn_num
-                else:
-                    break
-
+            i = bisect_right(fn_positions, citation.position_start) - 1
+            current_footnote = fn_numbers[i] if i >= 0 else 0
             if current_footnote > 0:
                 citation.footnote_number = current_footnote

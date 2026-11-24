@@ -27,8 +27,12 @@ from re import Pattern
 # "Idaho", "Ida." and "Id.Co" are unaffected: the lookahead needs "Id." followed by a non-word.
 _NOT_ID = r"(?!Id\.(?![A-Za-z0-9]))"
 
+# Every repetition is bounded. An unbounded one makes a failed match retry from each possible
+# starting point, which is quadratic in the length of any run that never breaks: well under
+# 100 KB of odd but plausible text (capitals with no punctuation, one very long token) took
+# tens of seconds and froze the whole server. The bounds are far beyond any real name.
 _PARTY_WORD = (
-    rf"(?:{_NOT_ID}[A-Za-z][A-Za-z0-9.'&\-]*|[0-9]+[A-Za-z][A-Za-z0-9.'&\-]*)"
+    rf"(?:{_NOT_ID}[A-Za-z][A-Za-z0-9.'&\-]{{0,60}}|[0-9]{{1,10}}[A-Za-z][A-Za-z0-9.'&\-]{{0,60}})"
 )
 
 # Entity suffixes that legitimately follow a comma inside a party name.
@@ -41,7 +45,9 @@ _ENTITY_SUFFIX = (
 # is what keeps a greedy match from swallowing the sentence before " v. ".
 # The first token may also begin with digits followed by a letter ("3M"),
 # but not with digits alone, so "395 US" cannot start a party name.
-_PARTY_FIRST = rf"(?:{_NOT_ID}[A-Z][A-Za-z0-9.'&\-]*|[0-9]+[A-Z][A-Za-z0-9.'&\-]*)"
+_PARTY_FIRST = (
+    rf"(?:{_NOT_ID}[A-Z][A-Za-z0-9.'&\-]{{0,60}}|[0-9]{{1,10}}[A-Z][A-Za-z0-9.'&\-]{{0,60}})"
+)
 
 _PARTY = (
     rf"{_PARTY_FIRST}"
@@ -61,9 +67,9 @@ PATTERNS: dict[str, Pattern] = {
     # Cases: Party v. Party, Volume Reporter Page (Court Year)
     "case_complete": re.compile(
         rf"({_PARTY})\s+v\.?\s+({_PARTY}),\s*"
-        r"(\d+)\s+([A-Z][a-zA-Z\.\s\d]*?[a-zA-Z\.\d])\s+(\d+)"
+        r"(\d+)\s+([A-Z][a-zA-Z\.\s\d]{0,40}?[a-zA-Z\.\d])\s+(\d+)"
         r"(?:,\s*(\d+(?:-\d+)?))?\s*"
-        r"\(([^)]+)\)"
+        r"\(([^)]{1,200})\)"
     ),
 
     # Case with a reporter citation but no year parenthetical, e.g.
@@ -71,7 +77,7 @@ PATTERNS: dict[str, Pattern] = {
     # present and must be recognised as such rather than reported missing.
     "case_no_year": re.compile(
         rf"({_PARTY})\s+v\.?\s+({_PARTY}),?\s+"
-        r"(\d+)\s+([A-Z][a-zA-Z\.\s\d]*?[a-zA-Z\.\d])\s+(\d+)"
+        r"(\d+)\s+([A-Z][a-zA-Z\.\s\d]{0,40}?[a-zA-Z\.\d])\s+(\d+)"
         r"(?!\s*[\d,]*\s*\()"
     ),
 
@@ -88,15 +94,15 @@ PATTERNS: dict[str, Pattern] = {
 
     # State statutes (generic pattern)
     "statute_state": re.compile(
-        r"([A-Z][a-z]+\.?\s+(?:Rev\.?\s+)?(?:Code|Stat)\.?\s*(?:Ann\.?)?\s*)"
+        r"([A-Z][a-z]{1,30}\.?\s+(?:Rev\.?\s+)?(?:Code|Stat)\.?\s*(?:Ann\.?)?\s*)"
         r"§+\s*(\d+(?:[-.]\d+)*)"
     ),
 
     # Law review articles: Author, Title, Volume Journal Page (Year)
     "law_review": re.compile(
-        r"([A-Z][a-zA-Z\.\s]+),\s+"
-        r"([^,]+),\s+"
-        r"(\d+)\s+([A-Z][a-zA-Z\.\s&]+(?:L\.|Law|J\.|Journal|Rev\.|Review)[a-zA-Z\.\s]*)\s+"
+        r"([A-Z][a-zA-Z\.\s]{1,100}),\s+"
+        r"([^,]{1,250}),\s+"
+        r"(\d+)\s+([A-Z][a-zA-Z\.\s&]{1,100}(?:L\.|Law|J\.|Journal|Rev\.|Review)[a-zA-Z\.\s]{0,40})\s+"
         r"(\d+)(?:,\s*(\d+(?:-\d+)?))?\s*"
         r"\((\d{4})\)"
     ),
@@ -106,8 +112,8 @@ PATTERNS: dict[str, Pattern] = {
         # "&" and apostrophes/hyphens are allowed in the author. Without "&", the first
         # author of "Roy M. Mersky & Donald J. Dunn, Title (8th ed. 2002)" was silently
         # dropped and the citation attributed to the second author alone.
-        r"([A-Z][a-zA-Z\.\s&'\-]+),\s+"
-        r"([A-Z][^(]+)\s*"
+        r"([A-Z][a-zA-Z\.\s&'\-]{1,100}),\s+"
+        r"([A-Z][^(]{1,250})\s*"
         # Bluebook ordinals are "2d" and "3d", not "2nd" and "3rd"
         # (Rule 6.2(b)), so both spellings must be accepted.
         r"\((?:(\d+(?:st|nd|rd|th|d))\s+ed\.\s+)?(\d{4})\)"
@@ -120,7 +126,7 @@ PATTERNS: dict[str, Pattern] = {
 
     # Short forms - Supra
     "supra_citation": re.compile(
-        r"([A-Za-z]+),?\s+supra\s+note\s+(\d+)(?:,\s+at\s+(\d+(?:-\d+)?))?"
+        r"([A-Za-z]{1,60}),?\s+supra\s+note\s+(\d+)(?:,\s+at\s+(\d+(?:-\d+)?))?"
     ),
 
     # Hereinafter designation
@@ -130,7 +136,7 @@ PATTERNS: dict[str, Pattern] = {
 
     # URL citations
     "url": re.compile(
-        r"https?://[^\s<>\"\'\)]+(?:\([^\s<>\"\'\)]*\))?[^\s<>\"\'\)\.,;:]*"
+        r"https?://[^\s<>\"\'\)]{1,2000}(?:\([^\s<>\"\'\)]{0,2000}\))?[^\s<>\"\'\)\.,;:]{0,2000}"
     ),
 
     # Pincites

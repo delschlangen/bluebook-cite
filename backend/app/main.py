@@ -5,14 +5,26 @@ FastAPI application for Bluebook Citation Generator.
 import asyncio
 import logging
 import os
+import time
 import uuid
 from contextlib import asynccontextmanager
 
 from fastapi import Body, FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from starlette.middleware.gzip import GZipMiddleware
 
-from .limits import MAX_UPLOAD_BYTES
+from . import limits
+from .limits import (
+    MAX_ANALYZE_BODY_BYTES,
+    MAX_CITATIONS_RETURNED,
+    MAX_CLAIMS_RETURNED,
+    MAX_TEXT_CHARS,
+    MAX_UPLOAD_BYTES,
+    MAX_UPLOAD_MB,
+    UPLOAD_ENVELOPE_BYTES,
+    too_long_message,
+)
 from .models.citation import (
     AnalysisResponse,
     AnalysisStats,
@@ -40,6 +52,14 @@ MAX_CONCURRENT_LOOKUPS = 6
 # Extraction and formatting still return if this is hit; only the enrichment
 # is dropped, so a slow upstream degrades the result instead of failing it.
 COMPLETION_BUDGET_SECONDS = float(os.getenv("COMPLETION_BUDGET_SECONDS", "25"))
+
+# How long one analysis may take in total, answered as a readable 504 when exceeded. The page
+# waits 120 s, so this leaves room for the upload and download on a slow connection.
+ANALYSIS_DEADLINE_SECONDS = float(os.getenv("ANALYSIS_DEADLINE_SECONDS", "90"))
+
+# Analyses allowed to wait behind the one that is running. Beyond that the server says it is
+# busy (503) instead of stacking up work that would all time out together.
+MAX_QUEUED_ANALYSES = int(os.getenv("MAX_QUEUED_ANALYSES", "2"))
 
 # Cap on how many citations one document may send to outside lookups. Time alone
 # is not a safe bound: with fast upstreams a very long document could still queue
@@ -98,6 +118,49 @@ def get_lookup_service() -> LegalLookupService:
     return _lookup_service
 
 
+# --- running CPU-bound work without freezing the server --------------------------------------
+#
+# The analysis is CPU work (about 2 s per million characters). Run on the event loop it blocks
+# every other request, /health included, for the whole time: measured at 7 s twice for a
+# 1,000-page document. It runs in a worker thread instead, one job at a time so that two large
+# documents do not fight over the interpreter lock.
+#
+# A thread cannot be killed. If a job outlives the request's deadline the page is answered, but
+# the lock is held until the thread really finishes, so a second job is not started on top of it.
+
+_cpu_gate_state: dict = {}
+_active_analyses = 0
+
+
+def _cpu_gate() -> asyncio.Semaphore:
+    """One semaphore per running event loop (asyncio primitives are tied to the loop that
+    first waits on them, and the tests create a new loop for each client)."""
+    loop = asyncio.get_running_loop()
+    if _cpu_gate_state.get("loop") is not loop:
+        _cpu_gate_state["loop"] = loop
+        _cpu_gate_state["gate"] = asyncio.Semaphore(1)
+    return _cpu_gate_state["gate"]
+
+
+async def _cpu(fn, *args):
+    """Run CPU-bound `fn` in a thread, one at a time, holding the slot until it truly ends."""
+    gate = _cpu_gate()
+    await gate.acquire()
+    try:
+        future = asyncio.ensure_future(asyncio.to_thread(fn, *args))
+    except BaseException:
+        gate.release()
+        raise
+
+    def finished(done: asyncio.Future) -> None:
+        gate.release()
+        if not done.cancelled():
+            done.exception()  # mark retrieved: nobody may be waiting if the request timed out
+
+    future.add_done_callback(finished)
+    return await asyncio.shield(future)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Warm the lookup service on startup and close it cleanly on shutdown.
@@ -144,6 +207,47 @@ async def json_errors(request: Request, call_next):
         )
 
 
+# Identifies this process. A page that saw one boot_id and then, after a failed request, a
+# different one knows the server restarted in between (a crash or an out-of-memory kill) and can
+# say so, instead of guessing at "could not reach the server".
+BOOT_ID = uuid.uuid4().hex[:12]
+STARTED_AT = time.time()
+
+
+def _body_limit(path: str) -> int | None:
+    """The largest request body each endpoint will read, or None for no special limit."""
+    if path == "/api/upload":
+        return MAX_UPLOAD_BYTES + UPLOAD_ENVELOPE_BYTES
+    if path == "/api/analyze":
+        return MAX_ANALYZE_BODY_BYTES
+    return None
+
+
+# Rejects an oversized request from its declared Content-Length, before the body is read.
+# Without this a 100 MB upload is received and spooled to disk in full before the handler can
+# say 413, and a 100 MB JSON body is held in memory (about 3.5 times its size) while the event
+# loop is busy parsing it. Registered before CORS so the 413 is readable by the page.
+@app.middleware("http")
+async def reject_oversized_bodies(request: Request, call_next):
+    limit = _body_limit(request.url.path)
+    declared = request.headers.get("content-length", "")
+    if limit is not None and declared.isdigit() and int(declared) > limit:
+        mb = int(declared) / (1024 * 1024)
+        if request.url.path == "/api/upload":
+            detail = f"This file is {mb:.1f} MB. The limit is {MAX_UPLOAD_MB} MB."
+        else:
+            detail = (
+                f"This document's text is {mb:.1f} MB, which is too large to analyze. "
+                f"The text limit is {MAX_TEXT_CHARS:,} characters."
+            )
+        return JSONResponse({"detail": detail}, status_code=413)
+    return await call_next(request)
+
+
+# The analysis of a long document is a large block of repetitive JSON, and the document text
+# comes back with the upload; both compress about ten to one, which matters on a phone.
+app.add_middleware(GZipMiddleware, minimum_size=1024)
+
 # CORS configuration
 app.add_middleware(
     CORSMiddleware,
@@ -174,6 +278,9 @@ async def health_check():
     """
     return {
         "status": "healthy",
+        "boot_id": BOOT_ID,
+        "uptime_s": round(time.time() - STARTED_AT),
+        "limits": limits.as_dict(),
         "version": "1.0.0",
         "commit": (
             os.getenv("VERCEL_GIT_COMMIT_SHA")
@@ -234,10 +341,15 @@ async def upload_document(file: UploadFile = File(...)):
             detail="No text could be extracted. If this is a scanned PDF it needs OCR first.",
         )
 
+    # The byte limit does not bound the work (a small file can expand to a lot of text), so the
+    # text itself is limited, whatever the format. PDFs were already stopped by the reader.
+    if len(document_text) > MAX_TEXT_CHARS:
+        raise HTTPException(status_code=413, detail=too_long_message(len(document_text), MAX_TEXT_CHARS))
+
     doc_id = str(uuid.uuid4())
 
     analyzer = DocumentContextAnalyzer()
-    structure = analyzer.analyze_document_structure(document_text)
+    structure = await asyncio.to_thread(analyzer.analyze_document_structure, document_text)
 
     preview_length = 500
     preview = document_text[:preview_length]
@@ -306,11 +418,15 @@ async def _complete_citations(citations):
                 task.cancel()
             await asyncio.gather(*pending, return_exceptions=True)
 
-    completed = []
-    for citation in citations:
-        citation = finished.get(id(citation), citation)
-        citation.suggested_correction = formatter.format_citation(citation)
-        completed.append(citation)
+    def finalize() -> list:
+        done = []
+        for citation in citations:
+            citation = finished.get(id(citation), citation)
+            citation.suggested_correction = formatter.format_citation(citation)
+            done.append(citation)
+        return done
+
+    completed = await _cpu(finalize)
 
     summary = LookupSummary(
         eligible=len(eligible),
@@ -321,43 +437,50 @@ async def _complete_citations(citations):
     return completed, summary
 
 
-@app.post("/api/analyze", response_model=AnalysisResponse)
-async def analyze_citations(
-    document_id: str = Body(...),
-    text: str = Body(...),
-    filename: str = Body(default="document"),
-):
-    """Extract and analyze all citations in the document."""
-    # Extract citations
-    citations = extractor.extract_all(text)
+async def _analyze(document_id: str, text: str, filename: str) -> AnalysisResponse:
+    """The whole analysis. Its CPU stages run in a worker thread; the lookups stay on the loop."""
+    citations = await _cpu(extractor.extract_all, text)
 
     completed_citations, lookup_summary = await _complete_citations(citations)
 
-    # Analyze citation sequence for short forms
-    context_analyzer = DocumentContextAnalyzer()
-    short_form_suggestions = context_analyzer.analyze_citation_sequence(completed_citations)
+    def analyse_the_whole_document():
+        short_forms = DocumentContextAnalyzer().analyze_citation_sequence(completed_citations)
+        positions = [(c.position_start, c.position_end) for c in completed_citations]
+        return short_forms, ClaimDetector().detect_unsourced_claims(text, positions)
 
-    # Detect unsourced claims
-    claim_detector = ClaimDetector()
-    citation_positions = [(c.position_start, c.position_end) for c in completed_citations]
-    unsourced = claim_detector.detect_unsourced_claims(text, citation_positions)
+    short_form_suggestions, unsourced = await _cpu(analyse_the_whole_document)
 
-    # Calculate stats
+    # Everything above is computed over the whole document, so the totals are true. What is
+    # SENT is capped: a phone cannot usefully render thousands of cards (4,000 citations took
+    # 3.9 s to first paint and 8,000 claims blocked a tap for 10 s), and the payload grows with
+    # them. The page is told both numbers so it can say "showing 2,000 of 2,450".
+    shown_citations = completed_citations[:MAX_CITATIONS_RETURNED]
+    shown_ids = {c.id for c in shown_citations}
+    short_form_suggestions = [
+        s for s in short_form_suggestions if s.get("citation_id") in shown_ids
+    ]
+    # Keep the most likely claims, then put them back in document order.
+    shown_claims = sorted(
+        sorted(unsourced, key=lambda c: -c.confidence)[:MAX_CLAIMS_RETURNED],
+        key=lambda c: c.position_start,
+    )
+
     stats = AnalysisStats(
         total_citations=len(completed_citations),
         complete=sum(1 for c in completed_citations if c.status.value == "complete"),
         incomplete=sum(1 for c in completed_citations if c.status.value == "incomplete"),
         needs_verification=sum(1 for c in completed_citations if c.status.value == "needs_verification"),
         unsourced_claims=len(unsourced),
+        citations_shown=len(shown_citations),
+        claims_shown=len(shown_claims),
     )
 
-    # Build analysis
     analysis = DocumentAnalysis(
         document_id=document_id,
         filename=filename,
         total_footnotes=max((c.footnote_number or 0) for c in completed_citations) if completed_citations else 0,
-        citations=completed_citations,
-        unsourced_claims=unsourced,
+        citations=shown_citations,
+        unsourced_claims=shown_claims,
     )
 
     return AnalysisResponse(
@@ -366,6 +489,47 @@ async def analyze_citations(
         stats=stats,
         lookup=lookup_summary,
     )
+
+
+@app.post("/api/analyze", response_model=AnalysisResponse)
+async def analyze_citations(
+    document_id: str = Body(...),
+    text: str = Body(...),
+    filename: str = Body(default="document"),
+):
+    """Extract and analyze all citations in the document."""
+    global _active_analyses
+
+    # The same limit the upload enforces. This endpoint is public and takes the text directly,
+    # so it cannot rely on the upload having checked.
+    if len(text) > MAX_TEXT_CHARS:
+        raise HTTPException(status_code=413, detail=too_long_message(len(text), MAX_TEXT_CHARS))
+
+    # One analysis runs at a time and a few may wait. Past that the work would all time out
+    # together, so say the server is busy while a retry can still succeed.
+    if _active_analyses >= 1 + MAX_QUEUED_ANALYSES:
+        raise HTTPException(
+            status_code=503,
+            detail="The server is busy analyzing other documents. Please try again in a minute.",
+            headers={"Retry-After": "30"},
+        )
+
+    _active_analyses += 1
+    try:
+        return await asyncio.wait_for(
+            _analyze(document_id, text, filename), timeout=ANALYSIS_DEADLINE_SECONDS
+        )
+    except TimeoutError:
+        raise HTTPException(
+            status_code=504,
+            detail=(
+                "Analyzing this document took longer than the "
+                f"{ANALYSIS_DEADLINE_SECONDS:g}-second limit. Try a shorter document, or split "
+                "it at a chapter or section boundary and check the parts one at a time."
+            ),
+        ) from None
+    finally:
+        _active_analyses -= 1
 
 
 @app.post("/api/format")

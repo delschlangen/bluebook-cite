@@ -138,6 +138,10 @@ class AnalysisStats(BaseModel):
     incomplete: int
     needs_verification: int
     unsourced_claims: int
+    # The counts above are true totals for the whole document. These say how many of each the
+    # response actually carries, which is fewer when a document has more than the page can show.
+    citations_shown: int | None = None
+    claims_shown: int | None = None
 
 class LookupSummary(BaseModel):
     """How much of the outside lookup phase actually ran.

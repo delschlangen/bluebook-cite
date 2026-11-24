@@ -124,6 +124,45 @@ A few more (hearings, state statutes, treaties, record citations) are **guidance
 the tool shows the finished shape and the rules, but will not rewrite a pasted citation
 of those kinds, because their formats could only be sourced from search summaries.
 
+## Document limits
+
+"Check a document" takes Word (`.docx`), PDF and plain text. A document over a limit is refused
+with a message that says which limit and what to do, never with a bare connection error.
+
+| What | Limit | Notes |
+|---|---|---|
+| File size | 10 MB | Checked from the declared size, before the file is read |
+| Text | 1,500,000 characters | About 250,000 words, 350 dense or 500 ordinary pages. Applies to every format |
+| PDF pages | 400 | Read from the file before any page is processed |
+| Citations returned | 2,000 | The true total is still reported |
+| Unsourced claims returned | 500 | The most likely ones; the true total is still reported |
+| Time for one analysis | 90 seconds | Then a readable 504; one analysis runs at a time and two may wait |
+
+Each can be changed per environment without a code change (`MAX_UPLOAD_MB`, `MAX_TEXT_CHARS`,
+`MAX_PDF_PAGES`, `MAX_CITATIONS_RETURNED`, `MAX_CLAIMS_RETURNED`, `ANALYSIS_DEADLINE_SECONDS`,
+`MAX_QUEUED_ANALYSES`; see [`backend/app/limits.py`](backend/app/limits.py)), and `/health`
+publishes the values in force so a client can show the number that is actually enforced.
+
+**Reading PDFs.** PDFs are read with pypdfium2 one page at a time, so memory stays flat (about
+25 MB) however long the file is, and 273 dense pages take about 4 seconds. This replaced
+pdfplumber, which kept every page in memory (about 9 MB per page, 2.5 GB for 273 pages) and
+crashed the server on a long document. The reader also rejoins superscript footnote markers,
+drops pleading-paper line numbers, repairs ligatures and hyphenation, removes running headers,
+footers and page numbers that repeat on most pages, and marks footnotes the same way the Word
+reader does. On 17 realistic PDFs this raised citation recall from 97.3% to 99.96% and footnote
+numbers from 92.6% to 98.7%.
+
+What it cannot do: a scanned PDF has no text to read (run OCR first), and a PDF whose fonts carry
+no text map comes out as codes, which is reported rather than passed on as text. The test
+fixtures are real PDFs written by Chromium, reportlab and LibreOffice; PDFs from other producers
+(LaTeX, InDesign, Word's own export) are not covered.
+
+**Staying responsive.** The analysis is CPU work, so it runs in a worker thread, one document at
+a time, and every error the server can produce, including an unexpected one, is a JSON response
+that carries CORS headers (a browser hides a response without them and can only say "could not
+reach the server"). `/health` includes a `boot_id` that changes when the process restarts, so a
+client can tell a crash from a dropped connection.
+
 ## Two styles
 
 A footnote in a law review and a citation in a court document use different typefaces.

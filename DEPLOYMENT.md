@@ -13,6 +13,14 @@ is behind the frontend and needs to redeploy. The UI says so in those words.
 
 ## Backend on Vercel
 
+> **Known problem, not fixed.** The Vercel project builds and reports READY, but when last
+> checked every path (including `/` and `/openapi.json`) answered `{"detail":"Not Found"}`,
+> while the same app answers normally under uvicorn and through the same `api/index.py`
+> entry file locally. The likely cause is the catch-all rewrite handing the app the rewritten
+> path instead of the original one, but that was not confirmed. The project also had Vercel
+> Authentication switched on, which blocks a browser on another origin from calling it at all.
+> The live site uses the Railway backend. Treat Vercel as unsupported until this is resolved.
+
 The project root directory must be set to `backend` in the Vercel project
 settings. Everything else is in the repository:
 
@@ -37,6 +45,12 @@ Optional environment variables, all with working defaults:
 | `COMPLETION_BUDGET_SECONDS` | `25` | total lookup budget for one document |
 | `REPAIR_BUDGET_SECONDS` | `20` | total budget for one `/api/repair` call |
 | `MAX_UPLOAD_MB` | `10` | upload size cap |
+| `MAX_TEXT_CHARS` | `1500000` | longest document text, any format |
+| `MAX_PDF_PAGES` | `400` | longest PDF, read from the file before any page is processed |
+| `ANALYSIS_DEADLINE_SECONDS` | `90` | total time for one analysis, then a readable 504 |
+| `MAX_QUEUED_ANALYSES` | `2` | analyses allowed to wait behind the running one, then a 503 |
+| `MAX_CITATIONS_RETURNED` | `2000` | citations in one response (the true total is still reported) |
+| `MAX_CLAIMS_RETURNED` | `500` | unsourced claims in one response |
 | `MAX_REPAIR_CHARS` | `2000` | paste size cap |
 
 ## Backend on a container host (Railway)

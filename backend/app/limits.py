@@ -62,12 +62,15 @@ def approx_pages(chars: int) -> int:
     return max(1, chars // CHARS_PER_PAGE)
 
 
-def too_long_message(chars: int) -> str:
-    """The sentence shown when a document's text is over the limit."""
+def too_long_message(chars: int, limit: int) -> str:
+    """The sentence shown when a document's text is over the limit.
+
+    The limit is passed in, not read from here, so the number in the message is always the one
+    the caller actually enforced."""
     return (
         f"This document has about {approx_words(chars):,} words ({chars:,} characters). "
-        f"The limit is {MAX_TEXT_CHARS:,} characters, roughly {approx_words(MAX_TEXT_CHARS):,} "
-        f"words or {approx_pages(MAX_TEXT_CHARS):,} pages. Split it at a chapter or section "
+        f"The limit is {limit:,} characters, roughly {approx_words(limit):,} "
+        f"words or {approx_pages(limit):,} pages. Split it at a chapter or section "
         "boundary and check the parts one at a time."
     )
 
