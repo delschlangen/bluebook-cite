@@ -23,6 +23,7 @@ from __future__ import annotations
 import io
 import math
 import re
+import signal
 import statistics
 import threading
 import time
@@ -31,7 +32,15 @@ from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from typing import NamedTuple
 
-from ..limits import MAX_PDF_FALLBACK_PAGES, MAX_PDF_PAGES, MAX_TEXT_CHARS, PDF_TIME_BUDGET_S
+from ..limits import (
+    MAX_PDF_FALLBACK_PAGES,
+    MAX_PDF_PAGES,
+    MAX_TEXT_CHARS,
+    PDF_MAX_PAGE_CHARS,
+    PDF_SECOND_OPINION_BUDGET_S,
+    PDF_SECOND_OPINION_MAX_CHARS,
+    PDF_TIME_BUDGET_S,
+)
 
 # =========================== text repair ===========================
 #
@@ -437,10 +446,14 @@ def _plain(tp) -> str:
     return tp.get_text_bounded().replace("\r\n", "\n").replace("\r", "\n")
 
 
-def _build_lines(tp, whole: str, page_w: float, page_h: float):
+def _build_lines(tp, whole: str, page_w: float, page_h: float, deadline: float | None = None):
     lines: list[dict] = []
     cur = None
     for i, ch in enumerate(whole):
+        # the time limit is checked inside the page, not only between pages: one page can hold
+        # a million characters, and this loop costs about 30 microseconds for each
+        if deadline is not None and not i & 0x7FF and time.monotonic() > deadline:
+            raise PdfReadError(_TOO_SLOW)
         if ch == "\r" or ch == "\n":
             continue
         left, b, r, t = tp.get_charbox(i, loose=True)
@@ -598,16 +611,23 @@ def _mark_footnotes(lines, page_h, state):
         state["next"] = chosen[-1][1] + 1
 
 
-def _page_text(page, tp, state):
+def _page_text(page, tp, state, deadline: float | None = None, layout: bool = True):
+    """The text of one page. With `layout` False (a page with more characters than
+    PDF_MAX_PAGE_CHARS) the characters are returned as pdfium has them, without the per-character
+    layout analysis that costs about 800 bytes of memory for each of them."""
+    if not layout:
+        return _plain(tp)
     whole_raw = tp.get_text_range()
     plain = _plain(tp)
     if len(whole_raw) != tp.count_chars() or not whole_raw.strip():
         return plain
     page_w, page_h = page.get_size()
     try:
-        lines = _build_lines(tp, whole_raw, page_w, page_h)
+        lines = _build_lines(tp, whole_raw, page_w, page_h, deadline)
         before = sum(len(_squash(L["text"])) for L in lines)
         lines = _drop_pleading_numbers(lines, page_w)
+    except PdfReadError:
+        raise
     except Exception:
         return plain
     n_plain = len(_squash(plain))
@@ -619,18 +639,30 @@ def _page_text(page, tp, state):
 
 # ===========================================================================================
 # Reader: page cap, pdfium (+ layout) as primary, pdfminer.six as fallback, repair, strip.
+#
+# This runs inside the child process of services/sandbox.py, which is the safety net: the limits
+# below are the first line, so that an ordinary hostile file is refused with a precise message
+# before the child's memory, CPU or wall-clock limit has to stop it.
 # ===========================================================================================
 
 MAX_FALLBACK_PAGES = MAX_PDF_FALLBACK_PAGES
 
+_TOO_SLOW = "Reading this PDF took too long. Try a shorter file."
+
+# A page is refused before layout if its character count is over what is left of the text budget
+# by more than this (repair adds a few characters, expanding ligatures, so a page is allowed a little over).
+_BUDGET_SLACK_CHARS = 1024
+
 # pdfium is not thread-safe by contract.  Taking one lock around every use is both safe and, measured,
-# 4.5x faster than letting 8 threads contend (14.6 s vs 67 s for 200 parses).
+# 4.5x faster than letting 8 threads contend (14.6 s vs 67 s for 200 parses).  The lock is held only
+# while pdfium is in use: never while the second reader (pdfminer) runs.
 _PDFIUM_LOCK = threading.Lock()
 
 # How long one upload will wait for another to finish being read. A read is capped at
 # PDF_TIME_BUDGET_S, so a wait this long means either a queue of large files or a bug that left
 # the lock held. Either way the person gets "busy, try again" instead of a request that never
-# answers.
+# answers. (The server reads each upload in its own child process, so this wait only happens when
+# the reader is used directly.)
 _LOCK_WAIT_S = 60.0
 
 
@@ -665,6 +697,43 @@ class PdfResult(NamedTuple):
     engine: str            # "pdfium" or "pdfium+pdfminer" or "pdfminer"
 
 
+class _TimeUp(BaseException):
+    """Raised by an interval timer inside pdfminer's pure-Python code. A BaseException so that no
+    `except Exception` in a library can swallow it."""
+
+
+@contextmanager
+def _time_limit(seconds: float):
+    """Interrupt pure-Python work (pdfminer) after `seconds` of processor time by raising _TimeUp.
+
+    The deadline checks between pages cannot stop one page that takes minutes; this can, because a
+    signal handler runs between the interpreter's own steps. Its limits: it needs the main thread
+    and POSIX (elsewhere it does nothing, and only the caller's wall-clock limit applies), and a
+    single long call into C (a regular expression, zlib) is interrupted only when it returns.
+    It uses ITIMER_PROF, leaving the real-time alarm that the child arms for itself alone."""
+    usable = (
+        hasattr(signal, "setitimer")
+        and hasattr(signal, "SIGPROF")
+        and threading.current_thread() is threading.main_thread()
+    )
+    if not usable:
+        yield
+        return
+    if seconds <= 0:
+        raise _TimeUp()
+
+    def on_alarm(signum, frame):
+        raise _TimeUp()
+
+    previous = signal.signal(signal.SIGPROF, on_alarm)
+    signal.setitimer(signal.ITIMER_PROF, seconds)
+    try:
+        yield
+    finally:
+        signal.setitimer(signal.ITIMER_PROF, 0)
+        signal.signal(signal.SIGPROF, previous if previous is not None else signal.SIG_DFL)
+
+
 def _open(content: bytes):
     import pypdfium2 as pdfium
     try:
@@ -678,7 +747,8 @@ def _open(content: bytes):
 
 def page_count(content: bytes) -> int:
     """Number of pages, in 0.3-3 ms for any size (no page is parsed).  A regex over '/Type /Page' is NOT a
-    substitute: it reports 0 pages for PDFs that keep their page objects in compressed object streams."""
+    substitute: it reports 0 pages for PDFs that keep their page objects in compressed object streams.
+    This is the number the file DECLARES (pdfium trusts /Count); see _loadable_pages and _pages_in_file."""
     with _pdfium_session():
         pdf = _open(content)
         try:
@@ -687,35 +757,147 @@ def page_count(content: bytes) -> int:
             pdf.close()
 
 
-def iter_pdf_pages(content: bytes, stats: dict | None = None, deadline: float | None = None) -> Iterator[str]:
+def _loadable_pages(content: bytes, declared: int) -> int:
+    """How many of the `declared` pages really load.
+
+    A /Count that is too large (3 pages and /Count 450) must not refuse a small file with "this PDF
+    has 450 pages", nor tell the person to run OCR on pages that do not exist. Page `declared - 1`
+    is tried first and, if it loads, nothing is wrong; otherwise the first page that fails is found
+    by bisection (a page tree holds pages up to some number and none after), a dozen loads even for
+    a /Count of two billion."""
+    with _pdfium_session():
+        pdf = _open(content)
+        try:
+            def loads(i: int) -> bool:
+                try:
+                    pdf[i].close()
+                    return True
+                except Exception:
+                    return False
+
+            if loads(declared - 1):
+                return declared
+            lo, hi = 0, declared - 1              # every page before lo loads; page hi does not
+            while lo < hi:
+                mid = (lo + hi) // 2
+                if loads(mid):
+                    lo = mid + 1
+                else:
+                    hi = mid
+            return lo
+        finally:
+            pdf.close()
+
+
+_PAGE_OBJECT = re.compile(rb"/Type\s*/Page(?![A-Za-z])")
+
+
+def _count_page_objects(content: bytes, stop_above: int) -> int:
+    """'/Type /Page' objects written out in the file (a quick suspicion only: objects inside
+    compressed object streams are invisible to it, and an old revision of a page left by an
+    incremental save counts again). Counting stops once it passes `stop_above`."""
+    n = 0
+    for _ in _PAGE_OBJECT.finditer(content):
+        n += 1
+        if n > stop_above:
+            break
+    return n
+
+
+def _pdfminer_page_total(content: bytes, limit: int) -> int:
+    """Pages in the page tree as pdfminer walks it (which ignores /Count), counted up to `limit`."""
+    from pdfminer.pdfdocument import PDFDocument
+    from pdfminer.pdfpage import PDFPage
+    from pdfminer.pdfparser import PDFParser
+
+    document = PDFDocument(PDFParser(io.BytesIO(content)))
+    n = 0
+    for _ in PDFPage.create_pages(document):
+        n += 1
+        if n >= limit:
+            break
+    return n
+
+
+def _pages_in_file(content: bytes, declared: int, max_pages: int) -> int:
+    """The page count the file really has, when the declared one is too SMALL.
+
+    pdfium trusts /Count, so a PDF that says 5 and holds 401 would be read as 5 pages and the other
+    396 dropped without a word. Only if the file visibly holds more page objects than it declares is
+    a second reader asked (it walks the page tree and ignores /Count); a file that does not is
+    taken at its word. Counts up to max_pages + 1, which is enough to refuse an over-long file."""
+    if _count_page_objects(content, declared) <= declared:
+        return declared
+    try:
+        with _time_limit(PDF_SECOND_OPINION_BUDGET_S):
+            return max(declared, _pdfminer_page_total(content, max_pages + 1))
+    except (_TimeUp, Exception):
+        return declared
+
+
+def iter_pdf_pages(
+    content: bytes,
+    stats: dict | None = None,
+    deadline: float | None = None,
+    *,
+    budget: float | None = None,
+    max_chars: int | None = None,
+    limit: int | None = None,
+) -> Iterator[str]:
     """Generator over the RAW text of each page (pdfium + layout).  Memory is one page at a time.
 
-    A page that fails to load yields "" and is counted in stats["failed_pages"]; the document goes on.
+    `budget` (seconds) starts the clock once the reader's lock is held, so that waiting for
+    another upload is not charged to this one; `deadline` is an absolute time for callers that
+    have one. `max_chars` is the text allowance: a page whose character count passes what is
+    left of it is refused before any layout is built. `limit` stops after that many pages.
+
+    A page that fails to load yields "" and is counted in stats["failed_pages"] (and its index in
+    stats["load_failed"]); the document goes on. stats["deadline"] reports the deadline in force.
     """
     stats = stats if stats is not None else {}
     stats.setdefault("failed_pages", 0)
+    stats.setdefault("load_failed", [])
+    stats.setdefault("unlaid_pages", 0)
     with _pdfium_session():
+        if budget is not None:
+            deadline = time.monotonic() + budget
+        stats["deadline"] = deadline
         pdf = _open(content)
         state: dict = {}
+        used = 0
         try:
-            for i in range(len(pdf)):
+            count = len(pdf) if limit is None else min(len(pdf), limit)
+            for i in range(count):
                 if deadline is not None and time.monotonic() > deadline:
-                    raise PdfReadError("Reading this PDF took too long. Try a shorter file.")
+                    raise PdfReadError(_TOO_SLOW)
                 try:
                     page = pdf[i]
+                except Exception:
+                    stats["load_failed"].append(i)
+                    stats["failed_pages"] += 1
+                    yield ""
+                    continue
+                try:
                     tp = page.get_textpage()
                     try:
-                        yield _page_text(page, tp, state)
+                        n = tp.count_chars()
+                        if max_chars is not None and n > max_chars - used + _BUDGET_SLACK_CHARS:
+                            raise PdfTooLongError(_too_much_text(max_chars))
+                        layout = n <= PDF_MAX_PAGE_CHARS
+                        if not layout:
+                            stats["unlaid_pages"] += 1
+                        text = _page_text(page, tp, state, deadline, layout)
                     finally:
                         tp.close()
-                        page.close()
                 except PdfReadError:
-                    raise
-                except GeneratorExit:
                     raise
                 except Exception:
                     stats["failed_pages"] += 1
-                    yield ""
+                    text = ""
+                finally:
+                    page.close()
+                used += len(text)
+                yield text
         finally:
             pdf.close()
 
@@ -723,24 +905,32 @@ def iter_pdf_pages(content: bytes, stats: dict | None = None, deadline: float | 
 # ---- garbled-text detection and the pdfminer fallback ------------------------------------------------
 _STOP = frozenset("the of and to in a is that for it as was with be by on not this are or from at which but have an had they their were has been if more when will would who so no".split())
 _WORD = re.compile(r"[A-Za-z']+")
+_CID = re.compile(r"\(cid:\d+\)")
 
 
 def _quality(text: str) -> tuple[float, float, bool]:
+    """(share of ordinary words, share of control characters, whether "(cid:N)" codes make up a real
+    part of the text). A page that merely mentions "(cid:12)" in a sentence is not leaking codes;
+    a page that does has them for 2% or more of its characters."""
     words = _WORD.findall(text)
     stop = sum(1 for w in words if w.lower() in _STOP) / max(1, len(words))
     ctrl = sum(1 for c in text if ord(c) < 32 and c not in "\n\r\t") / max(1, len(text))
-    return stop, ctrl, "(cid:" in text
+    codes = _CID.findall(text)
+    leaking = len(codes) >= 2 and sum(map(len, codes)) >= 0.02 * len(text)
+    return stop, ctrl, leaking
 
 
 def _garble_evidence(text: str) -> str | None:
     """How sure we are that a page's text is corrupt: "strong", "weak" or None.
 
-    Strong evidence is control characters or "(cid:N)" in the text: a font with no text map
-    makes a reader emit codes instead of letters, and real text never contains either. Weak
-    evidence is a very low share of ordinary words ("the", "of", "and"). Normal prose has
-    25-40%, but a table of authorities, a works-cited list or a page of footnotes that is all
-    citations can sit below 5% and be perfectly good text. So a weak signal only earns a second
-    opinion (which is used only if it is clearly better) and is never grounds to reject a file.
+    Strong evidence is control characters or a real share of "(cid:N)" codes in the text: a font
+    with no text map makes a reader emit codes instead of letters, and real text has neither in
+    quantity (a single literal "(cid:12)" in a sentence is not evidence: it used to send pages that
+    quote one to the slow second reader). Weak evidence is a very low share of ordinary words
+    ("the", "of", "and"). Normal prose has 25-40%, but a table of authorities, a works-cited list or
+    a page of footnotes that is all citations can sit below 5% and be perfectly good text. So a weak
+    signal is reported but is never grounds to reject a file, and it no longer earns the slow
+    second reader either: that reader is for pages with strong evidence only.
     """
     if len(text.strip()) < 150:
         return None
@@ -763,15 +953,27 @@ def _pdfminer_pages(content: bytes, page_numbers=None) -> Iterator[str]:
         yield "".join(el.get_text() for el in layout if isinstance(el, LTTextContainer))
 
 
-def _second_opinion(content: bytes, index: int, first: str) -> str:
+def _second_opinion(content: bytes, index: int, first: str, deadline: float | None = None) -> str:
+    """The page as the second reader (pdfminer) has it if that is clearly better, else `first`.
+
+    Bounded: it does not run for a page of more than PDF_SECOND_OPINION_MAX_CHARS (pdfminer's layout
+    analysis is worse than quadratic in the number of text boxes: 2,000 scattered words took two
+    minutes), it is interrupted after what is left until `deadline`, and it never runs while the
+    pdfium lock is held (read_pdf calls it afterwards)."""
+    if len(first) > PDF_SECOND_OPINION_MAX_CHARS:
+        return first
+    remaining = PDF_SECOND_OPINION_BUDGET_S if deadline is None else deadline - time.monotonic()
+    if remaining <= 0:
+        return first
     try:
-        for alt in _pdfminer_pages(content, [index]):
-            alt = repair_text(alt)
-            s1, c1, id1 = _quality(first)
-            s2, c2, id2 = _quality(alt)
-            better = (s2 >= s1 + 0.10 and c2 <= c1) or (c1 > 0.01 and c2 < c1 / 2 and not id2)
-            return alt if better else first
-    except Exception:
+        with _time_limit(remaining):
+            for alt in _pdfminer_pages(content, [index]):
+                alt = repair_text(alt)
+                s1, c1, id1 = _quality(first)
+                s2, c2, id2 = _quality(alt)
+                better = (s2 >= s1 + 0.10 and c2 <= c1) or (c1 > 0.01 and c2 < c1 / 2 and not id2)
+                return alt if better else first
+    except (_TimeUp, Exception):
         pass
     return first
 
@@ -781,13 +983,13 @@ def read_pdf(content: bytes, *, max_pages: int | None = None, max_chars: int | N
     """Read a PDF into one string.  Raises PdfReadError / PdfTooLongError with a message fit to show the user."""
     max_pages = MAX_PDF_PAGES if max_pages is None else max_pages
     max_chars = MAX_TEXT_CHARS if max_chars is None else max_chars
-    deadline = time.monotonic() + (PDF_TIME_BUDGET_S if time_budget is None else time_budget)
+    budget = PDF_TIME_BUDGET_S if time_budget is None else time_budget
     warnings: list[str] = []
     engine = "pdfium"
     still_garbled = 0
 
     try:
-        n = page_count(content)
+        declared = page_count(content)
     except PdfReadError as first_error:
         # pdfium refused the file.  A password is final, and so is "busy" (that says nothing about
         # the file); anything else gets one try with pdfminer.
@@ -795,19 +997,23 @@ def read_pdf(content: bytes, *, max_pages: int | None = None, max_chars: int | N
             raise
         pages = []
         total = 0
+        deadline = time.monotonic() + budget
         try:
-            for raw in _pdfminer_pages(content):
-                # Same ceilings as the main path: this reader is about ten times slower, so it
-                # is the one that could otherwise run on and on over a large damaged file.
-                if len(pages) >= max_pages:
-                    raise PdfTooLongError(_too_long(len(pages) + 1, max_pages))
-                if time.monotonic() > deadline:
-                    raise PdfReadError("Reading this PDF took too long. Try a shorter file.")
-                text = repair_text(raw)
-                total += len(text)
-                if total > max_chars:
-                    raise PdfTooLongError(_too_much_text(max_chars))
-                pages.append(text)
+            with _time_limit(budget):
+                for raw in _pdfminer_pages(content):
+                    # Same ceilings as the main path: this reader is about ten times slower, so it
+                    # is the one that could otherwise run on and on over a large damaged file.
+                    if len(pages) >= max_pages:
+                        raise PdfTooLongError(_too_long(len(pages) + 1, max_pages))
+                    if time.monotonic() > deadline:
+                        raise PdfReadError(_TOO_SLOW)
+                    text = repair_text(raw)
+                    total += len(text)
+                    if total > max_chars:
+                        raise PdfTooLongError(_too_much_text(max_chars))
+                    pages.append(text)
+        except _TimeUp:
+            raise PdfReadError(_TOO_SLOW) from None
         except PdfReadError:
             raise
         except Exception:
@@ -817,44 +1023,111 @@ def read_pdf(content: bytes, *, max_pages: int | None = None, max_chars: int | N
             # honest description of a file with a page tree that holds no pages.
             raise first_error
         engine = "pdfminer"
-        n = len(pages)
     else:
-        if n == 0:
+        if declared == 0:
             raise PdfReadError("This PDF has no pages.")
+        # The declared count is a claim. Too large (3 pages, /Count 450): find what loads. Too small
+        # (401 pages, /Count 5): pdfium would read 5 and drop the rest silently, so a file that
+        # visibly holds more is checked with the second reader's page walk.
+        n = declared
         if n > max_pages:
-            raise PdfTooLongError(_too_long(n, max_pages))
+            n = _loadable_pages(content, declared)
+            if n > max_pages:
+                raise PdfTooLongError(_too_long(n, max_pages))
+        in_file = _pages_in_file(content, declared, max_pages) if n == declared else n
+        if in_file > max_pages:
+            raise PdfTooLongError(_too_long(in_file, max_pages, at_least=True))
+
         pages = []
         stats: dict = {}
         total = 0
-        fallbacks = 0
+        garbled: list[int] = []                       # indexes of the pages whose text looks garbled
+        kept_raw: dict[int, str] = {}                 # their raw text, for as many as get a second opinion
         # The generator holds the PDF reader's lock while it is open. A for-loop that is left
         # by an exception does not close it: the traceback keeps the generator alive, and with
         # it the lock, until the exception is garbage collected. Close it explicitly so that a
         # limit being hit never leaves the next upload waiting.
-        reader = iter_pdf_pages(content, stats, deadline)
+        reader = iter_pdf_pages(content, stats, budget=budget, max_chars=max_chars, limit=n)
         try:
             for i, raw in enumerate(reader):
                 text = repair_text(raw)           # garbled-ness is judged on the RAW text; repair drops control characters
                 evidence = _garble_evidence(raw)
-                if evidence:
-                    replaced = False
-                    if fallbacks < MAX_FALLBACK_PAGES:
-                        fallbacks += 1
-                        alt = _second_opinion(content, i, raw)
-                        if alt is not raw:
-                            text, replaced, engine = alt, True, "pdfium+pdfminer"
-                    # Only hard evidence counts toward rejecting the file. A page that merely
-                    # has few ordinary words has been given its second opinion and is kept.
-                    if evidence == "strong" and (not replaced or _looks_garbled(text)):
-                        still_garbled += 1
+                if evidence == "strong":
+                    # Only hard evidence earns the slow second reader. A page that merely has few
+                    # ordinary words (a table of authorities, a page of scattered figures) used to
+                    # get one too, and that is the reader that took minutes over a crafted page;
+                    # on the test corpus and the bench documents the weak signal never fired
+                    # on a page the second reader then improved.
+                    garbled.append(i)
+                    if len(kept_raw) < MAX_FALLBACK_PAGES:
+                        kept_raw[i] = raw
                 total += len(text)
                 if total > max_chars:
                     raise PdfTooLongError(_too_much_text(max_chars))
                 pages.append(text)
         finally:
             reader.close()
+        deadline = stats.get("deadline") or time.monotonic() + budget
+
+        # The second reader runs here, after the lock is released, for the first few pages that look
+        # garbled, and only for as long as PDF_SECOND_OPINION_BUDGET_S (and the read's own deadline) allow.
+        second_deadline = min(deadline, time.monotonic() + PDF_SECOND_OPINION_BUDGET_S)
+        fallbacks = 0
+        for i in garbled:
+            replaced = False
+            if fallbacks < MAX_FALLBACK_PAGES and i in kept_raw and time.monotonic() < second_deadline:
+                fallbacks += 1
+                alt = _second_opinion(content, i, kept_raw[i], second_deadline)
+                if alt is not kept_raw[i]:
+                    pages[i], replaced, engine = alt, True, "pdfium+pdfminer"
+            # A page whose second opinion did not clearly improve it still counts toward
+            # rejecting the file (only strong evidence is ever in this list).
+            if not replaced or _looks_garbled(pages[i]):
+                still_garbled += 1
+
+        if in_file > n:
+            # Pages the file holds beyond its declared count are read with the second reader.
+            try:
+                with _time_limit(max(0.0, deadline - time.monotonic())):
+                    for raw in _pdfminer_pages(content, set(range(n, in_file))):
+                        pages.append(repair_text(raw))
+            except _TimeUp:
+                raise PdfReadError(_TOO_SLOW) from None
+            except PdfReadError:
+                raise
+            except Exception:
+                pass
+            engine = "pdfium+pdfminer"
+            warnings.append(
+                f"This PDF says it has {declared} pages but the file holds {len(pages)}. "
+                "All of them were read, the extra ones with a slower reader."
+            )
+        else:
+            # Trailing pages that do not exist (a /Count that is too large) are not pages: they are
+            # not "skipped", and they are not scanned pages that need OCR.
+            failed_to_load = set(stats.get("load_failed", []))
+            real = len(pages)
+            while real > 0 and (real - 1) in failed_to_load:
+                real -= 1
+            if real == 0:
+                raise PdfReadError("This PDF looks damaged or incomplete (the upload may have been cut off).")
+            if real < len(pages):
+                stats["failed_pages"] -= len(pages) - real
+                pages = pages[:real]
+            if real < declared:
+                warnings.append(
+                    f"This PDF says it has {declared} pages but the file holds {real}. "
+                    f"All {real} were read."
+                )
+        if sum(len(p) for p in pages) > max_chars:
+            raise PdfTooLongError(_too_much_text(max_chars))
         if stats.get("failed_pages"):
             warnings.append(f"{stats['failed_pages']} page(s) of this PDF could not be read and were skipped.")
+        if stats.get("unlaid_pages"):
+            warnings.append(
+                f"{stats['unlaid_pages']} page(s) hold an unusually large amount of text and were read "
+                "without layout analysis, so footnote marks may be missing there."
+            )
 
     empty = sum(1 for p in pages if len(p.strip()) < 20)
     if still_garbled and still_garbled >= 0.5 * len(pages):
@@ -883,6 +1156,9 @@ def _too_much_text(limit: int) -> str:
     )
 
 
-def _too_long(n: int, limit: int) -> str:
+def _too_long(n: int, limit: int, at_least: bool = False) -> str:
+    if at_least:
+        return (f"This PDF has more than {limit} pages, which is over the {limit}-page limit. "
+                f"Split it into parts of {limit} pages or fewer and upload each part.")
     return (f"This PDF has {n} pages, which is over the {limit}-page limit. "
             f"Split it into parts of {limit} pages or fewer and upload each part.")
