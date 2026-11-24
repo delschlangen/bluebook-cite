@@ -31,7 +31,7 @@ from __future__ import annotations
 import re
 
 from .bluebook_patterns import STATE_ABBREVIATIONS
-from .rules import VERIFIED_RULES
+from .rules import EDITION_NOTE, VERIFIED_RULES
 
 # --- building blocks -------------------------------------------------------
 
@@ -512,7 +512,12 @@ TYPES = [
 
 def build_spec() -> dict:
     """The complete spec as plain data, ready to export to the browser."""
-    return {"types": TYPES, "families": FAMILIES, "rules": VERIFIED_RULES}
+    return {
+        "types": TYPES,
+        "families": FAMILIES,
+        "rules": VERIFIED_RULES,
+        "edition_note": EDITION_NOTE,
+    }
 
 
 SPEC = build_spec()

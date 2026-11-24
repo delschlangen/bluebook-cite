@@ -26,6 +26,7 @@ from .services.lookup_service import CitationCompleter, LegalLookupService
 from .services.parser import DocumentParser, UnsupportedDocumentError
 from .services.repair import CitationRepairer
 from .services.source_finder import ClaimDetector, SourceFinder
+from .services.spec_engine import STYLES
 
 # Cap on lookups running at once for a single document. Enough to hide network
 # latency, low enough to stay a polite client of free public APIs.
@@ -229,9 +230,12 @@ async def _complete_citations(citations):
     the whole phase is bounded, and exceeding the budget degrades the response
     instead of failing it.
     """
+    # Engine-recognised kinds (reports, rules, regulations, legislative materials...) are
+    # never sent to an outside search. No free source can verify a record for them, and
+    # searching a case database for a Federal Register cite can only return noise.
     needs_lookup = [
         c for c in citations
-        if c.status.value in ("incomplete", "needs_verification")
+        if c.status.value in ("incomplete", "needs_verification") and not c.kind
     ]
 
     if needs_lookup:
@@ -528,7 +532,10 @@ async def search_citations(
 
 
 @app.post("/api/repair")
-async def repair_citation(text: str = Body(..., embed=True)):
+async def repair_citation(
+    text: str = Body(..., embed=True),
+    style: str = Body(default="law_review", embed=True),
+):
     """Diagnose and, where possible, complete a single pasted citation.
 
     Returns one of four statuses:
@@ -537,6 +544,9 @@ async def repair_citation(text: str = Body(..., embed=True)):
     - `ambiguous`   candidates found, none confident enough to apply
     - `incomplete`  the gaps are identified but no record was found
     - `unparseable` not recognizable as a citation
+
+    `style` is `law_review` (footnotes: authors and titles in capitals) or
+    `practitioner` (court documents: ordinary type, italic titles).
 
     A formatted citation is only ever returned when it came from the user's
     own complete input or from a matched record carrying a verification URL.
@@ -550,16 +560,22 @@ async def repair_citation(text: str = Body(..., embed=True)):
             ),
         )
 
+    if style not in STYLES:
+        raise HTTPException(
+            status_code=422,
+            detail=f"style must be one of: {', '.join(STYLES)}.",
+        )
+
     repairer = CitationRepairer(get_lookup_service(), extractor, formatter)
     try:
         result = await asyncio.wait_for(
-            repairer.repair(text), timeout=REPAIR_BUDGET_SECONDS
+            repairer.repair(text, style), timeout=REPAIR_BUDGET_SECONDS
         )
     except TimeoutError:
         # Fall back to the offline diagnosis, which is still useful.
         result = await CitationRepairer(
             _OfflineLookup(), extractor, formatter
-        ).repair(text)
+        ).repair(text, style)
         result.notes.append(
             "The lookup timed out, so only the parse is shown."
         )

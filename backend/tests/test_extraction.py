@@ -49,15 +49,16 @@ GOLDEN = [
     # --- Statutes and regulations ---
     ("47 U.S.C. § 230", "47 U.S.C. § 230."),
     ("15 U.S.C. § 45", "15 U.S.C. § 45."),
-    ("47 C.F.R. § 54", "47 C.F.R. § 54."),
-    # --- Books, Rule 15 ---
+    # The year of the C.F.R. edition is required, unlike the U.S. Code (Rule 12.3.2).
+    ("47 C.F.R. § 54 (2022)", "47 C.F.R. § 54 (2022)."),
+    # --- Books, Rule 15: law review style sets author AND title in capitals ---
     (
         "Erwin Chemerinsky, Constitutional Law: Principles and Policies (6th ed. 2019)",
-        "Erwin Chemerinsky, CONSTITUTIONAL LAW: PRINCIPLES AND POLICIES (6th ed. 2019).",
+        "ERWIN CHEMERINSKY, CONSTITUTIONAL LAW: PRINCIPLES AND POLICIES (6th ed. 2019).",
     ),
     (
         "Lawrence Lessig, Code and Other Laws of Cyberspace (1999)",
-        "Lawrence Lessig, CODE AND OTHER LAWS OF CYBERSPACE (1999).",
+        "LAWRENCE LESSIG, CODE AND OTHER LAWS OF CYBERSPACE (1999).",
     ),
 ]
 

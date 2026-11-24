@@ -181,8 +181,8 @@ export function searchCitations(query, searchType = 'case') {
  * Repair a single pasted citation. Returns a diagnosis: what was parsed,
  * what is missing, and any verifiable candidates.
  */
-export function repairCitation(text) {
-  return postJson('/api/repair', { text }, { timeoutMs: 30000 });
+export function repairCitation(text, style = 'law_review') {
+  return postJson('/api/repair', { text, style }, { timeoutMs: 30000 });
 }
 
 export { ApiError };

@@ -12,6 +12,8 @@ from ..utils.bluebook_patterns import (
     get_journal_abbreviation,
     get_reporter_abbreviation,
 )
+from .citation_engine import ENGINE
+from .transforms import ordinal, titlecase
 
 
 def clean_html(text: str) -> str:
@@ -29,10 +31,17 @@ class BluebookFormatter:
 
     def format_citation(self, citation: Citation, is_law_review: bool = True) -> str:
         """Format a citation based on its type."""
+        # Anything the data-driven engine recognised is rendered from its own template,
+        # in the requested style. If a required part is missing there is nothing to
+        # render, and the original text is returned rather than a citation with a hole.
+        if citation.kind:
+            style = "law_review" if is_law_review else "practitioner"
+            rendered = ENGINE.render(citation.kind, citation.spec_fields or {}, style)
+            return rendered if rendered is not None else citation.raw_text
+
         formatters = {
             CitationType.CASE: self.format_case,
             CitationType.STATUTE: self.format_statute,
-            CitationType.REGULATION: self.format_regulation,
             CitationType.LAW_REVIEW: self.format_law_review,
             CitationType.BOOK: self.format_book,
             CitationType.WEBSITE: self.format_website,
@@ -111,66 +120,80 @@ class BluebookFormatter:
             return f"{base} ({citation.year})."
         return f"{base}."
 
-    def format_regulation(self, citation: Citation, is_law_review: bool = True) -> str:
-        """Format regulation citation per Bluebook Rule 14."""
-        if not citation.title_number or not citation.section:
-            return citation.raw_text
-
-        base = f"{citation.title_number} C.F.R. § {citation.section}"
-
-        if citation.year:
-            return f"{base} ({citation.year})."
-        return f"{base}."
-
     def format_law_review(self, citation: Citation, is_law_review: bool = True) -> str:
-        """Format law review article citation per Bluebook Rule 16."""
-        parts = []
+        """Format a periodical article: author, title, volume, journal, page, year.
+
+        The journal is set in small capitals in law review footnotes, rendered here as
+        capitals, and in ordinary type in a court document. The comma after the title
+        is part of the form; leaving it out was a bug.
+        """
+        pieces: list[str] = []
 
         if citation.author:
-            parts.append(clean_html(citation.author))
+            pieces.append(clean_html(citation.author))
 
         if citation.title:
-            title = clean_html(citation.title)
-            parts.append(f"*{title}*")
+            pieces.append(f"*{clean_html(citation.title)}*")
 
         if citation.volume and citation.journal and citation.page:
             journal = get_journal_abbreviation(citation.journal)
-            vol_cite = f"{citation.volume} {journal} {citation.page}"
+            if is_law_review:
+                journal = journal.upper()
+            cite = f"{citation.volume} {journal} {citation.page}"
             if citation.pincite:
-                vol_cite += f", {citation.pincite}"
-            parts.append(vol_cite)
+                cite += f", {citation.pincite}"
+            pieces.append(cite)
 
+        if not pieces:
+            return citation.raw_text
+
+        out = ", ".join(pieces)
         if citation.year:
-            parts.append(f"({citation.year})")
+            out += f" ({citation.year})"
+        return out + "."
 
-        if parts:
-            return ", ".join(parts[:2]) + " " + " ".join(parts[2:]) + "."
-        return citation.raw_text
+    @staticmethod
+    def _split_pinpoint(title: str) -> tuple[str, str]:
+        """Separate a trailing pinpoint ("120", "§ 11.2", "at 45") from a title.
+
+        The book pattern captures everything up to the parenthesis as the title, which
+        swept the pinpoint in with it. The title is italic or capitalised on its own, and
+        the pinpoint is always ordinary type, so the two have to be told apart.
+        """
+        m = re.search(r"\s+((?:§+|¶+|at\s+)\s*[\w.\-]+|\d{1,4})\s*$", title)
+        if not m:
+            return title.strip(), ""
+        return title[: m.start()].strip(), m.group(1).strip()
 
     def format_book(self, citation: Citation, is_law_review: bool = True) -> str:
-        """Format book citation per Bluebook Rule 15."""
-        parts = []
+        """Format a book: author, title, pinpoint, edition and year.
 
-        if citation.author:
-            # Author followed by comma
-            parts.append(clean_html(citation.author) + ",")
+        Law review footnotes set the author and the title in large and small capitals,
+        rendered here as capitals. A court document uses ordinary type for the author
+        and italics for the title. Both were wrong before: the author was left in
+        ordinary type in law review style.
+        """
+        title, pin = self._split_pinpoint(clean_html(citation.title or ""))
+        author = clean_html(citation.author or "")
 
-        if citation.title:
-            # Book titles in small caps for law reviews
-            title = clean_html(citation.title)
-            parts.append(title.upper())
+        if is_law_review:
+            author, title = author.upper(), title.upper()
+        else:
+            title = f"*{titlecase(title)}*" if title else title
 
-        # Build parenthetical
-        paren_parts = []
+        head = ", ".join(p for p in (author, title) if p)
+        if pin:
+            head += f" {pin}"
+
+        paren = []
         if citation.edition:
-            paren_parts.append(f"{citation.edition} ed.")
+            paren.append(f"{ordinal(citation.edition)} ed.")
         if citation.year:
-            paren_parts.append(str(citation.year))
+            paren.append(str(citation.year))
+        if paren:
+            head += f" ({' '.join(paren)})"
 
-        if paren_parts:
-            parts.append(f"({' '.join(paren_parts)})")
-
-        return " ".join(parts) + "."
+        return head + "."
 
     def format_website(self, citation: Citation, is_law_review: bool = True) -> str:
         """Format website citation per Bluebook Rule 18."""

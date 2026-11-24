@@ -84,11 +84,6 @@ PATTERNS: dict[str, Pattern] = {
         r"§+\s*(\d+(?:[-.]\d+)*)"
     ),
 
-    # Federal regulations: Title C.F.R. § Section
-    "regulation_cfr": re.compile(
-        r"(\d+)\s+C\.?F\.?R\.?\s*§+\s*(\d+(?:\.\d+)?)"
-    ),
-
     # Law review articles: Author, Title, Volume Journal Page (Year)
     "law_review": re.compile(
         r"([A-Z][a-zA-Z\.\s]+),\s+"
@@ -100,7 +95,10 @@ PATTERNS: dict[str, Pattern] = {
 
     # Books: Author, Title (Edition Year) - captures full ordinal like "6th"
     "book": re.compile(
-        r"([A-Z][a-zA-Z\.\s]+),\s+"
+        # "&" and apostrophes/hyphens are allowed in the author. Without "&", the first
+        # author of "Roy M. Mersky & Donald J. Dunn, Title (8th ed. 2002)" was silently
+        # dropped and the citation attributed to the second author alone.
+        r"([A-Z][a-zA-Z\.\s&'\-]+),\s+"
         r"([A-Z][^(]+)\s*"
         # Bluebook ordinals are "2d" and "3d", not "2nd" and "3rd"
         # (Rule 6.2(b)), so both spellings must be accepted.

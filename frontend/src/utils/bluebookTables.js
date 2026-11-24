@@ -329,67 +329,67 @@ export const COURT_ABBREVIATIONS = {
 export const FIELD_GUIDANCE = {
   "author": {
     "label": "author",
-    "rule": "Rule 15.1",
+    "rule": "15.1",
     "why": "The full name of the author, as it appears on the publication."
   },
   "code": {
     "label": "code",
-    "rule": "Rule 12.3",
+    "rule": "12",
     "why": "The code being cited, usually U.S.C."
   },
   "court": {
     "label": "court",
-    "rule": "Rule 10.4",
+    "rule": "10.4",
     "why": "The deciding court, in the parenthetical. Omitted for the U.S. Supreme Court."
   },
   "journal": {
     "label": "journal",
-    "rule": "Rule 16.4",
+    "rule": "16",
     "why": "The abbreviated periodical name. See Table 13."
   },
   "page": {
     "label": "first page",
-    "rule": "Rule 10.3.2",
+    "rule": "10.3",
     "why": "The page the opinion begins on, not the page you are quoting."
   },
   "parties": {
     "label": "party names",
-    "rule": "Rule 10.2",
+    "rule": "10.2",
     "why": "The first-listed party on each side, separated by “v.”"
   },
   "reporter": {
     "label": "reporter",
-    "rule": "Rule 10.3.2",
+    "rule": "10.3",
     "why": "The abbreviated reporter, for example U.S., S. Ct. or F.4th. See Table 1."
   },
   "section": {
     "label": "section",
-    "rule": "Rule 12.3",
+    "rule": "12",
     "why": "The section number, after the § symbol."
   },
   "title": {
     "label": "title",
-    "rule": "Rule 15.3",
+    "rule": "15",
     "why": "The full title of the work."
   },
   "title_number": {
     "label": "title number",
-    "rule": "Rule 12.3",
+    "rule": "12",
     "why": "The code title, the number before U.S.C."
   },
   "url": {
     "label": "URL",
-    "rule": "Rule 18.2",
+    "rule": "18",
     "why": "The direct address of the source."
   },
   "volume": {
     "label": "volume number",
-    "rule": "Rule 10.3.2",
+    "rule": "10.3",
     "why": "The reporter volume the case starts in, before the reporter name."
   },
   "year": {
     "label": "year",
-    "rule": "Rule 10.5",
+    "rule": "10.5",
     "why": "The year of decision, in the same parenthetical as the court."
   }
 };
@@ -398,7 +398,6 @@ export const CITATION_TEMPLATES = {
   "book": "{author}, {title} ({year}).",
   "case": "*{parties}*, {volume} {reporter} {page} ({court}{year}).",
   "law_review": "{author}, *{title}*, {volume} {journal} {page} ({year}).",
-  "regulation": "{title_number} {code} § {section}.",
   "statute": "{title_number} {code} § {section}.",
   "website": "{author}, *{title}*, {url}."
 };

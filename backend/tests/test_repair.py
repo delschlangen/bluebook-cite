@@ -253,20 +253,33 @@ class TestTemplateAndGuidance:
         )
 
     @respx.mock
-    async def test_every_gap_names_its_governing_rule(self, repairer):
+    async def test_every_gap_names_a_verified_governing_rule(self, repairer):
+        """The sources disagreed about sub-rule numbers such as 10.3.2, so the tool shows
+        the nearest rule that is actually verified, here 10.3, never the guess."""
+        from app.utils.rules import VERIFIED_RULES
+
         respx.get(COURTLISTENER).mock(
             return_value=httpx.Response(200, json={"results": []})
         )
         result = await repairer.repair("Moody v. NetChoice")
 
         by_field = {d["field"]: d for d in result.missing_details}
-        assert by_field["volume"]["rule"] == "Rule 10.3.2"
-        assert by_field["reporter"]["rule"] == "Rule 10.3.2"
-        assert by_field["page"]["rule"] == "Rule 10.3.2"
-        assert by_field["year"]["rule"] == "Rule 10.5"
+        for name in ("volume", "reporter", "page"):
+            assert by_field[name]["display_rule"] == {"number": "10.3", "title": "Reporters and Services"}
+        assert by_field["year"]["display_rule"]["number"] == "10.5"
+
         for detail in result.missing_details:
             assert detail["label"] and detail["why"]
-            assert detail["rule"].startswith("Rule ")
+            assert detail["display_rule"]["number"] in VERIFIED_RULES
+
+    @respx.mock
+    async def test_an_unverified_number_is_never_displayed(self, repairer):
+        respx.get(COURTLISTENER).mock(
+            return_value=httpx.Response(200, json={"results": []})
+        )
+        result = await repairer.repair("Moody v. NetChoice")
+        shown = {d["display_rule"]["number"] for d in result.missing_details}
+        assert "10.3.2" not in shown
 
     async def test_complete_citation_has_no_gaps(self, repairer):
         result = await repairer.repair("Brandenburg v. Ohio, 395 U.S. 444 (1969)")

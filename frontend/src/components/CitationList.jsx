@@ -1,5 +1,6 @@
 import React from 'react';
 import { renderCitation } from '../utils/citationText';
+import { renderTemplate } from './CitationTypeGuide';
 
 const statusColors = {
   complete: 'bg-green-100 text-green-800',
@@ -56,7 +57,7 @@ export default function CitationList({ citations, shortFormSuggestions, onSelect
                     {citation.status.replace('_', ' ')}
                   </span>
                   <span className="px-2 py-0.5 rounded text-xs bg-gray-100 text-gray-600">
-                    {typeLabels[citation.type] || citation.type}
+                    {citation.kind_label || typeLabels[citation.type] || citation.type}
                   </span>
                   {citation.footnote_number && (
                     <span className="text-xs text-gray-400">
@@ -82,6 +83,18 @@ export default function CitationList({ citations, shortFormSuggestions, onSelect
                     {suggestion.explanation && (
                       <p className="text-xs text-green-600 mt-1">{suggestion.explanation}</p>
                     )}
+                  </div>
+                )}
+
+                {/* What a recognised-but-incomplete citation still needs */}
+                {citation.missing?.length > 0 && citation.template && (
+                  <div className="mt-2 p-2 bg-amber-50 rounded border border-amber-100">
+                    <p className="text-xs text-amber-800 font-medium mb-1">
+                      Still needs: {citation.missing.join(', ')}
+                    </p>
+                    <p className="text-sm text-gray-900 leading-relaxed">
+                      {renderTemplate(citation.template)}
+                    </p>
                   </div>
                 )}
               </div>

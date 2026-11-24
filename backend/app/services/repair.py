@@ -22,6 +22,9 @@ from ..services.lookup_service import (
 )
 from ..utils.bluebook_patterns import abbreviate_party_name
 from ..utils.field_guidance import CITATION_TEMPLATES, guidance_for
+from ..utils.text_normalize import normalize_text
+from .citation_engine import ENGINE
+from .spec_engine import STYLES
 
 # Fields the Bluebook requires before a citation of each type is complete.
 REQUIRED_FIELDS: dict[CitationType, tuple[str, ...]] = {
@@ -67,6 +70,13 @@ class RepairResult:
     missing_labels: list[str] = field(default_factory=list)
     missing_details: list[dict[str, Any]] = field(default_factory=list)
     template: str | None = None
+    # Set when the data-driven engine recognised the citation: which kind it is, and how
+    # well established its format is. `style` is the typeface convention that was applied.
+    kind: str | None = None
+    kind_label: str | None = None
+    format_confidence: str | None = None
+    style: str = "law_review"
+    rule_note: str | None = None
     formatted: str | None = None
     confidence: float | None = None
     source: str | None = None
@@ -84,6 +94,11 @@ class RepairResult:
             "missing_labels": self.missing_labels,
             "missing_details": self.missing_details,
             "template": self.template,
+            "kind": self.kind,
+            "kind_label": self.kind_label,
+            "format_confidence": self.format_confidence,
+            "style": self.style,
+            "rule_note": self.rule_note,
             "formatted": self.formatted,
             "confidence": self.confidence,
             "source": self.source,
@@ -215,28 +230,106 @@ class CitationRepairer:
         self.extractor = extractor or CitationExtractor()
         self.formatter = formatter or BluebookFormatter()
 
-    async def repair(self, text: str) -> RepairResult:
-        text = (text or "").strip()
+    async def repair(self, text: str, style: str = "law_review") -> RepairResult:
+        # Phone keyboards and word processors turn apostrophes and hyphens into curly
+        # quotes and en dashes, which defeat every pattern. One character for one.
+        text = normalize_text(text or "").strip()
+        if style not in STYLES:
+            style = "law_review"
+
         if not text:
             return RepairResult(
                 input=text,
                 status=UNPARSEABLE,
+                style=style,
                 notes=["Nothing to repair. Paste a citation or part of one."],
             )
 
-        citations = self.extractor.extract_all(text)
-        if not citations:
+        # Two readers look at the same text. The data-driven engine understands most
+        # kinds of citation; the older readers handle cases, books, articles and the
+        # U.S. Code. Whichever accounts for more of what was pasted wins, and the
+        # engine wins a tie, exactly as in the browser.
+        engine_match = ENGINE.best_match(text)
+        legacy = self.extractor.extract_all(text, include_spec=False)
+        legacy_best = (
+            max(legacy, key=lambda c: c.position_end - c.position_start) if legacy else None
+        )
+
+        engine_length = (engine_match.end - engine_match.start) if engine_match else -1
+        legacy_length = (
+            legacy_best.position_end - legacy_best.position_start if legacy_best else -1
+        )
+
+        if engine_match is not None and engine_length >= legacy_length:
+            return self._from_engine(text, engine_match, style)
+
+        if legacy_best is None:
             return RepairResult(
                 input=text,
                 status=UNPARSEABLE,
+                style=style,
                 notes=[
-                    "This does not look like a citation yet. A case needs at "
-                    "least two party names separated by \" v. \"."
+                    "This does not look like a kind of citation this tool recognises "
+                    "yet. Choose the kind of source below to see what its citation needs."
                 ],
             )
 
-        # Longest match wins: it is the one that accounts for most of the input.
-        citation = max(citations, key=lambda c: c.position_end - c.position_start)
+        return await self._from_legacy(text, legacy_best, style)
+
+    def _from_engine(self, text: str, match, style: str) -> RepairResult:
+        """A citation the data-driven engine recognised."""
+        spec = ENGINE.type_spec(match.type_id)
+        missing = ENGINE.missing(match.type_id, match.fields)
+        by_name = {f["name"]: f for f in spec["fields"]}
+        formatted = ENGINE.render(match.type_id, match.fields, style)
+
+        details = [
+            {
+                "field": n,
+                "label": by_name[n]["label"],
+                "rule": by_name[n].get("rule", ""),
+                "display_rule": ENGINE.display_rule(by_name[n].get("rule")),
+                "why": by_name[n].get("why", ""),
+            }
+            for n in missing
+        ]
+
+        notes = [
+            "This citation was already complete. Formatting applied."
+            if formatted
+            else "The fields above are what this citation still needs.",
+            *spec.get("notes", []),
+        ]
+        if spec.get("confidence") != "high":
+            notes.append(
+                "This format is less thoroughly checked than the others. Confirm it in "
+                "your Bluebook before relying on it."
+            )
+
+        return RepairResult(
+            input=text,
+            status=RESOLVED if formatted else INCOMPLETE,
+            citation_type=spec.get("citation_type", "other"),
+            parsed=dict(match.fields),
+            missing=missing,
+            missing_labels=[by_name[n]["label"] for n in missing],
+            missing_details=details,
+            template=ENGINE.render(match.type_id, match.fields, style, gaps=True),
+            kind=spec["id"],
+            kind_label=spec["label"],
+            format_confidence=spec.get("confidence"),
+            style=style,
+            rule_note=ENGINE.spec.get("edition_note") if any(d["display_rule"] for d in details) else None,
+            formatted=formatted,
+            # Nothing was fetched or inferred: the user's own words are the source.
+            confidence=1.0 if formatted else None,
+            source="your input" if formatted else None,
+            notes=notes,
+        )
+
+    async def _from_legacy(self, text: str, citation: Citation, style: str) -> RepairResult:
+        """A case, book, article or U.S. Code citation, read by the older readers."""
+        is_law_review = style == "law_review"
         gaps = missing_fields(citation)
 
         result = RepairResult(
@@ -248,13 +341,16 @@ class CitationRepairer:
             missing_labels=[FIELD_LABELS.get(g, g) for g in gaps],
             missing_details=[guidance_for(g) for g in gaps],
             template=build_template(citation, gaps),
+            style=style,
         )
+        if any(d.get("display_rule") for d in result.missing_details):
+            result.rule_note = ENGINE.spec.get("edition_note")
 
         # Already complete. Format it and say so; no lookup is needed, and the
         # user's own input is the provenance.
         if not gaps:
             result.status = RESOLVED
-            result.formatted = self.formatter.format_citation(citation)
+            result.formatted = self.formatter.format_citation(citation, is_law_review)
             result.confidence = 1.0
             result.source = "your input"
             result.notes.append(
@@ -301,7 +397,7 @@ class CitationRepairer:
             if url and confidence and confidence >= CONFIDENT_MATCH_THRESHOLD:
                 filled = self._merge(citation, data)
                 remaining = missing_fields(filled)
-                result.formatted = self.formatter.format_citation(filled)
+                result.formatted = self.formatter.format_citation(filled, result.style == "law_review")
                 result.confidence = confidence
                 result.source = lookup.get("source")
                 result.verify_url = url

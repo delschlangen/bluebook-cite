@@ -87,7 +87,7 @@ def test_both_suites_agree_on_the_shared_corpus():
     [
         "Brandenburg v. Ohio, 395 U.S. 444 (1969)",
         "NetChoice, LLC v. Paxton, 49 F.4th 439 (5th Cir. 2022)",
-        "47 C.F.R. § 54",
+        "47 C.F.R. § 54 (2022)",
     ],
 )
 def test_key_citations_are_covered_by_both(source):

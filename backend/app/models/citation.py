@@ -69,6 +69,16 @@ class Citation(BaseModel):
     confidence_score: float = 0.0
     lookup_results: dict | None = None
 
+    # Citations recognised by the data-driven engine. `kind` is the spec type id, and
+    # `spec_fields` holds what was parsed. `missing` lists required fields that were
+    # not found, and `template` shows the finished shape with those gaps marked.
+    kind: str | None = None
+    kind_label: str | None = None
+    spec_fields: dict[str, str] | None = None
+    missing: list[str] = []
+    template: str | None = None
+    format_confidence: str | None = None
+
     # Short form tracking
     is_short_form: bool = False
     references_citation_id: str | None = None

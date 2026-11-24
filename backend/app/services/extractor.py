@@ -7,6 +7,7 @@ import re
 from ..models.citation import Citation, CitationStatus, CitationType
 from ..utils.bluebook_patterns import PATTERNS
 from ..utils.text_normalize import normalize_text
+from .citation_engine import ENGINE
 
 # Procedural case-name forms where the leading words ARE the party name and
 # must survive cleanup.
@@ -85,8 +86,13 @@ class CitationExtractor:
                    'Co.', 'Ltd.', 'LLC.', 'v.', 'U.S.', 'S.', 'N.', 'E.', 'W.'}
         return word in abbrevs or (len(word) <= 4 and word.endswith('.'))
 
-    def extract_all(self, text: str) -> list[Citation]:
-        """Extract all citations from text."""
+    def extract_all(self, text: str, include_spec: bool = True) -> list[Citation]:
+        """Extract all citations from text.
+
+        `include_spec` turns the data-driven types (constitutions, rules, regulations,
+        reports and so on) on or off. The repair endpoint turns it off when it wants
+        only the older case, statute and book readings to compare against.
+        """
         # Curly quotes and en dashes from phones and word processors defeat the
         # patterns. The replacement is one character for one character, so every
         # offset still points at the same place in the original document.
@@ -96,10 +102,15 @@ class CitationExtractor:
         # Track positions to avoid duplicate matches
         matched_spans: list[tuple[int, int]] = []
 
+        # The data-driven types go first so they claim their spans before the older,
+        # looser patterns can read part of the same text as something else (a book,
+        # for instance, out of "Agency, GAO-16-552, Title (2016)").
+        if include_spec:
+            citations.extend(self._extract_spec_types(text, matched_spans))
+
         # Extract each citation type in priority order
         citations.extend(self._extract_cases(text, matched_spans))
         citations.extend(self._extract_statutes(text, matched_spans))
-        citations.extend(self._extract_regulations(text, matched_spans))
         citations.extend(self._extract_law_reviews(text, matched_spans))
         citations.extend(self._extract_books(text, matched_spans))
         citations.extend(self._extract_short_forms(text, matched_spans))
@@ -253,27 +264,34 @@ class CitationExtractor:
 
         return citations
 
-    def _extract_regulations(self, text: str, spans: list[tuple[int, int]]) -> list[Citation]:
-        """Extract regulation citations (C.F.R.)."""
-        citations = []
+    def _extract_spec_types(self, text: str, spans: list[tuple[int, int]]) -> list[Citation]:
+        """Citations of every kind described by the spec.
 
-        for match in PATTERNS["regulation_cfr"].finditer(text):
-            if self._overlaps(match.start(), match.end(), spans):
+        These are never sent to an outside lookup: for most of them no free source can
+        verify a record, so the honest output is the corrected form and a list of what
+        is missing.
+        """
+        citations: list[Citation] = []
+        for match in ENGINE.find_all(text):
+            if self._overlaps(match.start, match.end, spans):
                 continue
+            spans.append((match.start, match.end))
 
-            spans.append((match.start(), match.end()))
-
+            spec = ENGINE.type_spec(match.type_id)
+            missing = ENGINE.missing(match.type_id, match.fields)
             citations.append(Citation(
-                type=CitationType.REGULATION,
-                status=CitationStatus.COMPLETE,
-                raw_text=match.group(0),
-                position_start=match.start(),
-                position_end=match.end(),
-                title_number=match.group(1),
-                code="C.F.R.",
-                section=match.group(2),
+                type=CitationType(spec.get("citation_type", "other")),
+                status=CitationStatus.INCOMPLETE if missing else CitationStatus.COMPLETE,
+                raw_text=text[match.start:match.end],
+                position_start=match.start,
+                position_end=match.end,
+                kind=match.type_id,
+                kind_label=spec["label"],
+                spec_fields=match.fields,
+                missing=missing,
+                template=ENGINE.render(match.type_id, match.fields, gaps=True) if missing else None,
+                format_confidence=spec.get("confidence"),
             ))
-
         return citations
 
     def _extract_law_reviews(self, text: str, spans: list[tuple[int, int]]) -> list[Citation]:
