@@ -13,7 +13,7 @@ from .. import limits
 from ..models.citation import Citation, CitationStatus, CitationType
 from ..utils import bluebook_patterns as bp
 from ..utils.bluebook_patterns import LEGAL_NAME_PREFIXES, PATTERNS
-from ..utils.text_normalize import normalize_text
+from ..utils.text_normalize import normalize_text, strip_invisible
 from .bluebook_rules import BluebookFormatter, missing_fields
 from .citation_engine import ENGINE
 
@@ -431,8 +431,11 @@ class CitationExtractor:
         # Curly quotes and en dashes from phones and word processors defeat the
         # patterns. The replacement is one character for one character, so every
         # offset still points at the same place in the original document.
-        original = text or ""
-        text = normalize_text(text)
+        # Characters that print as nothing are taken out for matching, and every position found
+        # is mapped back at the end, so the page still highlights the right stretch of the text
+        # it was given.
+        original, offsets = strip_invisible(text or "")
+        text = normalize_text(original)
         citations = []
 
         # Track positions to avoid duplicate matches (and to bound how many citations are built)
@@ -464,6 +467,9 @@ class CitationExtractor:
 
         for citation in citations:
             self._finish(citation)
+            if offsets is not None:
+                citation.position_start = offsets.start(citation.position_start)
+                citation.position_end = offsets.end(citation.position_end)
         return citations
 
     # Fields that hold text taken from the document.
@@ -931,25 +937,30 @@ class CitationExtractor:
                 pincite=match.group(1) or match.group(2),
             ))
 
-        # Supra citations
-        for match in PATTERNS["supra_citation"].finditer(text):
-            if self._overlaps(match.start(), match.end(), spans):
-                continue
+        # Supra citations: found from the word "supra", then the name in front of it.
+        if "supra" in text:
+            for match in PATTERNS["supra_citation"].finditer(text):
+                named = PATTERNS["supra_author"].search(text, max(0, match.start() - 70), match.start())
+                if not named:
+                    continue
+                start = named.start()
+                if self._overlaps(start, match.end(), spans):
+                    continue
 
-            spans.append((match.start(), match.end()))
+                spans.append((start, match.end()))
 
-            citations.append(Citation(
-                type=CitationType.OTHER,
-                status=CitationStatus.COMPLETE,
-                raw_text=match.group(0),
-                position_start=match.start(),
-                position_end=match.end(),
-                is_short_form=True,
-                short_form_type="supra",
-                author=match.group(1).strip(),
-                footnote_number=int(match.group(2)) if match.group(2) else None,
-                pincite=match.group(3) if match.lastindex >= 3 else None,
-            ))
+                citations.append(Citation(
+                    type=CitationType.OTHER,
+                    status=CitationStatus.COMPLETE,
+                    raw_text=text[start:match.end()],
+                    position_start=start,
+                    position_end=match.end(),
+                    is_short_form=True,
+                    short_form_type="supra",
+                    author=named.group(1),
+                    footnote_number=int(match.group(1)),
+                    pincite=match.group(2),
+                ))
 
         return citations
 

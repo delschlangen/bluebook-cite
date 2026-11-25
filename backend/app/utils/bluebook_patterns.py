@@ -58,7 +58,9 @@ PATTERNS: dict[str, Pattern] = {
     # parts that can fail let a search restart inside the run.)
     "law_review": re.compile(
         r"([A-Z][a-zA-Z\.\s]{1,100}),\s{1,4}"
-        r"([^,]{1,250}),\s{1,4}"
+        # The title may run to 400 characters. It stopped at 250, and a real article with a
+        # longer title was dropped without a word; the pattern is linear in the bound.
+        r"([^,]{1,400}),\s{1,4}"
         r"(\d{1,4})\s{1,4}([A-Z][a-zA-Z\.\s&]{1,100}(?:L\.|Law|J\.|Journal|Rev\.|Review)[a-zA-Z\.\s]{0,40})\s{1,4}"
         r"(\d{1,6})(?:,\s{0,4}(\d{1,6}(?:-\d{1,6})?))?\s{0,4}"
         r"\((\d{4})\)"
@@ -70,7 +72,7 @@ PATTERNS: dict[str, Pattern] = {
         # author of "Roy M. Mersky & Donald J. Dunn, Title (8th ed. 2002)" was silently
         # dropped and the citation attributed to the second author alone.
         r"([A-Z][a-zA-Z\.\s&'\-]{1,100}),\s{1,4}"
-        r"([A-Z][^(]{1,250})"
+        r"([A-Z][^(]{1,400})"
         # Bluebook ordinals are "2d" and "3d", not "2nd" and "3rd"
         # (Rule 6.2(b)), so both spellings must be accepted.
         r"\((?:(\d{1,3}(?:st|nd|rd|th|d))\s{1,4}ed\.\s{1,4})?(\d{4})\)"
@@ -82,10 +84,17 @@ PATTERNS: dict[str, Pattern] = {
         rf"\bId\.(?:\s{{1,3}}at\s{{1,3}}({_PAGES})|\s{{1,3}}(§{{1,2}}\s{{0,3}}{_SECTIONS}))?"
     ),
 
-    # Short forms - Supra
+    # Short forms - Supra. The note number is bounded: "supra note" followed by thousands of
+    # digits was handed to int(), which refuses a number that long, and the whole analysis
+    # answered 500. A run of digits that long is not a note number, and is now not a supra
+    # citation at all.
     "supra_citation": re.compile(
-        r"([A-Za-z]{1,60}),?\s+supra\s+note\s+(\d+)(?:,\s+at\s+(\d+(?:-\d+)?))?"
+        r"\bsupra\s{1,3}note\s{1,3}(\d{1,6})(?!\d)(?:,\s{1,3}at\s{1,3}(\d{1,6}(?:-\d{1,6})?)(?!\d))?"
     ),
+    # The word in front of "supra", which names the source: "Sunstein, supra note 4". Applied
+    # only to the few characters before a supra_citation match, never to a whole document
+    # (searching for "any word, then supra" tried every word of the text).
+    "supra_author": re.compile(r"([A-Za-z]{1,60}),?\s{1,3}\Z"),
 
     # Hereinafter designation
     "hereinafter": re.compile(
