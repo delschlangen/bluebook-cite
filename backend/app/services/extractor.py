@@ -166,6 +166,35 @@ def _is_prose_possessive(core: str, word_before: str | None) -> bool:
     return owner in bp.PROSE_POSSESSORS or (word_before or "").lower() in bp.PERSON_TITLES
 
 
+# Punctuation that ends a sentence or a quotation and is never the last character of an address
+# someone meant to cite, and the brackets that are only if they close nothing inside it.
+_AFTER_URL = ".,;:!?'\"*"
+_URL_BRACKETS = {")": "(", "]": "[", "}": "{"}
+
+
+def trim_url(candidate: str) -> str:
+    """`candidate` without the sentence punctuation at its end.
+
+    Full stops and brackets INSIDE the address stay: "https://example.org/a.b/c_(d)" is whole.
+    A closing bracket at the end goes only when the address has no opening bracket for it, as
+    in "(see https://example.org/a)".
+    """
+    end = len(candidate)
+    unmatched = {
+        closer: candidate.count(closer) - candidate.count(opener) for closer, opener in _URL_BRACKETS.items()
+    }
+    while end:
+        last = candidate[end - 1]
+        if last in _AFTER_URL:
+            end -= 1
+        elif unmatched.get(last, 0) > 0:
+            unmatched[last] -= 1
+            end -= 1
+        else:
+            break
+    return candidate[:end]
+
+
 def collapse(text: str) -> str:
     """Whitespace runs, including the line breaks a PDF's layout leaves, as single spaces."""
     return _SPACES.sub(" ", text).strip()
@@ -394,7 +423,11 @@ class CitationExtractor:
         # Track positions to avoid duplicate matches (and to bound how many citations are built)
         matched_spans = SpanIndex(limit=limits.MAX_CITATIONS_ANALYZED)
 
-        # The data-driven types go first so they claim their spans before the older,
+        # Web addresses first: an address is one unbroken token, so nothing else can be inside
+        # one, and no other pattern should be allowed to read a piece of one as something else.
+        citations.extend(self._extract_urls(text, matched_spans))
+
+        # The data-driven types go next so they claim their spans before the older,
         # looser patterns can read part of the same text as something else (a book,
         # for instance, out of "Agency, GAO-16-552, Title (2016)").
         if include_spec:
@@ -406,7 +439,6 @@ class CitationExtractor:
         citations.extend(self._extract_law_reviews(text, matched_spans))
         citations.extend(self._extract_books(text, matched_spans))
         citations.extend(self._extract_short_forms(text, matched_spans))
-        citations.extend(self._extract_urls(text, matched_spans))
 
         # Sort by position
         citations.sort(key=lambda c: c.position_start)
@@ -673,22 +705,47 @@ class CitationExtractor:
         return citations
 
     def _extract_urls(self, text: str, spans: list[tuple[int, int]]) -> list[Citation]:
-        """Extract URL citations."""
+        """Extract URL citations.
+
+        The address is what the pattern found less the sentence punctuation after it: the full
+        stop that ends "Source: https://example.org/a.html." is the sentence's, and was being
+        reported as part of the address (and then printed twice in the suggestion).
+        """
         citations = []
 
         for match in PATTERNS["url"].finditer(text):
-            if self._overlaps(match.start(), match.end(), spans):
-                continue
+            start = match.start()
+            url = trim_url(match.group(0))
+            end = start + len(url)
 
-            spans.append((match.start(), match.end()))
+            # An address the page's width broke just before its file extension: "...12.23.25."
+            # at the end of one line and "pdf." alone at the start of the next. Only this one
+            # shape is rejoined here; anything less certain is the PDF reader's to repair.
+            if match.group(0).endswith(".") and len(url) == len(match.group(0)) - 1:
+                wrapped = PATTERNS["url_wrapped_extension"].match(text, match.end())
+                if wrapped:
+                    url = match.group(0) + wrapped.group(1)
+                    end = wrapped.end(1)
+
+            # "(last visited Mar. 3, 2024)": the day the author says they looked at the page.
+            access_date = None
+            visited = PATTERNS["url_visited"].match(text, end)
+            if visited:
+                access_date = collapse(visited.group(1))
+                end = visited.end()
+
+            if len(url) <= len("https://") or self._overlaps(start, end, spans):
+                continue
+            spans.append((start, end))
 
             citations.append(Citation(
                 type=CitationType.WEBSITE,
                 status=CitationStatus.INCOMPLETE,
-                raw_text=match.group(0),
-                position_start=match.start(),
-                position_end=match.end(),
-                url=match.group(0),
+                raw_text=text[start:end],
+                position_start=start,
+                position_end=end,
+                url=url,
+                access_date=access_date,
             ))
 
         return citations

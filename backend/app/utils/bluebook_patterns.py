@@ -116,9 +116,22 @@ PATTERNS: dict[str, Pattern] = {
         r"\[hereinafter\s+([^\]]+)\]"
     ),
 
-    # URL citations
+    # URL citations. The run of address characters is taken whole (possessive, so it is never
+    # given back a character at a time); what is sentence punctuation at its end and not part of
+    # the address is decided in code, where brackets can be counted. See extractor.trim_url.
     "url": re.compile(
-        r"https?://[^\s<>\"\'\)]{1,2000}(?:\([^\s<>\"\'\)]{0,2000}\))?[^\s<>\"\'\)\.,;:]{0,2000}"
+        r"https?://[^\s<>\"]{1,2000}+"
+    ),
+    # "(last visited Mar. 3, 2024)" after an address: the one place a document states the day its
+    # author looked at the page.
+    "url_visited": re.compile(
+        r"\s{0,3}\((?:last\s{1,2})?(?:visited|accessed|viewed)\s{1,2}(?:on\s{1,2})?"
+        r"([A-Z][a-z]{2,8}\.?\s{1,2}\d{1,2},\s{1,2}\d{4})\)"
+    ),
+    # A file extension alone at the start of the next line: the one case where an address broken
+    # by a PDF's layout can be rejoined without guessing ("...12.23.25." / "pdf.").
+    "url_wrapped_extension": re.compile(
+        r"\n[ \t]{0,8}((?:pdf|PDF|html?|aspx?|php|docx?|txt|xml|json))(?=[.,;:)\]]|[ \t]{0,8}(?:\n|\Z))"
     ),
 
     # Pincites

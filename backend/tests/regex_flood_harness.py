@@ -90,6 +90,12 @@ FLOODS = {
     "names-over-line-breaks": repeated("Alpha\nBeta v.\nGamma\n"),
     "bare-versus": repeated("v. "),
     "abbreviated-names": repeated("Nat'l Ass'n of Mfrs. v. U.S. Dep't of Lab. "),
+    # Web addresses: the characters an address may hold, and the punctuation trimmed off its end.
+    "url-then-punctuation": repeated("https://a.b/c.,;:) "),
+    "url-brackets": "https://a.b/" + repeated("(a))", SIZE - 12),
+    "url-dots": "https://a.b/" + "." * (SIZE - 12),
+    "url-wrapped-extension": repeated("https://a.b/c.\npdf.\n"),
+    "url-last-visited": repeated("https://a.b/c (last visited Mar. 3, 2024) "),
 }
 
 
@@ -216,6 +222,7 @@ def main() -> None:
         "section-signs", "open-brackets", "quotes", "newlines", "footnote-markers",
         "versus", "ampersands", "names-and-connectors", "names-then-versus", "names-with-suffixes",
         "names-over-line-breaks", "bare-versus", "abbreviated-names",
+        "url-then-punctuation", "url-brackets", "url-dots", "url-wrapped-extension", "url-last-visited",
     ]
     for stage_name, stage in stages():
         for flood_name in stage_floods:
