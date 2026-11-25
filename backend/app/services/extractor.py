@@ -14,7 +14,7 @@ from ..models.citation import Citation, CitationStatus, CitationType
 from ..utils import bluebook_patterns as bp
 from ..utils.bluebook_patterns import LEGAL_NAME_PREFIXES, PATTERNS
 from ..utils.text_normalize import normalize_text
-from .bluebook_rules import missing_fields
+from .bluebook_rules import BluebookFormatter, missing_fields
 from .citation_engine import ENGINE
 
 __all__ = ["CitationExtractor", "LEGAL_NAME_PREFIXES", "SpanIndex", "TooManyCitationsError"]
@@ -194,6 +194,16 @@ def trim_url(candidate: str) -> str:
         else:
             break
     return candidate[:end]
+
+
+def sections_of(match, original: str) -> dict:
+    """The section, year and publisher fields of a statute match that names its groups."""
+    section = collapse(original[match.start("sections"):match.end("sections")])
+    return {
+        "section": section + (" et seq." if match.groupdict().get("et_seq") else ""),
+        "year": int(match.group("year")) if match.group("year") else None,
+        "publisher": collapse(match.group("publisher")) if match.group("publisher") else None,
+    }
 
 
 def collapse(text: str) -> str:
@@ -418,6 +428,7 @@ class CitationExtractor:
         # Curly quotes and en dashes from phones and word processors defeat the
         # patterns. The replacement is one character for one character, so every
         # offset still points at the same place in the original document.
+        original = text or ""
         text = normalize_text(text)
         citations = []
 
@@ -436,7 +447,7 @@ class CitationExtractor:
 
         # Extract each citation type in priority order
         citations.extend(self._extract_cases(text, matched_spans))
-        citations.extend(self._extract_statutes(text, matched_spans))
+        citations.extend(self._extract_statutes(text, matched_spans, original))
         citations.extend(self._extract_law_reviews(text, matched_spans))
         citations.extend(self._extract_books(text, matched_spans))
         citations.extend(self._extract_short_forms(text, matched_spans))
@@ -479,7 +490,8 @@ class CitationExtractor:
         # formatted: it needs the abbreviated case name, which is the costly part of formatting.)
         citation.missing = missing_fields(citation)
         if not citation.missing:
-            citation.status = CitationStatus.COMPLETE
+            if citation.status != CitationStatus.NEEDS_VERIFICATION:
+                citation.status = CitationStatus.COMPLETE
         elif citation.status == CitationStatus.COMPLETE:
             citation.status = CitationStatus.INCOMPLETE
 
@@ -569,45 +581,97 @@ class CitationExtractor:
 
         return {"end": position}
 
-    def _extract_statutes(self, text: str, spans: list[tuple[int, int]]) -> list[Citation]:
-        """Extract statute citations."""
-        citations = []
+    def _extract_statutes(self, text: str, spans: SpanIndex, original: str | None = None) -> list[Citation]:
+        """Extract statute citations: the U.S. Code, every state's code, and session laws.
 
-        # U.S.C. citations
-        for match in PATTERNS["statute_usc"].finditer(text):
-            if self._overlaps(match.start(), match.end(), spans):
-                continue
+        A codified statute is found from its section sign. The code is read from the few words
+        in front of the sign (Table T1.3 for the states) and the sections from what follows:
+        every subsection, a range ("§§ 898-a to 898-e", "§§ 6-27-101 to -106"), a list, "et
+        seq." and the "(Publisher Year)" of the code. `original` is the text before its dashes
+        were made plain, so that a range is reported with the dash its author typed.
+        """
+        citations: list[Citation] = []
+        patterns = bp.STATUTE_PATTERNS
+        original = text if original is None else original
 
-            spans.append((match.start(), match.end()))
-
+        def add(start: int, end: int, **fields) -> None:
+            if spans.overlaps(start, end):
+                return
+            spans.append((start, end))
             citations.append(Citation(
                 type=CitationType.STATUTE,
-                status=CitationStatus.COMPLETE,
-                raw_text=match.group(0),
-                position_start=match.start(),
-                position_end=match.end(),
-                title_number=match.group(1),
-                code="U.S.C.",
-                section=match.group(2),
-                subsection=match.group(3) if match.lastindex >= 3 else None,
+                status=fields.pop("status", CitationStatus.INCOMPLETE),
+                raw_text=text[start:end],
+                position_start=start,
+                position_end=end,
+                **fields,
             ))
 
-        # State statute citations
-        for match in PATTERNS["statute_state"].finditer(text):
-            if self._overlaps(match.start(), match.end(), spans):
+        # Session laws first: the code in "(codified at ...)" is part of the session law's
+        # citation, not a second one.
+        if "Laws" in text or "Acts" in text or "Stat." in text or "Serv." in text:
+            for match in patterns["session_law"].finditer(text):
+                codified = match.group("codified")
+                add(
+                    match.start(), match.end(), form="session_law", year=int(match.group("year")),
+                    code=collapse(match.group("code")), page=collapse(match.group("what")),
+                    parallel_citations=[collapse(codified)] if codified else None,
+                )
+
+        if "Pub." in text:
+            for match in patterns["public_law_section"].finditer(text):
+                codified = match.group("codified")
+                add(
+                    match.start(), match.end(), form="public_law", code=f"Pub. L. No. {match.group('law')}",
+                    section=collapse(original[match.start("sections"):match.end("sections")]),
+                    volume=match.group("volume"), reporter="Stat.", page=match.group("page"), pincite=match.group("pin"),
+                    year=int(match.group("year")) if match.group("year") else None,
+                    parallel_citations=[collapse(codified)] if codified else None,
+                )
+
+        for sign in patterns["section_sign"].finditer(text):
+            if spans.overlaps(sign.start(), sign.end()):
                 continue
+            low = max(sign.start() - 110, spans.end_before(sign.start()), 0)
+            fields: dict = {}
+            head = patterns["head_usc"].search(text, low, sign.start())
+            if head:
+                written = head.group("code").replace(" ", "").replace(".", "").upper()
+                fields = {"title_number": head.group("title"), "code": {"USCA": "U.S.C.A.", "USCS": "U.S.C.S."}.get(written, "U.S.C.")}
+                start = head.start()
+            else:
+                head = patterns["head_state"].search(text, low, sign.start())
+                if head:
+                    code = collapse(head.group("code"))
+                    fields = {"code": code, "form": "state"}
+                    start = head.start("code")
+                    if head.group("title") and code.startswith(("Pa.", "Ill.")):
+                        fields["title_number"] = head.group("title")      # "42 Pa. Cons. Stat. § 9711"
+                        start = head.start()
+                    if head.group("unit") in ("tit.", "ch."):
+                        fields["title_number"] = head.group("unit_number")
+                        fields["form"] = "state_title" if head.group("unit") == "tit." else "state_chapter"
+                else:
+                    head = patterns["head_other"].search(text, low, sign.start())
+                    if not head:
+                        continue                   # a bare "§ 922(g)(9)": no code to cite it to
+                    fields = {"code": collapse(head.group("code")), "form": "state",
+                              "status": CitationStatus.NEEDS_VERIFICATION}
+                    start = head.start()
+            tail = patterns["sections_many" if len(sign.group()) > 1 else "sections_one"].match(text, sign.end())
+            if not tail:
+                continue
+            add(start, tail.end(), **fields, **sections_of(tail, original))
 
-            spans.append((match.start(), match.end()))
+        if "Comp." in text:
+            for match in patterns["illinois"].finditer(text):
+                add(match.start(), match.end(), form="no_sign", title_number=match.group("title"),
+                    code=collapse(match.group("code")), **sections_of(match, original))
 
-            citations.append(Citation(
-                type=CitationType.STATUTE,
-                status=CitationStatus.NEEDS_VERIFICATION,
-                raw_text=match.group(0),
-                position_start=match.start(),
-                position_end=match.end(),
-                code=match.group(1).strip(),
-                section=match.group(2),
-            ))
+        if any(style in text for style in bp.LOCAL_CODE_STYLES):
+            for match in patterns["local_style"].finditer(text):
+                add(match.start(), match.end(), form="state", code=bp.LOCAL_CODE_STYLES[match.group("code")],
+                    **sections_of(match, original))
 
         return citations
 
@@ -669,25 +733,57 @@ class CitationExtractor:
         return citations
 
     def _extract_books(self, text: str, spans: list[tuple[int, int]]) -> list[Citation]:
-        """Extract book citations."""
+        """Extract book citations.
+
+        The pattern is "Author, Title (Year)" and will take almost anything with a comma and a
+        year, so what it calls the author is checked: it must read as a name (the same reading
+        a party name gets, which also drops prose in front of it), and it may not be a code, a
+        reporter or a section sign. A legislative body as "author" is a committee print or
+        report described in prose: it is reported as legislative material, as written, and is
+        never set in a book's capitals.
+        """
         citations = []
 
         for match in PATTERNS["book"].finditer(text):
-            if self._overlaps(match.start(), match.end(), spans):
+            start = read_party_left(text, match.end(1), match.start(1))
+            if start is None:
+                continue
+            author = collapse(text[start:match.end(1)])
+            title = match.group(2).strip()
+            # (A pinpoint at the end of a title, "... Policies § 11.2", is not a section sign in
+            # the title: the formatter separates the two.)
+            if bp.NOT_AN_AUTHOR.search(author) or "§" in BluebookFormatter._split_pinpoint(title)[0]:
+                continue
+            if self._overlaps(start, match.end(), spans):
                 continue
 
-            spans.append((match.start(), match.end()))
+            spans.append((start, match.end()))
+            year = int(match.group(4)) if match.lastindex >= 4 else None
+
+            if bp.LEGISLATIVE_AUTHOR.search(author):
+                citations.append(Citation(
+                    type=CitationType.LEGISLATIVE,
+                    status=CitationStatus.INCOMPLETE,
+                    raw_text=text[start:match.end()],
+                    position_start=start,
+                    position_end=match.end(),
+                    author=author,
+                    title=title,
+                    year=year,
+                    form="described",
+                ))
+                continue
 
             citations.append(Citation(
                 type=CitationType.BOOK,
                 status=CitationStatus.COMPLETE,
-                raw_text=match.group(0),
-                position_start=match.start(),
+                raw_text=text[start:match.end()],
+                position_start=start,
                 position_end=match.end(),
-                author=match.group(1).strip(),
-                title=match.group(2).strip(),
+                author=author,
+                title=title,
                 edition=match.group(3) if match.lastindex >= 3 and match.group(3) else None,
-                year=int(match.group(4)) if match.lastindex >= 4 else None,
+                year=year,
             ))
 
         return citations

@@ -40,11 +40,12 @@ _PINS = rf"{_PIN}(?:,\s{{1,2}}{_PIN}){{0,5}}"
 _SECTION = r"\d(?:[0-9A-Za-z.:/\-]{0,28}[0-9A-Za-z])?(?:\([0-9A-Za-z]{1,5}\)){0,8}"
 # What may follow the first section: the end of a range ("to 898-e", "to -35", "-(c)", "through
 # 706") or the next item of a list (", 1346(a)(2)", "and 1367"). A list item may not be followed
-# by a capitalised word, which is how ", 134 Stat. 281" and ", 28 U.S.C." are left alone.
+# by a capitalised word, which is how ", 134 Stat. 281" and ", 28 U.S.C." are left alone (nor
+# may it stop short of the end of its own number to get round that).
 _SECTION_MORE = (
     rf"(?:\s{{0,2}}(?:-|\bto\b|\bthrough\b)\s{{0,2}}(?:-?{_SECTION}|(?:\([0-9A-Za-z]{{1,5}}\)){{1,8}})"
-    rf"|,?\s{{1,2}}and\s{{1,2}}{_SECTION}(?!\s{{1,2}}[A-Z])"
-    rf"|,\s{{1,2}}{_SECTION}(?!\s{{1,2}}[A-Z]))"
+    rf"|,?\s{{1,2}}and\s{{1,2}}{_SECTION}(?![0-9A-Za-z]|\s{{1,2}}[A-Z])"
+    rf"|,\s{{1,2}}{_SECTION}(?![0-9A-Za-z]|\s{{1,2}}[A-Z]))"
 )
 _SECTIONS = rf"{_SECTION}(?:{_SECTION_MORE}){{0,8}}"
 
@@ -63,21 +64,6 @@ PATTERNS: dict[str, Pattern] = {
     # reported missing.
     "case_tail_no_year": re.compile(
         rf",?\s{{1,3}}{_REPORTER_CITE}(?!\s{{0,3}}[\d,]{{0,12}}\s{{0,3}}\()"
-    ),
-
-    # Federal statutes: Title U.S.C. § Section
-    # The lookbehind keeps a match from starting in the middle of a run of digits. Without it a
-    # failed match retried from every digit of the run, and each retry read to the end of it:
-    # quadratic, so 32,000 digits took 7 s and 100,000 never finished, with the interpreter lock
-    # held the whole time (nothing else on the server could run).
-    "statute_usc": re.compile(
-        r"(?<!\d)(\d+)\s+U\.?S\.?C\.?\s*§+\s*(\d+[a-z]?)(?:\(([^)]+)\))?"
-    ),
-
-    # State statutes (generic pattern)
-    "statute_state": re.compile(
-        r"([A-Z][a-z]{1,30}\.?\s+(?:Rev\.?\s+)?(?:Code|Stat)\.?\s*(?:Ann\.?)?\s*)"
-        r"§+\s*(\d+(?:[-.]\d+)*)"
     ),
 
     # Law review articles: Author, Title, Volume Journal Page (Year)
@@ -767,3 +753,206 @@ NAME_WORD = re.compile(r"(?:[A-Z]|[0-9]{1,10}[A-Z]|[a-z]{1,2}[A-Z])[A-Za-z0-9.'&
 
 # "v." between two names, as a token of its own. Lower case only: "V." is an initial.
 V_ANCHOR = re.compile(r"(?<=\s)v\.?(?=\s)")
+
+
+# =============================================================================================
+# Statutes
+# =============================================================================================
+#
+# A statute is found from its section sign: the code is read from the few words in front of the
+# sign and the sections from what follows it. That keeps the search cheap (a document has few
+# section signs and many capital letters) and means a code's name never has to be searched for
+# through the whole text.
+
+# --- Table T1.3: each state's statutory compilations ------------------------------------------
+#
+# The names as the Bluebook abbreviates them, official and annotated. "{subject}" is where a
+# subject-matter code names its subject ("Cal. Penal Code", "N.Y. Gen. Bus. Law", "Tex. Penal
+# Code Ann.", "Md. Code Ann., Cts. & Jud. Proc."). "{title} " in front marks the two states
+# that put a title or chapter number before the code ("42 Pa. Cons. Stat.", "815 Ill. Comp.
+# Stat."). Codes cited by title or chapter after the name ("Del. Code Ann. tit. 10, § 3930",
+# "Mass. Gen. Laws ch. 140, § 131") need nothing here: "tit." and "ch." are read wherever they
+# appear.
+STATE_CODES: dict[str, tuple[str, ...]] = {
+    "Ala.": ("Ala. Code",),
+    "Alaska": ("Alaska Stat. Ann.", "Alaska Stat."),
+    "Ariz.": ("Ariz. Rev. Stat. Ann.", "Ariz. Rev. Stat."),
+    "Ark.": ("Ark. Code Ann.",),
+    "Cal.": ("Cal. {subject} Code",),
+    "Colo.": ("Colo. Rev. Stat. Ann.", "Colo. Rev. Stat."),
+    "Conn.": ("Conn. Gen. Stat. Ann.", "Conn. Gen. Stat."),
+    "Del.": ("Del. Code Ann.", "Del. Code"),
+    "D.C.": ("D.C. Code Ann.", "D.C. Code"),
+    "Fla.": ("Fla. Stat. Ann.", "Fla. Stat."),
+    "Ga.": ("Ga. Code Ann.",),
+    "Haw.": ("Haw. Rev. Stat. Ann.", "Haw. Rev. Stat."),
+    "Idaho": ("Idaho Code Ann.", "Idaho Code"),
+    "Ill.": ("{title} Ill. Comp. Stat. Ann.", "{title} Ill. Comp. Stat."),
+    "Ind.": ("Ind. Code Ann.", "Ind. Code"),
+    "Iowa": ("Iowa Code Ann.", "Iowa Code"),
+    "Kan.": ("Kan. Stat. Ann.",),
+    "Ky.": ("Ky. Rev. Stat. Ann.",),
+    "La.": ("La. Rev. Stat. Ann.", "La. Stat. Ann.", "La. {subject} Code Ann."),
+    "Me.": ("Me. Rev. Stat. Ann.", "Me. Rev. Stat.", "Me. Stat."),
+    "Md.": ("Md. Code Ann., {subject}", "Md. Code, {subject}"),
+    "Mass.": ("Mass. Gen. Laws Ann.", "Mass. Gen. Laws", "Mass. Ann. Laws"),
+    "Mich.": ("Mich. Comp. Laws Ann.", "Mich. Comp. Laws", "Mich. Stat. Ann."),
+    "Minn.": ("Minn. Stat. Ann.", "Minn. Stat."),
+    "Miss.": ("Miss. Code Ann.",),
+    "Mo.": ("Mo. Rev. Stat.", "Mo. Ann. Stat."),
+    "Mont.": ("Mont. Code Ann.",),
+    "Neb.": ("Neb. Rev. Stat. Ann.", "Neb. Rev. Stat."),
+    "Nev.": ("Nev. Rev. Stat. Ann.", "Nev. Rev. Stat."),
+    "N.H.": ("N.H. Rev. Stat. Ann.",),
+    "N.J.": ("N.J. Stat. Ann.", "N.J. Rev. Stat."),
+    "N.M.": ("N.M. Stat. Ann.",),
+    "N.Y.": ("N.Y. {subject} Law",),
+    "N.C.": ("N.C. Gen. Stat. Ann.", "N.C. Gen. Stat."),
+    "N.D.": ("N.D. Cent. Code Ann.", "N.D. Cent. Code"),
+    "Ohio": ("Ohio Rev. Code Ann.",),
+    "Okla.": ("Okla. Stat. Ann.", "Okla. Stat."),
+    "Or.": ("Or. Rev. Stat. Ann.", "Or. Rev. Stat."),
+    "Pa.": ("{title} Pa. Stat. and Cons. Stat. Ann.", "{title} Pa. Cons. Stat. Ann.", "{title} Pa. Cons. Stat.",
+            "{title} Pa. Stat. Ann."),
+    "R.I.": ("R.I. Gen. Laws Ann.", "R.I. Gen. Laws"),
+    "S.C.": ("S.C. Code Ann.",),
+    "S.D.": ("S.D. Codified Laws",),
+    "Tenn.": ("Tenn. Code Ann.",),
+    "Tex.": ("Tex. {subject} Code Ann.", "Tex. {subject} Code", "Tex. Rev. Civ. Stat. Ann."),
+    "Utah": ("Utah Code Ann.", "Utah Code"),
+    "Vt.": ("Vt. Stat. Ann.",),
+    "Va.": ("Va. Code Ann.",),
+    "Wash.": ("Wash. Rev. Code Ann.", "Wash. Rev. Code"),
+    "W. Va.": ("W. Va. Code Ann.", "W. Va. Code"),
+    "Wis.": ("Wis. Stat. Ann.", "Wis. Stat."),
+    "Wyo.": ("Wyo. Stat. Ann.",),
+}
+
+# The way a state's own courts and lawyers write its code, and the Bluebook name it stands for.
+# These are written without a section sign as often as with one ("R.C. 2923.12").
+LOCAL_CODE_STYLES: dict[str, str] = {
+    "R.C.": "Ohio Rev. Code Ann.",
+    "O.R.C.": "Ohio Rev. Code Ann.",
+    "RCW": "Wash. Rev. Code",
+    "C.R.S.": "Colo. Rev. Stat.",
+    "O.C.G.A.": "Ga. Code Ann.",
+    "N.J.S.A.": "N.J. Stat. Ann.",
+    "ORS": "Or. Rev. Stat.",
+    "A.R.S.": "Ariz. Rev. Stat. Ann.",
+    "NRS": "Nev. Rev. Stat.",
+    "KRS": "Ky. Rev. Stat. Ann.",
+    "K.S.A.": "Kan. Stat. Ann.",
+    "T.C.A.": "Tenn. Code Ann.",
+    "M.C.L.": "Mich. Comp. Laws",
+    "N.C.G.S.": "N.C. Gen. Stat.",
+}
+
+_GAP = r"\s{1,2}"          # between two words of one citation: a space, or a PDF's line break
+# The subject of a subject-matter code: up to five abbreviated words.
+_SUBJECT = rf"[A-Z][A-Za-z.&']{{0,15}}(?:{_GAP}(?:&{_GAP})?[A-Z][A-Za-z.&']{{0,15}}){{0,4}}"
+_SUBSECTIONS = r"(?:\([0-9A-Za-z]{1,5}\)){0,8}"
+# "(West 2022)", "(McKinney 2021)", "(2023)": the publisher, if any, and the year of the code.
+_CODE_YEAR = (
+    rf"(?:\s{{0,2}}\((?:(?P<publisher>[A-Z][A-Za-z.&]{{1,20}}(?:{_GAP}[A-Z&][A-Za-z.&]{{0,20}}){{0,3}}){_GAP})?"
+    r"(?P<year>(?:1[6-9]|20)\d\d)\))?"
+)
+
+
+def _spaced(name: str) -> str:
+    """A code's name as a pattern: its words, with any white space between them."""
+    return _GAP.join(re.escape(word) for word in name.split())
+
+
+def _code_alternation() -> str:
+    names = sorted({name for names in STATE_CODES.values() for name in names}, key=lambda n: (-len(n), n))
+    parts = []
+    for name in names:
+        name = name.replace("{title} ", "")
+        parts.append(_spaced(name).replace(re.escape("{subject}"), _SUBJECT))
+    return "|".join(parts)
+
+
+def _state_alternation() -> str:
+    names = sorted(set(STATE_ABBREVIATIONS.values()), key=lambda n: (-len(n), n))
+    return "|".join(_spaced(n) for n in names)
+
+
+_STATES = _state_alternation()
+
+STATUTE_PATTERNS: dict[str, Pattern] = {
+    "section_sign": re.compile(r"§{1,3}"),
+
+    # What stands in front of the section sign. Each is applied to the few characters before
+    # one sign and must reach it (\Z is the sign's position), so none is ever searched for
+    # through a document.
+    "head_usc": re.compile(
+        rf"(?<![\w.])(?P<title>\d{{1,3}}){_GAP}(?P<code>U\.?\s?S\.?\s?C\.?(?:\s?[AS]\.)?)\s{{0,2}}\Z"
+    ),
+    "head_state": re.compile(
+        rf"(?<![\w.])(?:(?P<title>\d{{1,4}}){_GAP})?(?P<code>{_code_alternation()})"
+        rf"(?:,?{_GAP}(?P<unit>tit\.|ch\.|art\.){_GAP}(?P<unit_number>[0-9A-Za-z.\-]{{1,10}}),)?\s{{0,2}}\Z"
+    ),
+    # A code this table does not know: a municipal code, or a state's written another way. It
+    # is reported as written and marked for checking.
+    "head_other": re.compile(
+        rf"(?<![\w.])(?P<code>[A-Z][a-z]{{1,30}}\.?{_GAP}(?:Rev\.?{_GAP})?(?:Code|Stat)\.?(?:{_GAP}Ann\.?)?)\s{{0,2}}\Z"
+    ),
+
+    # What follows the sign. One section (with a range of its subsections, "553(b)-(c)") after
+    # "§"; a range or a list after "§§". Then "et seq." and the year of the code.
+    "sections_one": re.compile(
+        rf"\s{{0,3}}(?P<sections>{_SECTION}(?:\s{{0,2}}-\s{{0,2}}(?:\([0-9A-Za-z]{{1,5}}\)){{1,8}})?)"
+        rf"(?P<et_seq>{_GAP}et{_GAP}seq\.)?{_CODE_YEAR}"
+    ),
+    "sections_many": re.compile(
+        rf"\s{{0,3}}(?P<sections>{_SECTIONS})(?P<et_seq>{_GAP}et{_GAP}seq\.)?{_CODE_YEAR}"
+    ),
+
+    # Illinois has no section sign: "815 Ill. Comp. Stat. 505/2DDDD (2023)".
+    "illinois": re.compile(
+        rf"(?<![\w.])(?P<title>\d{{1,4}}){_GAP}(?P<code>Ill\.{_GAP}Comp\.{_GAP}Stat\.(?:{_GAP}Ann\.)?){_GAP}"
+        rf"(?P<sections>\d{{1,4}}/[0-9A-Za-z.\-]{{0,18}}[0-9A-Za-z]{_SUBSECTIONS}){_CODE_YEAR}"
+    ),
+    # A state's own style, with or without the sign: "R.C. 2923.12", "RCW 9A.32.030", "O.C.G.A.
+    # § 16-5-1". The section must have a full stop, hyphen or colon in it, which every state's
+    # section numbers do and "ORS 5" does not.
+    "local_style": re.compile(
+        rf"(?<![\w.])(?P<code>{'|'.join(re.escape(k) for k in sorted(LOCAL_CODE_STYLES, key=len, reverse=True))})"
+        rf"{_GAP}(?:§{{1,2}}\s{{0,2}})?(?P<sections>\d[0-9A-Za-z]{{0,6}}[.:\-][0-9A-Za-z.:\-]{{0,20}}[0-9A-Za-z]{_SUBSECTIONS})"
+        rf"{_CODE_YEAR}"
+    ),
+
+    # A federal session law cited to one of its sections: "Pub. L. No. 116-136, § 2102, 134
+    # Stat. 281, 313 (2020) (codified at 15 U.S.C. § 9001)". (Without the section it is one of
+    # the data-driven kinds.) Read whole, so that the code section in its last parenthetical is
+    # not mistaken for the citation.
+    "public_law_section": re.compile(
+        rf"Pub\.{_GAP}L\.{_GAP}(?:No\.{_GAP})?(?P<law>\d{{2,3}}-\d{{1,4}}),{_GAP}§{{1,2}}\s{{0,2}}(?P<sections>{_SECTIONS}),"
+        rf"{_GAP}(?P<volume>\d{{1,3}}){_GAP}Stat\.{_GAP}(?P<page>\d{{1,5}})(?:,{_GAP}(?P<pin>\d{{1,5}}(?:-\d{{1,5}})?))?"
+        rf"(?:\s{{0,2}}\((?P<year>(?:1[7-9]|20)\d\d)\))?"
+        rf"(?:\s{{0,2}}\(codified{_GAP}(?:as{_GAP}amended{_GAP})?at{_GAP}(?P<codified>[^()]{{1,120}})\))?"
+    ),
+
+    # Session laws (Table T1.3 again): "2023 Haw. Sess. Laws Act 28", "2025 Conn. Pub. Acts No.
+    # 25-43", "2011 Tex. Gen. Laws 123", with the code section they became if the document
+    # says: "(codified at Haw. Rev. Stat. ch. 134, pt. VI)".
+    "session_law": re.compile(
+        rf"(?<![\w.])(?P<year>(?:1[7-9]|20)\d\d){_GAP}(?P<code>(?:{_STATES}){_GAP}"
+        rf"(?:Sess\.{_GAP}Laws|Sess\.{_GAP}Law{_GAP}Serv\.|Legis\.{_GAP}Serv\.|Pub\.{_GAP}Acts|Pub\.{_GAP}Laws|"
+        rf"Gen\.{_GAP}Laws|Acts{_GAP}&{_GAP}Resolves|Acts|Laws)|(?:Cal\.|Nev\.){_GAP}Stat\.)"
+        rf"{_GAP}(?P<what>(?:(?:Act|ch\.|No\.|Pub\.{_GAP}Act){_GAP})?[0-9][0-9A-Za-z\-]{{0,15}})"
+        rf"(?:\s{{0,2}}\(codified{_GAP}(?:as{_GAP}amended{_GAP})?at{_GAP}(?P<codified>[^()]{{1,120}})\))?"
+    ),
+}
+
+# A book's "author" that is really a code, a reporter or a legislative body. The book pattern
+# is "Author, Title (Year)" and will take almost anything with a comma and a year: "Md. Code
+# Ann., Cts. & Jud. Proc. §§ 3-2501 to 3-2504 (2024)" was reported as a book and set in
+# capitals.
+NOT_AN_AUTHOR = re.compile(
+    r"§|\b(?:Code|Stat\.|Stats\.|Ann\.|Laws|Sess\.|Reg\.|Rptr\.|Supp\.|Cir\.)(?!\w)|U\.S\.C|C\.F\.R|Pub\. L\.|"
+    r"\b(?:F\.|P\.|A\.|N\.E\.|N\.W\.|S\.E\.|S\.W\.|So\.) ?\d[dt]"
+)
+LEGISLATIVE_AUTHOR = re.compile(
+    r"\b(?:Senate|House|Congress|Cong\.|Committee|Comm\.|Subcommittee|Subcomm\.|Legislature|Assembly)(?!\w)"
+)

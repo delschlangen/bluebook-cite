@@ -66,9 +66,10 @@ _HISTORY_PHRASE = re.compile(
 )
 # More than one docket number: "14-1290, 14-1292", "08-4241/-4243", "22-2908(L)/22-2972".
 _SEVERAL_DOCKETS = re.compile(r"[,/&]|\band\b")
-# More than one section: a list or a range written with a word or an en dash. A hyphen alone
-# cannot be told from the hyphen inside one section number ("6-27-101"), so it does not count.
-_SEVERAL_SECTIONS = re.compile(r",|–|\bto\b|\bthrough\b|\band\b")
+# More than one section: a list or a range of section NUMBERS written with a word or an en dash
+# ("553(b)–(c)" is a range within one section and takes one sign). A hyphen alone cannot be
+# told from the hyphen inside one section number ("6-27-101"), so it does not count.
+_SEVERAL_SECTIONS = re.compile(r"(?:,|–|\bto\b|\bthrough\b|\band\b) {0,2}-?\d")
 _SECTION_SIGNS = re.compile(r"§{2}")
 
 
@@ -102,6 +103,8 @@ def missing_fields(citation: Citation) -> list[str]:
     if citation.type == CitationType.STATUTE:
         if citation.form == "session_law":
             return lacks("year", "code", "page")
+        if citation.form == "public_law":
+            return lacks("code", "section", "volume", "page")
         if (citation.code or "U.S.C.").replace(" ", "").upper().startswith("U.S.C"):
             return lacks("title_number", "section")
         # Rule 12.3.2: a state code is cited with the year of the code.
@@ -112,6 +115,10 @@ def missing_fields(citation: Citation) -> list[str]:
         return lacks("author", "title", "year")
     if citation.type == CitationType.WEBSITE:
         return lacks("title", "url")
+    if citation.type == CitationType.LEGISLATIVE:
+        # A committee print or report described in prose: its citation needs, at the least, the
+        # number of the Congress, which a description does not give.
+        return ["congress"]
     return []
 
 
@@ -325,6 +332,15 @@ class BluebookFormatter:
 
         if form == "session_law":
             base = " ".join(str(p) for p in (year, code, citation.page) if p)
+            for parallel in citation.parallel_citations or []:
+                base += f" (codified at {parallel})"
+            return base
+        if form == "public_law":
+            base = f"{code}, {sign} {section}, {citation.volume} Stat. {citation.page}"
+            if citation.pincite:
+                base += f", {citation.pincite}"
+            if year:
+                base += f" ({year})"
             for parallel in citation.parallel_citations or []:
                 base += f" (codified at {parallel})"
             return base

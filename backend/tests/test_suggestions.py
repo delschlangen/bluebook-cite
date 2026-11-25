@@ -124,7 +124,11 @@ class TestMissingIsAccurate:
         for c in analysed(DOCUMENT):
             if c.is_short_form or c.kind:
                 continue
-            assert c.suggested_correction.endswith(".") == (c.status == CitationStatus.COMPLETE), c.suggested_correction
+            if c.status == CitationStatus.COMPLETE:
+                assert c.suggested_correction.endswith("."), c.suggested_correction
+            else:
+                # nothing is added to it: it ends as the citation's own last word ends
+                assert c.suggested_correction.endswith("et seq.") or not c.suggested_correction.endswith(".")
             assert bool(c.missing) == (c.status != CitationStatus.COMPLETE)
 
     def test_missing_is_brought_up_to_date_when_a_lookup_fills_a_gap(self):

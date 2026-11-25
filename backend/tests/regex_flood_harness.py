@@ -100,6 +100,22 @@ FLOODS = {
     "blank-lines": repeated("\n   \t \n"),
     "notes-and-blank-lines": repeated("[^1] A v. B\n\nC v. D\n"),
     "newline-then-spaces": repeated("\n" + " " * 250 + "a"),
+    # Statutes: state-code names, title and chapter forms, section ranges and lists, session laws.
+    "state-code": repeated("Cal. Civ. Code § 1714(a) (West 2020); "),
+    "state-code-names": repeated("N.Y. Gen. Bus. Law Md. Code Ann., Cts. & Jud. Proc. Tex. Penal Code Ann. "),
+    "subject-words": "Cal. " + repeated("Abc. & Def. ", SIZE - 14) + " Code § 1",
+    "title-section": repeated("Del. Code Ann. tit. 10, § 3930 (2022); "),
+    "tit-run": repeated("tit. 10, § "),
+    "section-ranges": repeated("§§ 6-27-101 to -106, 59.1-148.5 through -148.8 and 3-2501 "),
+    "section-list": "42 U.S.C. §§ " + repeated("1331, ", SIZE - 13),
+    "section-hyphens": "42 U.S.C. §§ 1" + repeated("-1", SIZE - 14),
+    "subsections": "42 U.S.C. § 1" + repeated("(a)", SIZE - 13),
+    "illinois": repeated("815 Ill. Comp. Stat. 505/2DDDD (2023) "),
+    "local-code-style": repeated("R.C. 2923.12 RCW 9A.32.030 "),
+    "session-law": repeated("2023 Haw. Sess. Laws Act 28 (codified at Haw. Rev. Stat. ch. 134, pt. VI) "),
+    "years": repeated("2023 "),
+    "public-law-section": repeated("Pub. L. No. 116-136, § 2102, 134 Stat. 281, 313 (2020) "),
+    "book-shaped": repeated("Alpha Beta, Gamma Delta (2020). "),
 }
 
 
@@ -228,6 +244,9 @@ def main() -> None:
         "names-over-line-breaks", "bare-versus", "abbreviated-names",
         "url-then-punctuation", "url-brackets", "url-dots", "url-wrapped-extension", "url-last-visited",
         "blank-lines", "notes-and-blank-lines", "newline-then-spaces",
+        "state-code", "state-code-names", "subject-words", "title-section", "tit-run", "section-ranges",
+        "section-list", "section-hyphens", "subsections", "illinois", "local-code-style", "session-law", "years",
+        "public-law-section", "book-shaped",
     ]
     for stage_name, stage in stages():
         for flood_name in stage_floods:
