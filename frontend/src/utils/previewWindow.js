@@ -56,12 +56,48 @@ export function snapToWhitespace(text, index, forward) {
   return alignToCodePoint(text, index, false);
 }
 
-/** Citations and claims as one list of highlights, in document order. */
-export function buildHighlights(citations, unsourcedClaims) {
+const SURROGATES = /[\ud800-\udfff]/;
+// What a text with no surrogate in it needs: nothing. One shared function, so no table is built.
+const SAME_INDEX = (index) => index;
+
+/**
+ * The server counts positions in code points (Python indexes a string by them); this page slices
+ * UTF-16 units, in which an emoji, a rare CJK character or a mathematical italic letter is two.
+ * Used as they came, every such character before a citation moved its highlight one character
+ * to the left. Returns a function that turns a code-point index into a UTF-16 index, built in one
+ * pass over the text; 0 stays 0, the index just past the last character is `text.length`, and
+ * anything beyond is clamped to it. A text with no surrogates needs no conversion at all.
+ */
+export function codePointIndexer(text) {
+  if (!text || !SURROGATES.test(text)) return SAME_INDEX;
+  // starts[i] is where the i-th code point begins; the one after the last is text.length.
+  const starts = new Uint32Array(text.length + 1);
+  let count = 0;
+  for (let unit = 0; unit < text.length; count += 1) {
+    starts[count] = unit;
+    const high = text.charCodeAt(unit);
+    const low = unit + 1 < text.length ? text.charCodeAt(unit + 1) : 0;
+    unit += high >= 0xd800 && high <= 0xdbff && low >= 0xdc00 && low <= 0xdfff ? 2 : 1;
+  }
+  starts[count] = text.length;
+  return (index) => {
+    if (index <= 0) return 0;
+    if (index >= count) return text.length;
+    return starts[Math.floor(index)];
+  };
+}
+
+/**
+ * Citations and claims as one list of highlights, in document order. `text` is the text the
+ * positions are into; with it, positions counted in code points (the server's) are converted to
+ * the UTF-16 indexes the rest of this file slices with. Without it they are used as they are.
+ */
+export function buildHighlights(citations, unsourcedClaims, text) {
   const list = [];
+  const toUnit = codePointIndexer(text);
   const add = (start, end, rest) => {
     // A position the server left out would be NaN after the sort and break its order.
-    if (Number.isFinite(start) && Number.isFinite(end)) list.push({ start, end, ...rest });
+    if (Number.isFinite(start) && Number.isFinite(end)) list.push({ start: toUnit(start), end: toUnit(end), ...rest });
   };
   (citations || []).forEach((c) =>
     add(c.position_start, c.position_end, { type: 'citation', status: c.status })

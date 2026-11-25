@@ -142,17 +142,21 @@ function parseParenthetical(text) {
 }
 
 /**
- * Read a case or a U.S. Code citation, and say how much of the input it accounts for.
- * Returns null when nothing recognisable is present.
+ * Read a case or a U.S. Code citation, and say where it is in the input (`start`) and how much of
+ * it the citation accounts for (`length`). Returns null when nothing recognisable is present.
  */
 export function parseCitationWithSpan(input) {
-  const text = (input || '').trim();
+  const raw = input || '';
+  const text = raw.trim();
   if (!text) return null;
+  // Where the trimmed text begins in what was passed in, so `start` is an offset into `input`.
+  const lead = raw.length - raw.trimStart().length;
 
   const complete = CASE_COMPLETE.exec(text);
   if (complete) {
     const { court, year } = parseParenthetical(complete[7]);
     return {
+      start: lead + complete.index,
       length: complete[0].length,
       parsed: {
         type: 'case',
@@ -170,6 +174,7 @@ export function parseCitationWithSpan(input) {
   const statute = STATUTE.exec(text);
   if (statute) {
     return {
+      start: lead + statute.index,
       length: statute[0].length,
       parsed: {
         type: 'statute',
@@ -184,6 +189,7 @@ export function parseCitationWithSpan(input) {
   const noYear = CASE_NO_YEAR.exec(text);
   if (noYear) {
     return {
+      start: lead + noYear.index,
       length: noYear[0].length,
       parsed: {
         type: 'case',
@@ -201,6 +207,7 @@ export function parseCitationWithSpan(input) {
   const partial = CASE_INCOMPLETE.exec(text);
   if (partial) {
     return {
+      start: lead + partial.index,
       length: partial[0].length,
       parsed: {
         type: 'case',
@@ -430,6 +437,95 @@ function fromLegacy(text, parsed, style) {
   };
 }
 
+// --- More than one citation in a paste ---------------------------------------------------------
+//
+// Only one citation is formatted from a paste: the one that accounts for most of the text. A
+// footnote often holds several, and a result that shows one of them as "ready to use" reads as if
+// the whole paste was handled. So the text on either side of the one that was used is read with
+// the same readers, and anything citation-shaped found there is reported by name. Prose around a
+// single citation finds nothing, so it does not trigger this.
+
+const MASK = '\u0000';
+// More than this many are named; the rest are counted.
+const NAMED_OTHERS = 3;
+const NAME_LIMIT = 90;
+
+const mask = (text, start, end) => text.slice(0, start) + MASK.repeat(end - start) + text.slice(end);
+
+/** Every citation-shaped stretch of `piece`, as spans in the coordinates of the whole paste. */
+function citationSpans(piece, offset) {
+  const spans = [];
+  // The engine: all the kinds it knows, scanned the way a document is.
+  ENGINE.findAll(piece).forEach((m) => spans.push({ start: offset + m.start, end: offset + m.end }));
+  // The older readers find one at a time; blank each one out and look again for the next.
+  let rest = piece;
+  for (let n = 0; n < 25; n += 1) {
+    const read = parseCitationWithSpan(rest);
+    if (!read) break;
+    spans.push({ start: offset + read.start, end: offset + read.start + read.length });
+    rest = mask(rest, read.start, read.start + read.length);
+  }
+  return spans;
+}
+
+// A signal in front of a citation ("See", "Cf.") is not part of it. "In re ..." is a case name.
+const LEADING_SIGNAL = /^(?:(?:see also|see|but see|but cf\.|cf\.|compare|accord|contra|e\.g\.,?|in(?!\s+re\b))\s+)+/i;
+// "(c)(1)": the subsections the older statute reader leaves off the end of what it matched.
+const SUBSECTIONS = /^(?:\([A-Za-z0-9]{1,4}\))+/;
+
+/** The text of `span`, as the person typed it, short enough to put in a sentence. */
+function nameOf(text, span) {
+  const reach = SUBSECTIONS.exec(text.slice(span.end, span.end + 40));
+  const raw = text.slice(span.start, span.end + (reach ? reach[0].length : 0));
+  const clean = raw
+    .replace(/\s+/g, ' ')
+    .replace(/^[\s,;:.]+|[\s,;:]+$/g, '')
+    .replace(LEADING_SIGNAL, '');
+  return clean.length > NAME_LIMIT ? `${clean.slice(0, NAME_LIMIT - 1).trimEnd()}\u2026` : clean;
+}
+
+/**
+ * What else in the paste looks like a citation, once the one at `span` is set aside:
+ * { used, others, more } or null. `used` is the text of the citation that was formatted,
+ * `others` (at most three) the ones that were not, `more` how many further ones there are.
+ */
+export function otherCitations(text, span) {
+  const spans = [
+    ...citationSpans(text.slice(0, span.start), 0),
+    ...citationSpans(text.slice(span.end), span.end),
+  ].sort((a, b) => a.start - b.start || a.end - b.end);
+  // The two readers can both find the same citation; keep it once.
+  const merged = [];
+  spans.forEach((candidate) => {
+    const last = merged[merged.length - 1];
+    if (last && candidate.start < last.end) last.end = Math.max(last.end, candidate.end);
+    else merged.push({ ...candidate });
+  });
+  const names = merged.map((m) => nameOf(text, m)).filter(Boolean);
+  if (names.length === 0) return null;
+  return {
+    used: nameOf(text, span),
+    others: names.slice(0, NAMED_OTHERS),
+    more: Math.max(0, names.length - NAMED_OTHERS),
+  };
+}
+
+/** The sentence that says which citation was formatted and which were left out. */
+export function partialMessage({ used, others, more }) {
+  const list = others.map((name) => `\u201c${name}\u201d`).join('; ');
+  const rest = more > 0 ? `; and ${more} more` : '';
+  return (
+    `Your paste has more than one citation. Only \u201c${used}\u201d was formatted. ` +
+    `Not formatted: ${list}${rest}. Paste them one at a time, or use Check a document.`
+  );
+}
+
+/** `result`, marked `partial` when the paste holds citations besides the one it is about. */
+function withOthers(result, text, span) {
+  const partial = otherCitations(text, span);
+  return partial ? { ...result, partial } : result;
+}
+
 /**
  * The local half of /api/repair. Same response shape, so the UI renders either
  * without branching.
@@ -449,8 +545,13 @@ export function repairLocally(input, style = 'law_review') {
   const legacyLength = legacy ? legacy.length : -1;
 
   // Whichever reading accounts for more of what was pasted wins. The engine wins ties.
-  if (engineMatch && engineLength >= legacyLength) return fromEngine(text, engineMatch, style);
-  if (legacy) return fromLegacy(text, legacy.parsed, style);
+  if (engineMatch && engineLength >= legacyLength) {
+    return withOthers(fromEngine(text, engineMatch, style), text, engineMatch);
+  }
+  if (legacy) {
+    const span = { start: legacy.start, end: legacy.start + legacy.length };
+    return withOthers(fromLegacy(text, legacy.parsed, style), text, span);
+  }
 
   return {
     ...baseResult(text, style),

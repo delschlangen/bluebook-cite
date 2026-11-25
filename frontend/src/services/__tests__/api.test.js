@@ -8,9 +8,11 @@ import {
   analyzeDocument,
   analyzeTimeoutMs,
   checkHealth,
+  diagnose,
   explainNetworkFailure,
   formatCitation,
   getLimits,
+  lookupCitation,
   plainStatusMessage,
   repairCitation,
   resetServerKnowledge,
@@ -18,6 +20,12 @@ import {
   uploadDocument,
   uploadTimeoutMs,
 } from '../api';
+import {
+  ambiguousReply,
+  incompleteReply,
+  resolvedReply,
+  unparseableReply,
+} from '../../test/repairReplies';
 
 const MB = 1024 * 1024;
 
@@ -281,10 +289,16 @@ describe('explainNetworkFailure: a crash, a dropped request and an outage are no
     await checkHealth();
   }
 
-  it('a different process id means the server restarted, and the message does not blame the document', async () => {
+  // What a failed request carries: sent at, failed at, and the id the page knew when it was sent.
+  const sentAfter = (ranMs, { idAgeMs = 100, bootId = 'boot-A' } = {}) => {
+    const at = Date.now();
+    return { at, failedAt: at + ranMs, bootId, bootIdSeenAt: at - idAgeMs };
+  };
+
+  it('a different process id, learned just before a request that then ran for a while, means the server restarted while working on the document', async () => {
     await seen('boot-A');
     vi.stubGlobal('fetch', async () => jsonResponse({ boot_id: 'boot-B' }));
-    const message = await explainNetworkFailure('Failed to analyze document', quick);
+    const message = await explainNetworkFailure('Failed to analyze document', { ...quick, sent: sentAfter(4000) });
     expect(message).toBe(
       'Failed to analyze document: the server restarted while working on your document. That can ' +
         'happen when the document is very large, or when the server was updated at that moment. ' +
@@ -366,11 +380,21 @@ describe('the id the page compares with is the one seen just before the request 
     expect(await explainNetworkFailure('x', quick)).not.toContain('restarted');
   });
 
-  it('still catches a restart that happened after the last response', async () => {
+  it('still catches a restart that happened after the last response, when the request that failed ran for a while', async () => {
+    vi.useFakeTimers();
     vi.stubGlobal('fetch', async () => withHeader('boot-A', { document_id: 'd' }));
     await uploadDocument({ name: 'a.txt', size: 1 });
+    // The next request, sent at once, is cut off after four seconds.
+    vi.stubGlobal('fetch', () => new Promise((_resolve, reject) => setTimeout(() => reject(new TypeError('reset')), 4000)));
+    const failing = analyzeDocument('d', 't', 'x').catch((e) => e);
+    await vi.advanceTimersByTimeAsync(4000);
+    const failure = await failing;
+    expect(failure.offline).toBe(true);
+    expect(failure.sent.bootId).toBe('boot-A');
     vi.stubGlobal('fetch', async () => withHeader('boot-B', { boot_id: 'boot-B' }));
-    expect(await explainNetworkFailure('x', quick)).toContain('restarted while working on your document');
+    expect(await explainNetworkFailure('x', { ...quick, sent: failure.sent })).toContain(
+      'restarted while working on your document'
+    );
   });
 
   it('is refreshed by every successful /health, the latest id winning', async () => {
@@ -590,5 +614,368 @@ describe('limits that /health reports are used only if they are usable numbers',
       await checkHealth();
       expect(getLimits()).toEqual(DEFAULT_LIMITS);
     }
+  });
+});
+
+
+// ---------------------------------------------------------------------------------------------
+// A restart is claimed only when the page can support it.
+
+describe('explainNetworkFailure: what is claimed about a restart depends on what the page knows', () => {
+  const STRONG = 'the server restarted while working on your document';
+  const NOT_RUNNING = 'The server was not running when this was sent, so it never received your document. It is back now. Try again.';
+  const WEAK = 'The server was restarted (or woke from sleep) since this page last heard from it. Your document was not changed. Try again.';
+  const RUNNING = 'the server is running, but this request did not complete';
+  const DOWN = 'the server did not answer';
+  const quick = { waitMs: 0, stepMs: 1 };
+
+  // [label, what the page knew and saw, what must be said]
+  //  idChanged: the probe answers with another process id than the one known when the request was sent
+  //  idAge:     ms between learning that id and sending the request (undefined: never learned)
+  //  ranFor:    ms the request was in flight before it failed (undefined: the page has no timing)
+  //  uptime:    what /health says about the age of the process that answers, in seconds
+  //  probe:     'up', or 'down' for no answer at all
+  const table = [
+    ['id learned 100 ms before the send, ran 4 s, id changed', { idChanged: true, idAge: 100, ranFor: 4000 }, 'strong'],
+    ['id learned 4.9 s before the send, ran 4 s', { idChanged: true, idAge: 4900, ranFor: 4000 }, 'strong'],
+    ['id learned exactly 5 s before the send, ran 4 s', { idChanged: true, idAge: 5000, ranFor: 4000 }, 'strong'],
+    ['id learned 5.1 s before the send, ran 4 s', { idChanged: true, idAge: 5100, ranFor: 4000 }, 'weak'],
+    ['id learned a minute before the send, ran 30 s', { idChanged: true, idAge: 60000, ranFor: 30000 }, 'weak'],
+    ['fresh id, ran exactly 3 s', { idChanged: true, idAge: 100, ranFor: 3000 }, 'strong'],
+    ['fresh id, ran 2.9 s: refused at once', { idChanged: true, idAge: 100, ranFor: 2900 }, 'notRunning'],
+    ['fresh id, refused in 5 ms', { idChanged: true, idAge: 100, ranFor: 5 }, 'notRunning'],
+    ['an old id, refused in 5 ms', { idChanged: true, idAge: 600000, ranFor: 5 }, 'notRunning'],
+    ['an id never learned, ran 10 s', { idChanged: true, idAge: undefined, ranFor: 10000 }, 'weak'],
+    ['an id never learned, refused at once', { idChanged: true, idAge: undefined, ranFor: 5 }, 'notRunning'],
+    ['id changed but the page has no timing', { idChanged: true, idAge: 100, ranFor: undefined }, 'weak'],
+    ['fresh id, ran 4 s, but the process that answers was up 10 minutes before the send', { idChanged: true, idAge: 100, ranFor: 4000, uptime: 600 }, 'weak'],
+    ['refused at once, but the process that answers was up 10 minutes before the send', { idChanged: true, idAge: 600000, ranFor: 5, uptime: 600 }, 'weak'],
+    ['refused at once and the process that answers is 1 s old', { idChanged: true, idAge: 100, ranFor: 5, uptime: 1 }, 'notRunning'],
+    ['ran 4 s and the process that answers is 1 s old', { idChanged: true, idAge: 100, ranFor: 4000, uptime: 1 }, 'strong'],
+    ['same id, ran 4 s', { idChanged: false, idAge: 100, ranFor: 4000 }, 'running'],
+    ['same id, refused at once', { idChanged: false, idAge: 100, ranFor: 5 }, 'running'],
+    ['no id was known, ran 4 s', { idChanged: false, noId: true, idAge: undefined, ranFor: 4000 }, 'running'],
+    ['no id was known, refused at once', { idChanged: false, noId: true, idAge: undefined, ranFor: 5 }, 'running'],
+    ['the server does not answer the probe, whatever else', { idChanged: true, idAge: 100, ranFor: 4000, probe: 'down' }, 'down'],
+    ['the id was refreshed after the send (another response), ran 4 s', { idChanged: true, idAge: -50, ranFor: 4000 }, 'strong'],
+  ];
+
+  it.each(table)('%s', async (_label, row, expected) => {
+    const at = Date.now();
+    const sent = Number.isFinite(row.ranFor)
+      ? {
+          at,
+          failedAt: at + row.ranFor,
+          bootId: row.noId ? null : 'boot-A',
+          bootIdSeenAt: Number.isFinite(row.idAge) ? at - row.idAge : 0,
+        }
+      : undefined;
+    if (row.probe === 'down') {
+      vi.stubGlobal('fetch', async () => { throw new TypeError('down'); });
+    } else {
+      vi.stubGlobal('fetch', async () =>
+        jsonResponse({ boot_id: row.idChanged ? 'boot-B' : 'boot-A', ...(row.uptime !== undefined ? { uptime_s: row.uptime } : {}) })
+      );
+    }
+    // The page's own memory of the id is what a request WITHOUT timing falls back to.
+    if (!sent && !row.noId) {
+      vi.stubGlobal('fetch', async () => jsonResponse({ boot_id: 'boot-A' }));
+      await checkHealth();
+      vi.stubGlobal('fetch', async () => jsonResponse({ boot_id: 'boot-B' }));
+    }
+    const message = await explainNetworkFailure('The upload failed', { ...quick, sent });
+    const meaning = {
+      strong: () => {
+        expect(message).toBe(
+          'The upload failed: the server restarted while working on your document. That can happen when the ' +
+            'document is very large, or when the server was updated at that moment. Try again; if it ' +
+            'happens again with this document, split it.'
+        );
+        expect(message).toContain(STRONG);
+      },
+      notRunning: () => {
+        expect(message).toBe(`The upload failed. ${NOT_RUNNING}`);
+        expect(message).not.toContain('split');
+      },
+      weak: () => {
+        expect(message).toBe(`The upload failed. ${WEAK}`);
+        expect(message).not.toContain('split');
+        expect(message).not.toContain('while working on your document');
+      },
+      running: () => {
+        expect(message).toContain(RUNNING);
+        expect(message).not.toContain('restart');
+      },
+      down: () => expect(message).toContain(DOWN),
+    };
+    meaning[expected]();
+  });
+
+  it('records when the id was learned, from a response header and from /health, and measures from the send', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(1_000_000);
+    vi.stubGlobal('fetch', async () => jsonResponse({ boot_id: 'boot-A' }, 200, { 'X-Boot-Id': 'boot-A' }));
+    await checkHealth();
+    // Ten seconds go by with no answer from the server, then a request is sent and runs for 4 s.
+    vi.setSystemTime(1_010_000);
+    vi.stubGlobal('fetch', () => new Promise((_resolve, reject) => setTimeout(() => reject(new TypeError('reset')), 4000)));
+    const failing = analyzeDocument('d', 't', 'x').catch((e) => e);
+    await vi.advanceTimersByTimeAsync(4000);
+    const failure = await failing;
+    expect(failure.sent).toEqual({ at: 1_010_000, failedAt: 1_014_000, bootId: 'boot-A', bootIdSeenAt: 1_000_000 });
+
+    vi.stubGlobal('fetch', async () => jsonResponse({ boot_id: 'boot-B' }));
+    // The id is ten seconds old: too old to say it restarted while working on the document.
+    const message = await explainNetworkFailure('Failed to analyze document', { waitMs: 0, stepMs: 1, sent: failure.sent });
+    expect(message).toBe(`Failed to analyze document. ${WEAK}`);
+  });
+
+  it('what is compared with is the id known when the request was sent, not one learned while it ran', async () => {
+    vi.stubGlobal('fetch', async () => jsonResponse({ boot_id: 'boot-A' }));
+    await checkHealth();
+    const at = Date.now();
+    const sent = { at, failedAt: at + 4000, bootId: 'boot-A', bootIdSeenAt: at - 10 };
+    // Something else heard boot-B while the request ran; the probe also says boot-B.
+    vi.stubGlobal('fetch', async () => jsonResponse({ boot_id: 'boot-B' }));
+    await checkHealth();
+    const message = await explainNetworkFailure('x', { waitMs: 0, stepMs: 1, sent });
+    expect(message).toContain(STRONG);
+  });
+
+  it('remembers the id it found, and when', async () => {
+    const at = Date.now();
+    vi.stubGlobal('fetch', async () => jsonResponse({ boot_id: 'boot-B' }));
+    await explainNetworkFailure('x', { waitMs: 0, stepMs: 1, sent: { at, failedAt: at + 100, bootId: 'boot-A', bootIdSeenAt: at } });
+    // A second failure on the restarted server is not blamed on a restart.
+    const second = await explainNetworkFailure('x', { waitMs: 0, stepMs: 1, sent: { at, failedAt: at + 4000, bootId: 'boot-B', bootIdSeenAt: at } });
+    expect(second).toContain(RUNNING);
+  });
+});
+
+// ---------------------------------------------------------------------------------------------
+
+describe('diagnose: why a request failed, in words for the person who pasted the citation', () => {
+  const offlineErr = () => new ApiError('Could not reach the citation server. It may be starting up or temporarily down.', { offline: true });
+  const noJargon = (info) => {
+    expect(`${info.message} ${info.detail}`).not.toMatch(/allowed|origin|cors|localhost|https?:\/\//i);
+  };
+
+  it('puts a phone with no connection first: no probe, and never the server blamed', async () => {
+    vi.stubGlobal('navigator', { onLine: false });
+    const fetchSpy = vi.fn();
+    vi.stubGlobal('fetch', fetchSpy);
+    for (const err of [
+      new ApiError(DEVICE_OFFLINE_MESSAGE, { deviceOffline: true }),
+      offlineErr(),
+      new ApiError('slow', { timeout: true }),
+      new ApiError('boom', { status: 500 }),
+    ]) {
+      const info = await diagnose(err, '/api/repair');
+      expect(info.message).toBe('You appear to be offline. Check your connection and try again.');
+      noJargon(info);
+    }
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it('says the phone is offline when it is the error that says so, even if the browser still claims to be online', async () => {
+    const fetchSpy = vi.fn();
+    vi.stubGlobal('fetch', fetchSpy);
+    const info = await diagnose(new ApiError(DEVICE_OFFLINE_MESSAGE, { deviceOffline: true }), '/api/repair');
+    expect(info.message).toBe(DEVICE_OFFLINE_MESSAGE);
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it('says so when the phone drops offline during the probe', async () => {
+    let online = true;
+    vi.stubGlobal('navigator', { get onLine() { return online; } });
+    vi.stubGlobal('fetch', async () => { online = false; throw new TypeError('Failed to fetch'); });
+    const info = await diagnose(offlineErr(), '/api/repair');
+    expect(info.message).toBe(DEVICE_OFFLINE_MESSAGE);
+  });
+
+  it('a server that does not answer is described plainly, with nothing about origins', async () => {
+    vi.stubGlobal('fetch', async () => { throw new TypeError('Failed to fetch'); });
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    const info = await diagnose(offlineErr(), '/api/repair');
+    expect(info.message).toBe('The citation server is not answering.');
+    expect(info.detail).toBe('It may be asleep or starting up. Wait a minute and try again.');
+    expect(info.unreachable).toBe(true);
+    noJargon(info);
+  });
+
+  it('the allowed-origins explanation goes to the console, for whoever runs the page', async () => {
+    vi.stubGlobal('window', { location: { origin: 'https://cite.example.org' } });
+    vi.stubGlobal('fetch', async () => { throw new TypeError('Failed to fetch'); });
+    const spy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const info = await diagnose(offlineErr(), '/api/repair');
+    expect(spy).toHaveBeenCalled();
+    const logged = String(spy.mock.calls[0][0]);
+    expect(logged).toContain('allowed-origins');
+    expect(logged).toContain('https://cite.example.org');
+    expect(JSON.stringify(info)).not.toContain('cite.example.org');
+    spy.mockRestore();
+  });
+
+  it('passes on how long the server asked to wait after a busy 503, and only then', async () => {
+    vi.stubGlobal('fetch', async () => jsonResponse({ status: 'healthy', boot_id: 'a', endpoints: ['/api/repair'] }));
+    const busy = await diagnose(new ApiError('busy', { status: 503, retryAfter: 30 }), '/api/repair');
+    expect(busy.retryAfter).toBe(30);
+    const other = await diagnose(new ApiError('boom', { status: 500, retryAfter: 30 }), '/api/repair');
+    expect(other.retryAfter).toBeNull();
+    const none = await diagnose(new ApiError('busy', { status: 503 }), '/api/repair');
+    expect(none.retryAfter).toBeNull();
+  });
+
+  it('names an out-of-date server as one', async () => {
+    vi.stubGlobal('fetch', async () => jsonResponse({ boot_id: 'a', commit: 'abc1234', endpoints: ['/api/upload'] }));
+    const info = await diagnose(new ApiError('nope', { status: 404 }), '/api/repair');
+    expect(info.staleBackend).toBe(true);
+    expect(info.message).toBe('This page is newer than the server it is talking to.');
+  });
+
+  it('a request that got no answer, while the server answers now, is not called "temporarily down" and "up" at once', async () => {
+    vi.stubGlobal('fetch', async () => jsonResponse({ boot_id: 'a', endpoints: ['/api/repair'] }));
+    const info = await diagnose(offlineErr(), '/api/repair');
+    expect(info.message).toBe('The request did not go through.');
+    expect(info.detail).toBe('The server is running, so the connection probably dropped. Try again.');
+    expect(info.message).not.toMatch(/temporarily down|starting up/);
+  });
+
+  it('keeps what the server said for an error it did answer', async () => {
+    vi.stubGlobal('fetch', async () => jsonResponse({ boot_id: 'a', endpoints: ['/api/repair'] }));
+    const info = await diagnose(new ApiError('Paste up to 2000 characters.', { status: 413 }), '/api/repair');
+    expect(info.message).toBe('Paste up to 2000 characters.');
+  });
+
+  it('a timeout keeps its own wording', async () => {
+    const info = await diagnose(new ApiError('The server did not respond within 30 seconds.', { timeout: true }), '/api/repair');
+    expect(info.message).toBe('The server did not respond within 30 seconds.');
+    expect(info.detail).toContain('waking from idle');
+  });
+});
+
+// ---------------------------------------------------------------------------------------------
+
+describe('repairCitation: an answer the page cannot draw is refused, so the result already on screen stays', () => {
+  const answer = (body, status = 200) => vi.stubGlobal('fetch', async () => jsonResponse(body, status));
+  const refused = async (body) => {
+    answer(body);
+    const err = await repairCitation('Moody v. NetChoice').catch((e) => e);
+    expect(err).toBeInstanceOf(ApiError);
+    expect(err.badFormat).toBe(true);
+    expect(err.message).toBe(UNEXPECTED_FORMAT_MESSAGE);
+    return err;
+  };
+
+  it.each([
+    ['an empty object', {}],
+    ['null', null],
+    ['an array', []],
+    ['a string', 'ok'],
+    ['a number', 7],
+    ['only a status', { status: 'incomplete' }],
+    ['an unknown status', { ...incompleteReply(), status: 'weird' }],
+    ['no status', { ...incompleteReply(), status: undefined }],
+    ['missing_details that is text', { ...incompleteReply(), missing_details: 'year' }],
+    ['missing_details that is an object', { ...incompleteReply(), missing_details: {} }],
+    ['candidates that is text', { ...incompleteReply(), candidates: 'none' }],
+    ['no candidates', { ...incompleteReply(), candidates: undefined }],
+    ['no notes', { ...incompleteReply(), notes: undefined }],
+    ['notes that is text', { ...incompleteReply(), notes: 'a note' }],
+    ['a note that is not text', { ...incompleteReply(), notes: [{ text: 'x' }] }],
+    ['no missing_details', { ...incompleteReply(), missing_details: undefined }],
+    ['a missing detail that is text', { ...incompleteReply(), missing_details: ['year'] }],
+    ['a missing detail with no label', { ...incompleteReply(), missing_details: [{ field: 'year' }] }],
+    ['a missing detail whose label is an object', { ...incompleteReply(), missing_details: [{ label: {} }] }],
+    ['a missing detail whose rule is text', { ...incompleteReply(), missing_details: [{ label: 'year', display_rule: '10.3' }] }],
+    ['a missing detail whose rule has no title', { ...incompleteReply(), missing_details: [{ label: 'year', display_rule: { number: '10.3' } }] }],
+    ['a candidate that is text', { ...ambiguousReply(), candidates: ['https://x.org'] }],
+    ['a candidate with no verify_url', { ...ambiguousReply(), candidates: [{ label: 'A' }] }],
+    ['a candidate whose verify_url is a number', { ...ambiguousReply(), candidates: [{ label: 'A', verify_url: 5 }] }],
+    ['a candidate whose label is an object', { ...ambiguousReply(), candidates: [{ label: {}, verify_url: 'https://x.org' }] }],
+    ['formatted that is a number', { ...resolvedReply(), formatted: 5 }],
+    ['template that is an object', { ...resolvedReply(), template: {} }],
+    ['verify_url that is a list', { ...resolvedReply(), verify_url: ['https://x.org'] }],
+    ['kind_label that is a number', { ...resolvedReply(), kind_label: 3 }],
+    ['a source that is an object (printed on the page)', { ...resolvedReply(), source: { name: 'x' } }],
+    ['a citation_type that is a number (a method is called on it)', { ...resolvedReply(), citation_type: 4 }],
+  ])('refuses %s', async (_label, body) => {
+    await refused(body);
+  });
+
+  it('passes an answer of each status that the real server sends', async () => {
+    for (const reply of [resolvedReply(), incompleteReply(), ambiguousReply(), unparseableReply()]) {
+      answer(reply);
+      await expect(repairCitation('Moody v. NetChoice')).resolves.toEqual(reply);
+    }
+  });
+
+  it('passes an answer whose nullable fields are null or left out', async () => {
+    const reply = { ...resolvedReply(), verify_url: null, kind_label: null, source: null, template: null, formatted: null };
+    answer(reply);
+    await expect(repairCitation('x')).resolves.toEqual(reply);
+    const bare = { status: 'unparseable', missing_details: [], candidates: [], notes: [] };
+    answer(bare);
+    await expect(repairCitation('x')).resolves.toEqual(bare);
+  });
+
+  it('a refusal by the server is still an ordinary error, not a format error', async () => {
+    answer({ detail: 'Paste up to 2000 characters.' }, 413);
+    const err = await repairCitation('x').catch((e) => e);
+    expect(err.badFormat).toBe(false);
+    expect(err.status).toBe(413);
+  });
+
+  it('can be cancelled through the signal it is given, and says nothing else was wrong', async () => {
+    vi.stubGlobal('fetch', hangingFetch);
+    const controller = new AbortController();
+    const outcome = repairCitation('x', 'law_review', { signal: controller.signal }).catch((e) => e);
+    controller.abort();
+    const err = await outcome;
+    expect(err.cancelled).toBe(true);
+    expect(err.timeout).toBe(false);
+  });
+
+  it('still allows 30 s, and sends the text and the style', async () => {
+    let seen;
+    vi.stubGlobal('fetch', async (_url, init) => {
+      seen = JSON.parse(init.body);
+      return jsonResponse(resolvedReply());
+    });
+    await repairCitation('Moody v. NetChoice', 'practitioner');
+    expect(seen).toEqual({ text: 'Moody v. NetChoice', style: 'practitioner' });
+  });
+});
+
+describe('lookupCitation can be cancelled', () => {
+  it('through the signal it is given', async () => {
+    vi.stubGlobal('fetch', hangingFetch);
+    const controller = new AbortController();
+    const outcome = lookupCitation({ id: 'c1' }, { signal: controller.signal }).catch((e) => e);
+    controller.abort();
+    expect((await outcome).cancelled).toBe(true);
+  });
+
+  it('and works with no options at all', async () => {
+    vi.stubGlobal('fetch', async () => jsonResponse({ found: false }));
+    await expect(lookupCitation({ id: 'c1' })).resolves.toEqual({ found: false });
+  });
+});
+
+describe('the limit on a pasted citation', () => {
+  it('is 2,000 characters until the server says otherwise', () => {
+    expect(getLimits().max_repair_chars).toBe(2000);
+  });
+
+  it('is not replaced by an unusable number from the server', async () => {
+    vi.stubGlobal('fetch', async () => jsonResponse({ boot_id: 'a', limits: { max_repair_chars: 'lots' } }));
+    await checkHealth();
+    expect(getLimits().max_repair_chars).toBe(2000);
+  });
+
+  it('is replaced by a usable number the server reports', async () => {
+    vi.stubGlobal('fetch', async () => jsonResponse({ boot_id: 'a', limits: { max_repair_chars: 500 } }));
+    await checkHealth();
+    expect(getLimits().max_repair_chars).toBe(500);
   });
 });

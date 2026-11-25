@@ -1,10 +1,11 @@
-import React, { useCallback, useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import FileUpload from './components/FileUpload';
 import CitationList from './components/CitationList';
 import CitationEditor from './components/CitationEditor';
 import CitationRepair from './components/CitationRepair';
 import SourceSuggestions from './components/SourceSuggestions';
 import DocumentPreview from './components/DocumentPreview';
+import RetryButton from './components/RetryButton';
 import { useMediaQuery } from './hooks/useMediaQuery';
 import {
   UNEXPECTED_FORMAT_MESSAGE,
@@ -72,6 +73,21 @@ function App() {
   // A ref, not the state: two files dropped in one gesture must not both start.
   const uploadBusyRef = useRef(false);
 
+  // What has been typed into the editor, per citation. Kept here, not in the editor, so it
+  // outlives the editor being put away (another results tab, another card, the screen changing
+  // width) and is thrown away on Save, on Cancel or Close, and for a new document. A ref, not
+  // state: the editor already shows what it holds, and a keystroke should not redraw the page.
+  const draftsRef = useRef(new Map());
+  const drafts = useMemo(
+    () => ({
+      get: (id) => draftsRef.current.get(id) ?? null,
+      set: (id, draft) => draftsRef.current.set(id, draft),
+      clear: (id) => draftsRef.current.delete(id),
+      clearAll: () => draftsRef.current.clear(),
+    }),
+    []
+  );
+
   const startAnalysis = useCallback(async (uploadResult) => {
     const run = ++runRef.current;
     abortRef.current?.abort();
@@ -81,6 +97,7 @@ function App() {
     setDoc(uploadResult);
     setAnalysis(null);
     setSelectedCitation(null);
+    drafts.clearAll();
     setActiveTab('citations');
     setCitationsShown(PAGE_SIZE);
     setClaimsShown(PAGE_SIZE);
@@ -124,6 +141,7 @@ function App() {
         try {
           message = await explainNetworkFailure('Failed to analyze document', {
             signal: controller.signal,
+            sent: err.sent,
           });
         } catch (probeError) {
           if (run !== runRef.current) return;
@@ -141,7 +159,7 @@ function App() {
         setCheckingServer(false);
       }
     }
-  }, []);
+  }, [drafts]);
 
   const handleFiles = useCallback(
     async (files) => {
@@ -200,7 +218,10 @@ function App() {
           setUpload({ file, phase: 'checking' });
           let message;
           try {
-            message = await explainNetworkFailure('The upload failed', { signal: controller.signal });
+            message = await explainNetworkFailure('The upload failed', {
+              signal: controller.signal,
+              sent: err.sent,
+            });
           } catch {
             // Only Cancel stops the probe, and Cancel has made this run stale.
             if (run !== uploadRunRef.current) return;
@@ -240,13 +261,21 @@ function App() {
   // Where focus goes back to when the editor closes, so a keyboard user is not dropped at the top.
   const returnFocusRef = useRef(null);
 
+  // The citation being edited, for the handlers that close the editor.
+  const selectedRef = useRef(null);
+  selectedRef.current = selectedCitation;
+
   const handleCitationSelect = useCallback((citation, trigger) => {
     returnFocusRef.current = trigger || null;
     setSavedNotice('');
     setSelectedCitation(citation);
   }, []);
 
-  const closeEditor = useCallback(() => setSelectedCitation(null), []);
+  // Cancel, Close, Escape, a tap outside, and Back all end up here: the draft goes with them.
+  const closeEditor = useCallback(() => {
+    if (selectedRef.current) drafts.clear(selectedRef.current.id);
+    setSelectedCitation(null);
+  }, [drafts]);
 
   useEffect(() => {
     if (selectedCitation || !returnFocusRef.current) return;
@@ -257,6 +286,7 @@ function App() {
 
   const handleCitationUpdate = useCallback(
     (updated) => {
+      drafts.clear(updated.id);
       if (analysis) {
         const citations = analysis.analysis.citations;
         const index = citations.findIndex((c) => c.id === updated.id);
@@ -271,12 +301,10 @@ function App() {
       }
       setSelectedCitation(null);
     },
-    [analysis]
+    [analysis, drafts]
   );
 
-  const handleLookup = useCallback(async (citation) => {
-    return await lookupCitation(citation);
-  }, []);
+  const handleLookup = useCallback((citation, options) => lookupCitation(citation, options), []);
 
   const handleReset = useCallback(() => {
     runRef.current++;
@@ -286,9 +314,10 @@ function App() {
     setDoc(null);
     setAnalysis(null);
     setSelectedCitation(null);
+    drafts.clearAll();
     setError(null);
     setSavedNotice('');
-  }, []);
+  }, [drafts]);
 
   // On a phone the editor is a sheet over the page; the page behind should not scroll with it.
   const sheetOpen = narrow && Boolean(selectedCitation) && activeTab === 'citations';
@@ -301,16 +330,63 @@ function App() {
     };
   }, [sheetOpen]);
 
+  // Back closes the sheet. Opening it adds one history entry, so Back (the Android button, an iOS
+  // swipe) takes that entry away and closes the sheet, where it used to leave the page and lose
+  // the results. When the sheet is closed any other way (Close, Cancel, Save, a tap outside,
+  // Escape, another tab, a wider screen) the entry is taken away again, so nothing piles up.
+  //
+  // `history.back()` is answered later by a popstate. `ownPops` counts the ones this page asked
+  // for, so they are not mistaken for the person pressing Back, and a sheet that opens while one
+  // is on its way gets its entry when that popstate arrives, not before: a push made in between
+  // would be walked back over by it.
+  const sheetEntry = useRef(false); // the sheet's entry is on the history now
+  const sheetWanted = useRef(false); // the sheet is open now
+  const ownPops = useRef(0);
+  const unmounting = useRef(false);
+
+  const addSheetEntry = () => {
+    window.history.pushState({ sheet: true }, '');
+    sheetEntry.current = true;
+  };
+
+  useEffect(() => {
+    unmounting.current = false;
+    const onPopState = () => {
+      if (ownPops.current > 0) {
+        ownPops.current -= 1;
+        if (ownPops.current === 0 && sheetWanted.current && !sheetEntry.current) addSheetEntry();
+        return;
+      }
+      if (!sheetEntry.current) return;
+      // The person pressed Back: the entry is already gone.
+      sheetEntry.current = false;
+      closeEditor();
+    };
+    window.addEventListener('popstate', onPopState);
+    return () => {
+      unmounting.current = true;
+      window.removeEventListener('popstate', onPopState);
+    };
+  }, [closeEditor]);
+
+  useEffect(() => {
+    if (!sheetOpen) return undefined;
+    sheetWanted.current = true;
+    if (ownPops.current === 0) addSheetEntry();
+    return () => {
+      sheetWanted.current = false;
+      if (!sheetEntry.current) return; // Back already took it, or it was never added
+      sheetEntry.current = false;
+      if (unmounting.current) return;
+      if (window.history.state?.sheet) {
+        ownPops.current += 1;
+        window.history.back();
+      }
+    };
+  }, [sheetOpen]);
+
   const uploading = Boolean(upload);
-  const editor = selectedCitation && analysis && (
-    <CitationEditor
-      citation={selectedCitation}
-      suggestion={analysis.short_form_suggestions.find((s) => s.citation_id === selectedCitation.id)}
-      onSave={handleCitationUpdate}
-      onLookup={handleLookup}
-      onCancel={closeEditor}
-    />
-  );
+  const editorOpen = Boolean(selectedCitation && analysis);
 
   return (
     <div className="min-h-screen bg-gray-50">
@@ -363,11 +439,23 @@ function App() {
           />
         )}
 
+        {/* The page and the server do not agree, so sending it again changes nothing: the page
+            has to be loaded again. That starts from nothing, and the error says so. */}
+        {error?.reload && !loading && (
+          <button
+            type="button"
+            onClick={() => window.location.reload()}
+            className="mb-6 min-h-[44px] px-5 py-2 bg-blue-600 text-white rounded-lg text-sm font-medium"
+          >
+            Reload page
+          </button>
+        )}
+
         {/* Landing: repair a single citation, or analyze a whole document. Both panels stay
             mounted, hidden when not in use, so what was typed or chosen in one survives a trip
             to the other and back, and a trip through the results. */}
         <div hidden={Boolean(doc || loading)}>
-          <div className={`flex gap-2 ${uploading ? 'mb-2' : 'mb-5'}`} role="tablist" aria-label="Choose a mode">
+          <div className="flex gap-2 mb-5" role="tablist" aria-label="Choose a mode">
             <ModeButton
               id="mode-repair"
               controls="panel-repair"
@@ -386,10 +474,6 @@ function App() {
               Check a document
             </ModeButton>
           </div>
-          {uploading && (
-            <p className="mb-5 text-sm text-gray-600">A file is uploading. Cancel the upload to switch.</p>
-          )}
-
           <div role="tabpanel" id="panel-repair" aria-labelledby="mode-repair" hidden={mode !== 'repair'}>
             <CitationRepair />
           </div>
@@ -479,8 +563,8 @@ function App() {
               {analysisNotices(analysis).map((notice) => (
                 <p key={notice} className="text-xs text-gray-600 mb-3">{notice}</p>
               ))}
-              {doc.warnings?.map((w) => (
-                <p key={w} className="text-xs text-amber-800 mb-2">{w}</p>
+              {doc.warnings?.map((w, i) => (
+                <p key={`${i}-${w}`} className="text-xs text-amber-800 mb-2">{w}</p>
               ))}
               <div className="grid grid-cols-2 md:grid-cols-5 gap-4">
                 <StatCard label="Total Citations" value={analysis.stats.total_citations} color="blue" />
@@ -535,8 +619,24 @@ function App() {
                       />
                     </div>
                     <div className="min-w-0">
-                      {editor ? (
-                        narrow ? <EditorSheet onClose={closeEditor}>{editor}</EditorSheet> : editor
+                      {/* The backdrop is a sibling, and the editor is ONE element whether it is a
+                          sheet or a panel, so the screen changing width never remounts it. */}
+                      {sheetOpen && <SheetBackdrop onClose={closeEditor} />}
+                      {editorOpen ? (
+                        <EditorShell sheet={narrow} onClose={closeEditor}>
+                          <CitationEditor
+                            key={selectedCitation.id}
+                            citation={selectedCitation}
+                            suggestion={analysis.short_form_suggestions.find(
+                              (s) => s.citation_id === selectedCitation.id
+                            )}
+                            onSave={handleCitationUpdate}
+                            onLookup={handleLookup}
+                            onCancel={closeEditor}
+                            draft={drafts.get(selectedCitation.id)}
+                            onDraftChange={drafts.set}
+                          />
+                        </EditorShell>
                       ) : (
                         <div className="hidden lg:block bg-gray-50 rounded-lg p-6 text-center text-gray-600">
                           <svg className="w-12 h-12 mx-auto mb-3 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
@@ -586,34 +686,52 @@ function App() {
   );
 }
 
+/** The dim layer behind the sheet. A tap on it closes the sheet. */
+function SheetBackdrop({ onClose }) {
+  return (
+    <div
+      data-testid="sheet-backdrop"
+      className="fixed inset-0 z-40 bg-black/40"
+      onClick={onClose}
+      aria-hidden="true"
+    />
+  );
+}
+
 /**
- * The editor as a sheet rising over the list, for a phone. Tapping a card used to open the
- * editor in a column that, on one screen, sat 20,000 px below the list, so nothing seemed to
- * happen. The list stays where it is; Close, Escape, or a tap outside goes back to it.
+ * The element the editor sits in. On a phone (`sheet`) it is a sheet rising over the list.
+ * Tapping a card used to open the editor in a column that, on one screen, sat 20,000 px below
+ * the list, so nothing seemed to happen. The list stays where it is; Close, Escape, a tap
+ * outside, or Back goes back to it.
+ *
+ * It is ONE element in both cases, and only its role, label and classes change: the editor
+ * inside is not remounted when the window crosses the width where the sheet becomes a panel (a
+ * tablet turned on its side), so what was typed in it is not lost.
  */
-function EditorSheet({ onClose, children }) {
-  const sheet = useRef(null);
+function EditorShell({ sheet, onClose, children }) {
+  const shell = useRef(null);
 
   useEffect(() => {
-    sheet.current?.focus();
-  }, []);
+    if (sheet) shell.current?.focus();
+  }, [sheet]);
 
   const handleKeyDown = (event) => {
+    if (!sheet) return;
     if (event.key === 'Escape') {
       event.stopPropagation();
       onClose();
       return;
     }
-    if (event.key !== 'Tab' || !sheet.current) return;
+    if (event.key !== 'Tab' || !shell.current) return;
     // Keep Tab inside the sheet; the page behind it is covered.
     const stops = Array.from(
-      sheet.current.querySelectorAll('button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])')
+      shell.current.querySelectorAll('button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])')
     ).filter((el) => !el.disabled);
     if (stops.length === 0) return;
     const first = stops[0];
     const last = stops[stops.length - 1];
     const active = window.document.activeElement;
-    if (event.shiftKey && (active === first || active === sheet.current)) {
+    if (event.shiftKey && (active === first || active === shell.current)) {
       event.preventDefault();
       last.focus();
     } else if (!event.shiftKey && active === last) {
@@ -622,58 +740,21 @@ function EditorSheet({ onClose, children }) {
     }
   };
 
-  return (
-    <>
-      <div
-        data-testid="sheet-backdrop"
-        className="fixed inset-0 z-40 bg-black/40"
-        onClick={onClose}
-        aria-hidden="true"
-      />
-      <div
-        ref={sheet}
-        role="dialog"
-        aria-modal="true"
-        aria-label="Edit citation"
-        tabIndex={-1}
-        onKeyDown={handleKeyDown}
-        className="editor-sheet fixed inset-x-0 bottom-0 z-50 overflow-y-auto overscroll-contain rounded-t-2xl bg-white shadow-2xl focus:outline-none"
-      >
-        {children}
-      </div>
-    </>
-  );
-}
-
-/**
- * Try again. When the server said how long to wait (a busy 503 with Retry-After), the button is
- * disabled and counts that down, so pressing it does not just be refused again.
- */
-function RetryButton({ onRetry, waitSeconds }) {
-  const wait = Number.isFinite(waitSeconds) && waitSeconds > 0 ? Math.ceil(waitSeconds) : 0;
-  const [until] = useState(() => Date.now() + wait * 1000);
-  const [left, setLeft] = useState(wait);
-
-  useEffect(() => {
-    if (!wait) return undefined;
-    const tick = () => {
-      const remaining = Math.max(0, Math.ceil((until - Date.now()) / 1000));
-      setLeft(remaining);
-      if (remaining === 0) clearInterval(timer);
-    };
-    const timer = setInterval(tick, 250);
-    return () => clearInterval(timer);
-  }, [wait, until]);
+  const sheetProps = sheet
+    ? {
+        role: 'dialog',
+        'aria-modal': 'true',
+        'aria-label': 'Edit citation',
+        tabIndex: -1,
+        className:
+          'editor-sheet fixed inset-x-0 bottom-0 z-50 overflow-y-auto overscroll-contain rounded-t-2xl bg-white shadow-2xl focus:outline-none',
+      }
+    : {};
 
   return (
-    <button
-      type="button"
-      onClick={onRetry}
-      disabled={left > 0}
-      className="mb-6 min-h-[44px] px-5 py-2 bg-blue-600 text-white rounded-lg text-sm font-medium disabled:bg-gray-200 disabled:text-gray-700 disabled:cursor-not-allowed"
-    >
-      {left > 0 ? `Try again in ${left} s` : 'Try again'}
-    </button>
+    <div ref={shell} onKeyDown={handleKeyDown} {...sheetProps}>
+      {children}
+    </div>
   );
 }
 

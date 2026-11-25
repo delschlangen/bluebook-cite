@@ -26,9 +26,11 @@ export default function DocumentPreview({
   position: controlled,
   onPositionChange,
 }) {
+  // The server's positions count code points; the window arithmetic here counts UTF-16 units.
+  // The text is what lets them be converted, so a new text makes new highlights.
   const highlights = useMemo(
-    () => buildHighlights(citations, unsourcedClaims),
-    [citations, unsourcedClaims]
+    () => buildHighlights(citations, unsourcedClaims, text),
+    [citations, unsourcedClaims, text]
   );
 
   const [own, setOwn] = useState(null);

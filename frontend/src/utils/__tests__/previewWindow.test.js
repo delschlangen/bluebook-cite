@@ -4,6 +4,7 @@ import {
   WINDOW,
   buildHighlights,
   buildWindow,
+  codePointIndexer,
   firstWindowStart,
   hasNext,
   hasPrevious,
@@ -416,5 +417,116 @@ describe('highlights that mark nothing repeat nothing', () => {
   it('opens at the top when the only highlight has no position', () => {
     const list = buildHighlights([{ position_start: undefined, position_end: undefined }], []);
     expect(firstWindowStart(list)).toBe(0);
+  });
+});
+
+
+// The server counts positions in code points (Python indexes a string by them). The page slices
+// UTF-16 units. A character outside the Basic Multilingual Plane is one of the first and two of
+// the second, so every one before a citation used to shift its highlight one place to the left.
+describe('positions counted in code points are converted to the indexes the page slices with', () => {
+  const CITATION = 'Brown v. Board of Education, 347 U.S. 483, 495 (1954)';
+
+  /** The positions the SERVER reports for `needle` in `text`: counted in code points. */
+  const serverPositions = (text, needle) => {
+    const at = text.indexOf(needle);
+    return {
+      position_start: [...text.slice(0, at)].length,
+      position_end: [...text.slice(0, at + needle.length)].length,
+    };
+  };
+  const marked = (text, citations) => {
+    const highlights = buildHighlights(citations, [], text);
+    return segmentsFor(text, highlights, 0, text.length)
+      .filter((segment) => segment.type === 'citation')
+      .map((segment) => segment.text);
+  };
+  const cite = (text, needle = CITATION) => ({ id: 'c1', status: 'complete', ...serverPositions(text, needle) });
+
+  it('marks exactly the citation the server found, with three emoji before it (the real server answer)', () => {
+    const text = 'Intro \u{1F600}\u{1F600}\u{1F600} here. The Court held so. Brown v. Board of Education, 347 U.S. 483, 495 (1954).';
+    // What POST /api/analyze answered for this text: the span begins at "The Court".
+    const [highlight] = buildHighlights([{ position_start: 16, position_end: 88, status: 'complete' }], [], text);
+    expect(text.slice(highlight.start, highlight.end)).toBe(
+      'The Court held so. Brown v. Board of Education, 347 U.S. 483, 495 (1954)'
+    );
+  });
+
+  it('is exact after an emoji', () => {
+    const text = `A \u{1F600} then ${CITATION}.`;
+    expect(marked(text, [cite(text)])).toEqual([CITATION]);
+  });
+
+  it('is exact after a zero-width-joiner sequence (a family: three emoji and two joiners)', () => {
+    const text = `Family \u{1F468}\u200D\u{1F469}\u200D\u{1F467} said so. ${CITATION}.`;
+    expect(marked(text, [cite(text)])).toEqual([CITATION]);
+  });
+
+  it('is exact after a rare CJK character outside the BMP', () => {
+    const text = `\u{20BB7}\u91CE\u5BB6 is a name. ${CITATION}.`;
+    expect(marked(text, [cite(text)])).toEqual([CITATION]);
+  });
+
+  it('is exact after mathematical italic letters', () => {
+    const text = `Let \u{1D465} and \u{1D466} be reals. ${CITATION}.`;
+    expect(marked(text, [cite(text)])).toEqual([CITATION]);
+  });
+
+  it('is exact for every one of several citations spread through a long text with 300 emoji', () => {
+    const first = 'Brown v. Board of Education, 347 U.S. 483 (1954)';
+    const second = 'Marbury v. Madison, 5 U.S. 137 (1803)';
+    const third = 'Roe v. Wade, 410 U.S. 113 (1973)';
+    const text =
+      `${first} ${'\u{1F600} words '.repeat(100)}${second} ${'\u{1F4DA} more '.repeat(100)}` +
+      `${third} ${'\u{1F389} end '.repeat(100)}`;
+    expect([...text.matchAll(/\p{Extended_Pictographic}/gu)]).toHaveLength(300);
+    const citations = [first, second, third].map((needle, i) => ({ id: `c${i}`, status: 'complete', ...serverPositions(text, needle) }));
+    expect(marked(text, citations)).toEqual([first, second, third]);
+  });
+
+  it('marks an unsourced claim exactly too', () => {
+    const claimText = 'Most voters were undecided';
+    const text = `\u{1F600}\u{1F600} ${claimText} by then.`;
+    const highlights = buildHighlights([], [serverPositions(text, claimText)], text);
+    expect(text.slice(highlights[0].start, highlights[0].end)).toBe(claimText);
+  });
+
+  it('a text with no surrogate pair is left exactly as it was, with no table built', () => {
+    const text = `Plain text. ${CITATION}.`;
+    const at = text.indexOf(CITATION);
+    const [highlight] = buildHighlights([{ position_start: at, position_end: at + CITATION.length, status: 'complete' }], [], text);
+    expect(highlight.start).toBe(at);
+    expect(highlight.end).toBe(at + CITATION.length);
+    // One shared function for every such text: nothing was built for this one.
+    expect(codePointIndexer(text)).toBe(codePointIndexer('some other plain text'));
+    expect(codePointIndexer(`\u{1F600} ${text}`)).not.toBe(codePointIndexer(text));
+    // And a position past the end is left alone there, as it always was.
+    expect(codePointIndexer(text)(text.length + 50)).toBe(text.length + 50);
+  });
+
+  it('without the text, positions are used as they are (the two-argument call)', () => {
+    const [highlight] = buildHighlights([{ position_start: 16, position_end: 88, status: 'complete' }], []);
+    expect([highlight.start, highlight.end]).toEqual([16, 88]);
+  });
+
+  it('clamps: 0 stays 0, the count is the length, and anything beyond is the length', () => {
+    const text = 'a\u{1F600}b'; // 3 code points, 4 UTF-16 units
+    const toUnit = codePointIndexer(text);
+    expect([toUnit(0), toUnit(1), toUnit(2), toUnit(3)]).toEqual([0, 1, 3, 4]);
+    expect(toUnit(4)).toBe(4);
+    expect(toUnit(10_000)).toBe(4);
+    expect(toUnit(-5)).toBe(0);
+  });
+
+  it('counts a lone surrogate as one character, as the server does', () => {
+    const text = 'a\ud83db'; // a lone high surrogate between two letters
+    const toUnit = codePointIndexer(text);
+    expect([toUnit(1), toUnit(2), toUnit(3)]).toEqual([1, 2, 3]);
+  });
+
+  it('never ends a highlight inside an emoji', () => {
+    const text = `\u{1F600}${CITATION}\u{1F600}`;
+    const [highlight] = buildHighlights([cite(text)], [], text);
+    expect(text.slice(highlight.start, highlight.end)).toBe(CITATION);
   });
 });

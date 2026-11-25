@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { act, fireEvent, screen } from '@testing-library/react';
 import { MB, chooseFile, fileInput, file, findResults, renderApp, results, setup, tab, tick, visible } from './harness';
 import { deferred, json, networkError } from '../test/fakeServer';
@@ -365,8 +365,11 @@ describe('what a failed upload says, and what the person can do next', () => {
     );
   });
 
-  it('says the server restarted when the id changed during the upload', async () => {
+  it('says the server restarted when the id changed during an upload that had been running a while', async () => {
+    let clock = 1_800_000_000_000;
+    vi.spyOn(Date, 'now').mockImplementation(() => clock);
     ctx.server.on('/api/upload', () => {
+      clock += 4000;
       ctx.bootId = 'boot-B';
       throw networkError();
     });
@@ -374,5 +377,19 @@ describe('what a failed upload says, and what the person can do next', () => {
     await chooseFile(ctx);
     const alert = await screen.findByRole('alert');
     expect(alert.textContent).toContain('The upload failed: the server restarted while working on your document.');
+  });
+
+  it('says only that the server was not running when an upload was refused at once, with a new id', async () => {
+    ctx.server.on('/api/upload', () => {
+      ctx.bootId = 'boot-B';
+      throw networkError();
+    });
+    renderApp();
+    await chooseFile(ctx);
+    const alert = await screen.findByRole('alert');
+    expect(alert.textContent).toBe(
+      'The upload failed. The server was not running when this was sent, so it never received your ' +
+        'document. It is back now. Try again.'
+    );
   });
 });

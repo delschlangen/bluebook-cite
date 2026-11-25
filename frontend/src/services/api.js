@@ -40,6 +40,9 @@ export const DEFAULT_LIMITS = {
   max_pdf_pages: 400,
   approx_max_words: 250000,
   approx_max_pages: 348,
+  // What "Fix a citation" takes (the server refuses more with a 413). /health does not publish
+  // it yet; if a later server does, that number replaces this one.
+  max_repair_chars: 2000,
 };
 
 let serverLimits = null;
@@ -88,6 +91,7 @@ class ApiError extends Error {
       cancelled = false,
       badFormat = false,
       retryAfter = null,
+      sent = null,
     } = {}
   ) {
     super(message);
@@ -103,6 +107,10 @@ class ApiError extends Error {
     this.badFormat = badFormat;
     // Seconds the server asked to wait before trying again, when it said.
     this.retryAfter = retryAfter;
+    // For a request that got no response: when it was sent and when it failed (ms since the
+    // epoch), and the process id the page knew at the moment it was sent, and when it learned it.
+    // explainNetworkFailure uses these to claim only what they support.
+    this.sent = sent;
   }
 }
 
@@ -232,6 +240,12 @@ async function request(
     throw new ApiError(DEVICE_OFFLINE_MESSAGE, { deviceOffline: true });
   }
 
+  // What the page knew about the server when this was sent, and when. If no answer comes back,
+  // that is what a restart can honestly be measured against.
+  const sentAt = Date.now();
+  const bootIdAtSend = seenBootId;
+  const bootIdSeenAt = seenAt;
+
   const controller = new AbortController();
   let timedOut = false;
   const timer = setTimeout(() => {
@@ -266,7 +280,10 @@ async function request(
     // of them identically, so the caller probes /health to tell them apart.
     throw new ApiError(
       'Could not reach the citation server. It may be starting up or temporarily down.',
-      { offline: true }
+      {
+        offline: true,
+        sent: { at: sentAt, failedAt: Date.now(), bootId: bootIdAtSend, bootIdSeenAt },
+      }
     );
   } finally {
     clearTimeout(timer);
@@ -289,17 +306,25 @@ function postJson(path, body, options = {}) {
 // outside. The server sends it as a header on every response; /health also carries it, which
 // covers a server that does not send the header.
 let seenBootId = null;
+// When it was last refreshed. An id from ten minutes ago says little about what happened to a
+// request sent a moment ago, so a restart is only claimed against a recent one.
+let seenAt = 0;
+
+function rememberBootId(id) {
+  if (!id) return;
+  seenBootId = id;
+  seenAt = Date.now();
+}
 
 function noteBootId(response) {
-  const id = response?.headers?.get?.('X-Boot-Id');
-  if (id) seenBootId = id;
+  rememberBootId(response?.headers?.get?.('X-Boot-Id'));
 }
 
 /** Wake a sleeping backend and learn its limits. Short timeout; failure is not fatal. */
 export async function checkHealth(timeoutMs = TIMEOUTS.health) {
   try {
     const health = await request('/health', { timeoutMs });
-    if (health?.boot_id) seenBootId = health.boot_id;
+    rememberBootId(health?.boot_id);
     learnLimits(health);
     return health;
   } catch {
@@ -310,6 +335,7 @@ export async function checkHealth(timeoutMs = TIMEOUTS.health) {
 /** Forget what the page has learned about the server. For tests. */
 export function resetServerKnowledge() {
   seenBootId = null;
+  seenAt = 0;
   serverLimits = null;
 }
 
@@ -332,6 +358,15 @@ function pause(ms, signal) {
   });
 }
 
+// What a request that got no answer can be told apart by (see explainNetworkFailure).
+// A restart is only said to have happened during this request when the process id had been
+// learned just before the request was sent, and the request then ran for a while before it died.
+export const FRESH_ID_MS = 5000;
+export const LONG_REQUEST_MS = 3000;
+// /health reports uptime in whole seconds, and a request can start while the process is still
+// coming up; a server older than this when the request was sent was already running.
+const UPTIME_SLACK_MS = 2000;
+
 /**
  * Turn "fetch rejected with a TypeError" into advice that fits what happened, by probing /health.
  * Only call this for ApiError.offline: errors the server did answer already carry their own
@@ -339,16 +374,33 @@ function pause(ms, signal) {
  *
  * - No connection on the phone (the first probe finds that out without sending anything): say so
  *   at once.
- * - The server answers with a different process id than the last one seen: it restarted since
- *   then, which is what running out of memory or a deploy looks like from outside.
- * - It answers with the same id, or the page never saw one: it is up, and this request did not
- *   complete. Nothing is claimed about a restart without an earlier id to compare with.
  * - It does not answer: it is down or still restarting.
+ * - It answers with the same process id as before, or the page never saw one: it is up, and this
+ *   request did not complete. Nothing is claimed about a restart without an earlier id to
+ *   compare with.
+ * - It answers with a DIFFERENT id: it has restarted since the page last heard from it. How much
+ *   more than that can be said depends on what the page knows about the request, which the caller
+ *   hands over as `sent` (the failed ApiError's `sent`: when it was sent and when it failed, and
+ *   the id known at that moment and when it was learned):
+ *     - the id was learned within 5 s of the send, and the request ran for at least 3 s before it
+ *       died: the server restarted while working on it. This is the only case that blames the
+ *       document ("very large, split it").
+ *     - the request was refused at once: the server was not running when it was sent, so it
+ *       never saw the document.
+ *     - anything else (an old id, or no timing at all): only that the server was restarted since
+ *       the page last heard from it, and that the document was not changed.
+ *   If /health says the process that answers had already been running when the request was sent,
+ *   none of the first two can be true, so only the last is said.
  *
  * `signal` stops the probing; the call then rejects with a cancelled error.
  */
-export async function explainNetworkFailure(what, { waitMs = 25000, stepMs = 2500, signal } = {}) {
-  const before = seenBootId;
+export async function explainNetworkFailure(
+  what,
+  { waitMs = 25000, stepMs = 2500, signal, sent = null } = {}
+) {
+  // The probe's own response refreshes the id, so what to compare with is taken first.
+  const before = sent ? sent.bootId : seenBootId;
+  const learnedAt = sent ? sent.bootIdSeenAt : seenAt;
   // A restarting container takes a while to come back, so keep probing for a bit before giving up.
   const deadline = Date.now() + waitMs;
   let health = null;
@@ -369,13 +421,33 @@ export async function explainNetworkFailure(what, { waitMs = 25000, stepMs = 250
     return `${what}: the server did not answer. It may be down. Wait a minute and try again.`;
   }
   learnLimits(health);
-  const restarted = Boolean(before && health.boot_id && health.boot_id !== before);
-  if (health.boot_id) seenBootId = health.boot_id;
-  if (restarted) {
+  const answeredAt = Date.now();
+  const changed = Boolean(before && health.boot_id && health.boot_id !== before);
+  rememberBootId(health.boot_id);
+
+  if (changed) {
+    const timed = Boolean(sent) && Number.isFinite(sent.at) && Number.isFinite(sent.failedAt);
+    const ranFor = timed ? sent.failedAt - sent.at : null;
+    const idAge = timed && learnedAt > 0 ? Math.max(0, sent.at - learnedAt) : Infinity;
+    const startedAt = Number.isFinite(health.uptime_s) ? answeredAt - health.uptime_s * 1000 : null;
+    const alreadyRunning = timed && startedAt !== null && startedAt < sent.at - UPTIME_SLACK_MS;
+
+    if (!alreadyRunning && timed && idAge <= FRESH_ID_MS && ranFor >= LONG_REQUEST_MS) {
+      return (
+        `${what}: the server restarted while working on your document. That can happen when the ` +
+        'document is very large, or when the server was updated at that moment. Try again; if it ' +
+        'happens again with this document, split it.'
+      );
+    }
+    if (!alreadyRunning && timed && ranFor < LONG_REQUEST_MS) {
+      return (
+        `${what}. The server was not running when this was sent, so it never received your ` +
+        'document. It is back now. Try again.'
+      );
+    }
     return (
-      `${what}: the server restarted while working on your document. That can happen when the ` +
-      'document is very large, or when the server was updated at that moment. Try again; if it ' +
-      'happens again with this document, split it.'
+      `${what}. The server was restarted (or woke from sleep) since this page last heard from ` +
+      'it. Your document was not changed. Try again.'
     );
   }
   return (
@@ -387,7 +459,8 @@ export async function explainNetworkFailure(what, { waitMs = 25000, stepMs = 250
 
 /**
  * Work out WHY a request failed, rather than reporting every failure as an
- * unreachable server.
+ * unreachable server. Returns { message, detail, retryAfter, ... } in words for the person who
+ * pasted the citation: no mention of origins, CORS or HTTP codes.
  *
  * The frontend and backend deploy independently, so a frontend calling an
  * endpoint that an older backend does not have looks identical to the backend
@@ -395,27 +468,39 @@ export async function explainNetworkFailure(what, { waitMs = 25000, stepMs = 250
  * routes so a stale backend can be named as such.
  */
 export async function diagnose(err, endpoint) {
+  // The phone says it has no connection: nothing was sent, and nothing about the server is known.
+  // This comes first, before any probe, so it is never blamed on the server.
+  if (err?.deviceOffline || isDeviceOffline()) {
+    return { message: DEVICE_OFFLINE_MESSAGE, detail: '', offline: true, retryAfter: null };
+  }
+
   if (err?.timeout) {
     return {
       message: err.message,
       detail: 'The backend may be waking from idle. Trying again usually works.',
+      retryAfter: null,
     };
   }
 
   const health = await checkHealth(10000);
 
   if (!health) {
-    // A browser reports a blocked cross-origin response and an unreachable
-    // host identically: both reject with a TypeError and no detail. The health
-    // probe fails the same way, so it cannot separate them either. Name both
-    // rather than asserting an outage that may not be happening.
+    if (isDeviceOffline()) {
+      return { message: DEVICE_OFFLINE_MESSAGE, detail: '', offline: true, retryAfter: null };
+    }
+    // A browser reports a blocked cross-origin response and an unreachable host identically, so
+    // this can also be a server that is up but does not list this page's address. That is for
+    // whoever runs the page, not for the person using it: it goes to the console.
+    const origin = typeof window !== 'undefined' ? window.location.origin : 'this page';
+    console.error(
+      `The citation server did not answer. If it is running, its allowed-origins list may not include ${origin}.`,
+      err
+    );
     return {
-      message: 'No response from the citation server.',
-      detail:
-        `Either it is asleep or down, or it is running but not accepting ` +
-        `requests from ${window.location.origin}. Its allowed-origins list ` +
-        `has to contain that exact value.`,
+      message: 'The citation server is not answering.',
+      detail: 'It may be asleep or starting up. Wait a minute and try again.',
       unreachable: true,
+      retryAfter: null,
     };
   }
 
@@ -426,12 +511,28 @@ export async function diagnose(err, endpoint) {
         `The server is running build ${health.commit || 'unknown'}, which does ` +
         `not have ${endpoint} yet. The backend needs to redeploy.`,
       staleBackend: true,
+      retryAfter: null,
     };
   }
 
+  // The server's own "try again in N seconds", for a busy answer.
+  const retryAfter = err?.status === 503 && Number.isFinite(err.retryAfter) ? err.retryAfter : null;
+
+  if (err?.offline) {
+    // The request got no answer but the server answers now: not "temporarily down".
+    return {
+      message: 'The request did not go through.',
+      detail: 'The server is running, so the connection probably dropped. Try again.',
+      retryAfter,
+    };
+  }
+  if (err?.badFormat) {
+    return { message: err.message, detail: '', retryAfter };
+  }
   return {
     message: err?.message || 'The request failed.',
     detail: 'The server is up, so this is likely a transient error.',
+    retryAfter,
   };
 }
 
@@ -468,8 +569,8 @@ export function formatCitation(citation) {
   return postJson('/api/format', citation);
 }
 
-export function lookupCitation(citation) {
-  return postJson('/api/lookup', citation);
+export function lookupCitation(citation, options = {}) {
+  return postJson('/api/lookup', citation, options);
 }
 
 export function lookupCase(parties, citation) {
@@ -497,12 +598,59 @@ export function searchCitations(query, searchType = 'case') {
   return postJson('/api/search', { query, search_type: searchType });
 }
 
+const isPlainObject = (value) => value !== null && typeof value === 'object' && !Array.isArray(value);
+const nullOrString = (value) => value === null || value === undefined || typeof value === 'string';
+const REPAIR_STATUSES = ['resolved', 'ambiguous', 'incomplete', 'unparseable'];
+
+/**
+ * Whether `reply` is a /api/repair answer the page can draw. The server always sends every list
+ * and every field below; one that is missing or the wrong kind of thing is a different version
+ * of the server, or not the server at all (a proxy's JSON page), and would otherwise replace a
+ * correct result with an empty card or crash the page while it is drawn. Checked: what is read
+ * without a guard, and what is used as a React key or printed.
+ */
+export function isUsableRepairReply(reply) {
+  if (!isPlainObject(reply)) return false;
+  if (!REPAIR_STATUSES.includes(reply.status)) return false;
+  if (!Array.isArray(reply.missing_details) || !Array.isArray(reply.candidates) || !Array.isArray(reply.notes)) {
+    return false;
+  }
+  const texts = ['formatted', 'template', 'verify_url', 'kind_label', 'citation_type', 'source', 'format_confidence'];
+  if (!texts.every((key) => nullOrString(reply[key]))) return false;
+  if (!reply.notes.every((note) => typeof note === 'string')) return false;
+  const detailOk = (detail) =>
+    isPlainObject(detail) &&
+    typeof detail.label === 'string' &&
+    nullOrString(detail.why) &&
+    nullOrString(detail.field) &&
+    (detail.display_rule == null ||
+      (isPlainObject(detail.display_rule) &&
+        typeof detail.display_rule.number === 'string' &&
+        typeof detail.display_rule.title === 'string'));
+  if (!reply.missing_details.every(detailOk)) return false;
+  return reply.candidates.every(
+    (candidate) =>
+      isPlainObject(candidate) &&
+      typeof candidate.verify_url === 'string' &&
+      nullOrString(candidate.label) &&
+      nullOrString(candidate.court) &&
+      nullOrString(candidate.date)
+  );
+}
+
 /**
  * Repair a single pasted citation. Returns a diagnosis: what was parsed,
- * what is missing, and any verifiable candidates.
+ * what is missing, and any verifiable candidates. An answer the page cannot draw is thrown as a
+ * badFormat ApiError, so the caller keeps the result it already has and says why.
+ *
+ * `options.signal` cancels the request (the person cleared the box or asked again).
  */
-export function repairCitation(text, style = 'law_review') {
-  return postJson('/api/repair', { text, style }, { timeoutMs: TIMEOUTS.repair });
+export async function repairCitation(text, style = 'law_review', options = {}) {
+  const reply = await postJson('/api/repair', { text, style }, { timeoutMs: TIMEOUTS.repair, ...options });
+  if (!isUsableRepairReply(reply)) {
+    throw new ApiError(UNEXPECTED_FORMAT_MESSAGE, { status: 200, badFormat: true });
+  }
+  return reply;
 }
 
 export { ApiError };

@@ -24,12 +24,18 @@ export function renderTemplate(text) {
   });
 }
 
-/** "Rule 10.3 · Reporters and Services", or nothing when no rule is verified. */
+/**
+ * "Rule 10.3 · Reporters and Services", or nothing when no rule is verified. The number stays in
+ * one piece; the title may wrap, and may break inside a word if one is longer than the line, so
+ * a long title cannot push the card wider than a phone. (A label that never wrapped made the page
+ * 23 px wider than a 390 px screen for "Rule 15 - Books, Reports, and Other Nonperiodic
+ * Materials".)
+ */
 export function RuleLabel({ rule }) {
   if (!rule) return null;
   return (
-    <span className="text-xs font-mono text-blue-700 whitespace-nowrap">
-      Rule {rule.number}
+    <span className="min-w-0 max-w-full text-xs font-mono text-blue-700 [overflow-wrap:anywhere]">
+      <span className="whitespace-nowrap">Rule {rule.number}</span>
       <span className="font-sans text-gray-500"> · {rule.title}</span>
     </span>
   );
@@ -71,12 +77,12 @@ export default function CitationTypeGuide({ style, defaultOpenId = null }) {
                     type="button"
                     onClick={() => setOpenId(open ? null : type.id)}
                     aria-expanded={open}
-                    className="w-full flex items-center justify-between gap-3 px-3 py-2.5
+                    className="w-full min-h-[44px] flex items-center justify-between gap-3 px-3 py-2.5
                                text-left text-sm font-medium text-gray-900 hover:bg-gray-50
                                rounded-lg"
                   >
-                    <span>{type.label}</span>
-                    <span className="text-xs font-normal text-gray-400">{open ? 'Hide' : 'Show'}</span>
+                    <span className="min-w-0">{type.label}</span>
+                    <span className="flex-shrink-0 text-xs font-normal text-gray-400">{open ? 'Hide' : 'Show'}</span>
                   </button>
 
                   {open && (
@@ -101,7 +107,7 @@ export default function CitationTypeGuide({ style, defaultOpenId = null }) {
                         {type.fields.map((f) => (
                           <li key={f.name} className="text-xs">
                             <div className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-0.5">
-                              <span className="font-medium text-gray-800">
+                              <span className="min-w-0 font-medium text-gray-800 [overflow-wrap:anywhere]">
                                 {f.label}
                                 {!f.required && <span className="font-normal text-gray-400"> (optional)</span>}
                               </span>

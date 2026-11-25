@@ -56,9 +56,10 @@ const CitationCard = memo(function CitationCard({ citation, index, suggestion, i
             <span className="px-2 py-0.5 rounded text-xs bg-gray-100 text-gray-600">
               {citation.kind_label || typeLabels[citation.type] || citation.type}
             </span>
-            {citation.footnote_number && (
+            {/* A ternary on a number: `0 && ...` would print the 0. */}
+            {Number(citation.footnote_number) > 0 ? (
               <span className="text-xs text-gray-500">Note {citation.footnote_number}</span>
-            )}
+            ) : null}
             {citation.edited && (
               <span className="px-2 py-0.5 rounded text-xs font-medium bg-blue-100 text-blue-800">
                 Edited

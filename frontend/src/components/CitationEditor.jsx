@@ -1,5 +1,8 @@
-import React, { useState, useEffect, useId } from 'react';
+import React, { useEffect, useId, useRef, useState } from 'react';
 import { renderCitation } from '../utils/citationText';
+import { noteForLookup, noteForLookupFailure } from '../utils/lookupNote';
+import { safeHttpUrl } from '../utils/safeUrl';
+import ExternalLink from './ExternalLink';
 
 function toFormData(citation) {
   return {
@@ -19,44 +22,98 @@ function toFormData(citation) {
   };
 }
 
-export default function CitationEditor({ citation, suggestion, onSave, onLookup, onCancel }) {
-  const [formData, setFormData] = useState(() => toFormData(citation));
-  const [lookupResults, setLookupResults] = useState(null);
-  const [lookingUp, setLookingUp] = useState(false);
+const isObject = (value) => value !== null && typeof value === 'object' && !Array.isArray(value);
 
-  useEffect(() => {
-    setFormData(toFormData(citation));
-    setLookupResults(citation.lookup_results);
-  }, [citation]);
+// What the person has done in the editor so far: the form, what the last look-up found, and what
+// it said. The page keeps this per citation (`draft`, `onDraftChange`), so it survives the editor
+// being put away (another results tab, another card) and brought back.
+const freshDraft = (citation) => ({
+  form: toFormData(citation),
+  results: citation.lookup_results ?? null,
+  note: null,
+});
+
+/**
+ * The editor for ONE citation: the page gives it `key={citation.id}`, so another citation is a
+ * new editor with its own form and its own look-up. `draft`, when there is one, is where the
+ * person left off; `onDraftChange(id, draft)` is told after every change.
+ */
+export default function CitationEditor({
+  citation,
+  suggestion,
+  onSave,
+  onLookup,
+  onCancel,
+  draft = null,
+  onDraftChange,
+}) {
+  const [state, setState] = useState(() => draft ?? freshDraft(citation));
+  // The latest state, readable from a handler that started before the last change (a look-up
+  // that finishes while the person is typing must add to what they typed, not to what they had).
+  const latest = useRef(state);
+  const [lookingUp, setLookingUp] = useState(false);
+  // Each look-up gets a number and a way to be cancelled. An answer for a look-up that is no
+  // longer the current one (the editor was put away, or asked again) is dropped, not applied.
+  const lookupRun = useRef(0);
+  const lookupAbort = useRef(null);
+
+  useEffect(
+    () => () => {
+      lookupRun.current += 1;
+      lookupAbort.current?.abort();
+    },
+    []
+  );
+
+  const commit = (next) => {
+    latest.current = next;
+    setState(next);
+    onDraftChange?.(citation.id, next);
+  };
+
+  const { form: formData, results: lookupResults, note: lookupNote } = state;
 
   const handleChange = (field, value) => {
-    setFormData(prev => ({ ...prev, [field]: value }));
+    commit({ ...latest.current, form: { ...latest.current.form, [field]: value } });
   };
 
   const handleLookup = async () => {
+    const run = ++lookupRun.current;
+    lookupAbort.current?.abort();
+    const controller = new AbortController();
+    lookupAbort.current = controller;
     setLookingUp(true);
+    commit({ ...latest.current, note: null });
     try {
-      const results = await onLookup(citation);
-      setLookupResults(results);
-      
+      const results = await onLookup(citation, { signal: controller.signal });
+      if (run !== lookupRun.current) return;
+
+      let next = { ...latest.current, results: isObject(results) ? results : null, note: noteForLookup(results) };
       // Auto-fill from results
-      if (results.found && results.data) {
+      if (results?.found && isObject(results.data)) {
         const data = results.data;
-        setFormData(prev => ({
-          ...prev,
-          parties: data.case_name || prev.parties,
-          court: data.court || prev.court,
-          year: data.date_filed?.slice(0, 4) || prev.year,
-          author: data.author || prev.author,
-          title: data.title || prev.title,
-          volume: data.volume || prev.volume,
-          page: data.page || prev.page,
-        }));
+        const prev = next.form;
+        next = {
+          ...next,
+          form: {
+            ...prev,
+            parties: data.case_name || prev.parties,
+            court: data.court || prev.court,
+            year: data.date_filed?.slice(0, 4) || prev.year,
+            author: data.author || prev.author,
+            title: data.title || prev.title,
+            volume: data.volume || prev.volume,
+            page: data.page || prev.page,
+          },
+        };
       }
+      commit(next);
     } catch (err) {
+      if (run !== lookupRun.current || err?.cancelled) return;
       console.error('Lookup failed:', err);
+      commit({ ...latest.current, note: noteForLookupFailure(err) });
     } finally {
-      setLookingUp(false);
+      if (run === lookupRun.current) setLookingUp(false);
     }
   };
 
@@ -187,44 +244,50 @@ export default function CitationEditor({ citation, suggestion, onSave, onLookup,
           {citation.raw_text}
         </div>
 
-        {/* Lookup button */}
-        <button
-          type="button"
-          onClick={handleLookup}
-          disabled={lookingUp}
-          className="w-full min-h-[44px] px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed text-sm font-medium transition-colors"
-        >
-          {lookingUp ? 'Looking up...' : 'Look Up in Database'}
-        </button>
-
-        {/* Lookup results */}
-        {lookupResults?.found && (
-          <div className="p-3 bg-green-50 border border-green-100 rounded-lg">
-            <p className="text-xs font-medium text-green-700 mb-2">
-              Found in {lookupResults.source}
-            </p>
-            {lookupResults.data?.absolute_url && (
-              <a
-                href={lookupResults.data.absolute_url}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="text-xs text-blue-600 hover:underline"
+        {/* Lookup button, and what it found or why it did not. The status is always in the page,
+            so that what is put in it is read out. */}
+        <div>
+          <button
+            type="button"
+            onClick={handleLookup}
+            disabled={lookingUp}
+            className="w-full min-h-[44px] px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed text-sm font-medium transition-colors"
+          >
+            {lookingUp ? 'Looking up...' : 'Look Up in Database'}
+          </button>
+          <div
+            role="status"
+            aria-live="polite"
+            data-testid="lookup-status"
+            className="mt-3 space-y-3 empty:mt-0"
+          >
+            {lookupNote && (
+              <p
+                data-testid="lookup-note"
+                className={`p-3 rounded-lg border text-sm leading-relaxed [overflow-wrap:anywhere] ${
+                  lookupNote.kind === 'none'
+                    ? 'bg-gray-50 border-gray-200 text-gray-800'
+                    : 'bg-amber-50 border-amber-200 text-amber-950'
+                }`}
               >
-                View source →
-              </a>
+                {lookupNote.text}
+              </p>
             )}
-            {lookupResults.data?.url && !lookupResults.data?.absolute_url && (
-              <a
-                href={lookupResults.data.url}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="text-xs text-blue-600 hover:underline"
-              >
-                View source →
-              </a>
+            {lookupResults?.found && (
+              <div className="p-3 bg-green-50 border border-green-100 rounded-lg">
+                <p className="text-xs font-medium text-green-700 mb-2">
+                  Found in {lookupResults.source || 'the database'}
+                </p>
+                <ExternalLink
+                  href={safeHttpUrl(lookupResults.data?.absolute_url) || lookupResults.data?.url}
+                  className="inline-flex items-center min-h-[44px] text-xs text-blue-600 hover:underline"
+                >
+                  View source →
+                </ExternalLink>
+              </div>
             )}
           </div>
-        )}
+        </div>
 
         {/* Form fields */}
         <div className="space-y-3">

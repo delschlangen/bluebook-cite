@@ -9,6 +9,11 @@ const claimTypeColors = {
   quotation: 'bg-yellow-100 text-yellow-800',
 };
 
+// The neutral colour for a type that is not one of these (an own-property check, so a type named
+// "constructor" is not looked up on Object).
+const claimTypeColor = (type) =>
+  Object.prototype.hasOwnProperty.call(claimTypeColors, type) ? claimTypeColors[type] : claimTypeColors.factual;
+
 // A prose-heavy document can yield tens of thousands of claims; render a page at a time.
 
 export default function SourceSuggestions({ claims, notice, shown: controlledShown, onShownChange }) {
@@ -56,12 +61,18 @@ export default function SourceSuggestions({ claims, notice, shown: controlledSho
           <div className="flex items-start justify-between gap-3 mb-3">
             <div className="flex items-center gap-2">
               <span className="text-xs font-medium text-gray-500">#{index + 1}</span>
-              <span className={`px-2 py-0.5 rounded text-xs font-medium ${claimTypeColors[claim.claim_type]}`}>
-                {claim.claim_type}
-              </span>
-              <span className="text-xs text-gray-500">
-                {Math.round(claim.confidence * 100)}% confidence
-              </span>
+              {/* A claim with no type gets no label; one this page does not know is drawn in the
+                  neutral colour. Neither is ever printed as "undefined". */}
+              {typeof claim.claim_type === 'string' && claim.claim_type && (
+                <span className={`px-2 py-0.5 rounded text-xs font-medium ${claimTypeColor(claim.claim_type)}`}>
+                  {claim.claim_type}
+                </span>
+              )}
+              {Number.isFinite(claim.confidence) && (
+                <span className="text-xs text-gray-500">
+                  {Math.round(claim.confidence * 100)}% confidence
+                </span>
+              )}
             </div>
           </div>
           
@@ -69,7 +80,7 @@ export default function SourceSuggestions({ claims, notice, shown: controlledSho
             "{claim.text}"
           </p>
           
-          {claim.suggested_search_terms && claim.suggested_search_terms.length > 0 && (
+          {Array.isArray(claim.suggested_search_terms) && claim.suggested_search_terms.length > 0 && (
             <div className="mt-3">
               <p className="text-xs font-medium text-gray-500 mb-2">Suggested search terms:</p>
               <div className="flex flex-wrap gap-2">

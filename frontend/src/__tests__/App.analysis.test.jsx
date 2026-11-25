@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { act, screen } from '@testing-library/react';
 import { chooseFile, advance, findResults, renderApp, results, setup, tab, tick, visible } from './harness';
 import { deferred, json, networkError } from '../test/fakeServer';
@@ -152,9 +152,13 @@ describe('Try again and what it is told about the failure', () => {
     expect(tryAgain()).not.toBeNull();
   });
 
-  it('says the server restarted when the id changed, without blaming the document', async () => {
+  it('says the server restarted while working on the document when the id changed after the request had been running a while', async () => {
+    // The clock is moved by the route itself: the request was in flight for four seconds.
+    let clock = 1_800_000_000_000;
+    vi.spyOn(Date, 'now').mockImplementation(() => clock);
     ctx.server.sequence('/api/analyze', [
       () => {
+        clock += 4000;
         ctx.bootId = 'boot-B';
         throw networkError();
       },
@@ -169,6 +173,28 @@ describe('Try again and what it is told about the failure', () => {
         'happens again with this document, split it.'
     );
     expect(alert.textContent).not.toContain('too large or complex');
+    await ctx.user.click(tryAgain());
+    await findResults();
+  });
+
+  it('does not tell the person to split the document when the request was refused at once', async () => {
+    // Connection refused: the id differs, but the document never reached the server.
+    ctx.server.sequence('/api/analyze', [
+      () => {
+        ctx.bootId = 'boot-B';
+        throw networkError();
+      },
+      () => json(analysisBody({ citations: many(2) })),
+    ]);
+    renderApp();
+    await chooseFile(ctx);
+    const alert = await screen.findByRole('alert');
+    expect(alert.textContent).toBe(
+      'Failed to analyze document. The server was not running when this was sent, so it never received ' +
+        'your document. It is back now. Try again.'
+    );
+    expect(alert.textContent).not.toContain('split it');
+    expect(alert.textContent).not.toContain('while working on your document');
     await ctx.user.click(tryAgain());
     await findResults();
   });
@@ -342,6 +368,47 @@ describe('failures that Try again cannot fix say what to change instead', () => 
     await chooseFile(ctx);
     const alert = await screen.findByRole('alert');
     expect(alert.textContent.match(/shorter document/g)).toHaveLength(1);
+  });
+
+  describe.each([[422], [401], [403]])('a %i, where the page and the server are out of step', (status) => {
+    const reloadSpy = () => {
+      const reload = vi.fn();
+      vi.stubGlobal('location', { ...window.location, reload });
+      return reload;
+    };
+
+    it('offers Reload page, not Try again, and says the document will need choosing again', async () => {
+      ctx.server.on('/api/analyze', () => json([{ loc: ['body', 'text'], msg: 'field required' }], status));
+      renderApp();
+      await chooseFile(ctx);
+      const alert = await screen.findByRole('alert');
+      expect(alert.textContent).toContain('Reload the page and try again.');
+      expect(alert.textContent).toContain('you will need to choose it again');
+      expect(alert.textContent).not.toContain('Upload New Document');
+      expect(tryAgain()).toBeNull();
+      expect(screen.getByRole('button', { name: 'Reload page' }).className).toContain('min-h-[44px]');
+    });
+
+    it('Reload page reloads the page, and Try again was never sent', async () => {
+      ctx.server.on('/api/analyze', () => json({ detail: 'no' }, status));
+      const reload = reloadSpy();
+      renderApp();
+      await chooseFile(ctx);
+      await screen.findByRole('alert');
+      expect(ctx.server.count('/api/analyze')).toBe(1);
+      await ctx.user.click(screen.getByRole('button', { name: 'Reload page' }));
+      expect(reload).toHaveBeenCalledTimes(1);
+      expect(ctx.server.count('/api/analyze')).toBe(1);
+    });
+  });
+
+  it('a 500 and a 400 do not ask for a reload', async () => {
+    ctx.server.on('/api/analyze', () => json({ detail: 'The PDF is encrypted.' }, 400));
+    renderApp();
+    await chooseFile(ctx);
+    await screen.findByRole('alert');
+    expect(screen.queryByRole('button', { name: 'Reload page' })).toBeNull();
+    expect(tryAgain()).not.toBeNull();
   });
 
   it('a 500 still offers Try again', async () => {

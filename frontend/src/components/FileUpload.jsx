@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { getLimits, subscribeLimits } from '../services/api';
 import { CHECKING_SERVER_MESSAGE, limitsSummary, uploadingMessage } from '../utils/uploadChecks';
 
@@ -52,6 +52,14 @@ export default function FileUpload({ uploading = null, error = null, notice = nu
 
   const busy = Boolean(uploading);
 
+  // On a small phone the box and its Cancel can start below the first screen, under the heading
+  // and the intro. When an upload starts, bring Cancel (and the box above it) into view, scrolling
+  // only as far as needed. Optional calls: jsdom has no scrollIntoView.
+  const cancelRef = useRef(null);
+  useEffect(() => {
+    if (busy) cancelRef.current?.scrollIntoView?.({ block: 'nearest' });
+  }, [busy]);
+
   return (
     <div className="w-full">
       <label
@@ -100,14 +108,20 @@ export default function FileUpload({ uploading = null, error = null, notice = nu
         />
       </label>
 
+      {/* Cancel comes first and the reason the other tab is off after it, so that Cancel is not
+          pushed down the screen by a line above the box. */}
       {busy && (
-        <button
-          type="button"
-          onClick={onCancel}
-          className="mt-3 min-h-[44px] px-5 rounded-lg border border-gray-300 bg-white text-sm font-medium text-gray-800 hover:bg-gray-50"
-        >
-          Cancel
-        </button>
+        <>
+          <button
+            ref={cancelRef}
+            type="button"
+            onClick={onCancel}
+            className="mt-3 min-h-[44px] px-5 rounded-lg border border-gray-300 bg-white text-sm font-medium text-gray-800 hover:bg-gray-50"
+          >
+            Cancel
+          </button>
+          <p className="mt-2 text-sm text-gray-600">A file is uploading. Cancel the upload to switch.</p>
+        </>
       )}
 
       {notice && (

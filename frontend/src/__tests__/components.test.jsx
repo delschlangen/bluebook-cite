@@ -101,6 +101,27 @@ describe('CitationList pages through its citations', () => {
   });
 });
 
+describe('CitationList: what is printed on a card', () => {
+  const props = { shortFormSuggestions: [], onSelect: () => {} };
+  const firstCard = () => window.document.querySelector('[data-card-index]');
+
+  it('prints a footnote number, and nothing at all for footnote 0 (not a stray "0")', () => {
+    render(<CitationList citations={[citation(1, { footnote_number: 3 }), citation(2, { footnote_number: 0 })]} {...props} />);
+    const [first, second] = window.document.querySelectorAll('[data-card-index]');
+    expect(within(first).getByText('Note 3')).toBeTruthy();
+    expect(within(second).queryByText(/^Note/)).toBeNull();
+    // `0 && <span>` would put the character 0 on the card, in the row of badges.
+    const badges = second.querySelector('.flex.items-center.gap-2.mb-2');
+    expect(badges.textContent).not.toMatch(/(^|\D)0($|\D)/);
+    expect([...badges.childNodes].some((node) => node.nodeType === 3)).toBe(false);
+  });
+
+  it.each([[undefined], [null], [''], [-1]])('prints no note for a footnote number of %j', (value) => {
+    render(<CitationList citations={[citation(1, { footnote_number: value })]} {...props} />);
+    expect(within(firstCard()).queryByText(/^Note/)).toBeNull();
+  });
+});
+
 describe('SourceSuggestions pages through its claims', () => {
   it('Show more reveals the next page and says how many are left', async () => {
     render(<SourceSuggestions claims={many(150, claim)} />);
@@ -136,6 +157,51 @@ describe('SourceSuggestions pages through its claims', () => {
     const chip = screen.getByRole('link');
     expect(chip.className).toContain('wrap-anywhere');
     expect(chip.className).toContain('max-w-full');
+  });
+
+  describe('a claim with a missing or wrong decoration is drawn without it', () => {
+    const drawn = (extra) => {
+      const bare = { id: 'k1', text: 'Voters were undecided.', ...extra };
+      render(<SourceSuggestions claims={[bare]} />);
+      return window.document.querySelector('[data-claim-index]');
+    };
+
+    it('shows the percentage only when the confidence is a finite number', () => {
+      expect(drawn({ confidence: 0.9 }).textContent).toContain('90% confidence');
+    });
+
+    it.each([['missing', undefined], ['null', null], ['NaN', NaN], ['text', 'high'], ['infinite', Infinity]])(
+      'prints no percentage, and no "NaN", when the confidence is %s',
+      (_label, value) => {
+        const card = drawn({ claim_type: 'legal', confidence: value });
+        expect(card.textContent).toContain('Voters were undecided.');
+        expect(card.textContent).not.toMatch(/NaN|undefined|confidence/);
+      }
+    );
+
+    it('prints no type label for a claim with no type, and never "undefined"', () => {
+      const card = drawn({ confidence: 0.5 });
+      expect(card.textContent).not.toContain('undefined');
+      expect(card.querySelector('span.rounded.font-medium')).toBeNull();
+    });
+
+    it('draws a type the page has no colour for in the neutral colour', () => {
+      const card = drawn({ claim_type: 'opinion', confidence: 0.5 });
+      const pill = within(card).getByText('opinion');
+      expect(pill.className).toContain('bg-gray-100');
+      expect(pill.className).not.toContain('undefined');
+    });
+
+    it('does not look a type up on Object: "constructor" is just an unknown type', () => {
+      const pill = within(drawn({ claim_type: 'constructor', confidence: 0.5 })).getByText('constructor');
+      expect(pill.className).toContain('bg-gray-100');
+      expect(pill.className).not.toContain('function');
+    });
+
+    it('draws search terms only when they are a list', () => {
+      const card = drawn({ suggested_search_terms: 'a string, not a list', confidence: 0.5 });
+      expect(card.textContent).not.toContain('Suggested search terms');
+    });
   });
 
   it('the claim text may break too', () => {
@@ -279,6 +345,17 @@ describe('DocumentPreview', () => {
   it('says so when there is no text', () => {
     render(<DocumentPreview text="" citations={[]} unsourcedClaims={[]} />);
     expect(screen.getByText('No document content to display.')).toBeTruthy();
+  });
+
+  it('marks the citation the server found, not a stretch shifted by the emoji before it', () => {
+    // POST /api/analyze answered position_start 16 and position_end 88 for this text (code points).
+    const withEmoji = 'Intro \u{1F600}\u{1F600}\u{1F600} here. The Court held so. Brown v. Board of Education, 347 U.S. 483, 495 (1954).';
+    renderPreview({
+      text: withEmoji,
+      citations: [{ id: 'c1', status: 'complete', position_start: 16, position_end: 88 }],
+    });
+    const marked = window.document.querySelector('.citation-highlight');
+    expect(marked.textContent).toBe('The Court held so. Brown v. Board of Education, 347 U.S. 483, 495 (1954)');
   });
 
   it('marks citations and claims inside the window', () => {

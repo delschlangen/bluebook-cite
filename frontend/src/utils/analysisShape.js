@@ -6,6 +6,27 @@ const isObject = (value) => value !== null && typeof value === 'object' && !Arra
 const isCount = (value) => typeof value === 'number' && Number.isFinite(value) && value >= 0;
 const isIdLike = (value) => typeof value === 'string' || typeof value === 'number';
 
+// The kinds of claim the page has a colour for. 'factual' is the neutral one.
+const CLAIM_TYPES = ['legal', 'statistical', 'factual', 'quotation'];
+const NEUTRAL_CLAIM_TYPE = 'factual';
+
+/**
+ * A claim the page can draw. Only its text is essential; the rest only decorates the card, so a
+ * claim that arrives without it (a different version of the server) is repaired, not refused:
+ * a confidence that is not a finite number is dropped, a type that is not known becomes the
+ * neutral one, and search terms that are not a list of strings are an empty list.
+ */
+function repairedClaim(claim) {
+  return {
+    ...claim,
+    confidence: Number.isFinite(claim.confidence) ? claim.confidence : undefined,
+    claim_type: CLAIM_TYPES.includes(claim.claim_type) ? claim.claim_type : NEUTRAL_CLAIM_TYPE,
+    suggested_search_terms: Array.isArray(claim.suggested_search_terms)
+      ? claim.suggested_search_terms.filter((term) => typeof term === 'string')
+      : [],
+  };
+}
+
 const STAT_KEYS = ['total_citations', 'complete', 'incomplete', 'needs_verification', 'unsourced_claims'];
 
 function validCitation(c) {
@@ -32,7 +53,12 @@ export function normalizeAnalysis(raw) {
   ['citations_shown', 'claims_shown'].forEach((key) => {
     if (!isCount(stats[key])) delete stats[key];
   });
-  return { ...raw, stats, lookup: isObject(raw.lookup) ? raw.lookup : undefined };
+  return {
+    ...raw,
+    stats,
+    analysis: { ...raw.analysis, unsourced_claims: claims.map(repairedClaim) },
+    lookup: isObject(raw.lookup) ? raw.lookup : undefined,
+  };
 }
 
 /** The upload response if the page can use it, or null. */

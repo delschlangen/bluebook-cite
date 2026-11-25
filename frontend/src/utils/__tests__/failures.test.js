@@ -51,6 +51,39 @@ describe('describeFailure: what to say, and whether sending it again can help', 
     expect(out.hint).toBeNull();
   });
 
+  it.each([
+    [422, 'The server could not use what this page sent. The page and the server may be out of step. Reload the page and try again.'],
+    [401, 'The server refused this request. Reload the page and try again.'],
+    [403, 'The server refused this request. Reload the page and try again.'],
+  ])('a %i cannot be retried: the page has to be loaded again, and the document chosen again', (status, text) => {
+    const out = describeFailure(failure(text, { status }), { prefix: 'Failed to analyze document' });
+    expect(out.canRetry).toBe(false);
+    expect(out.reload).toBe(true);
+    expect(out.retryAfter).toBeNull();
+    expect(out.message).toBe(`Failed to analyze document: ${text}`);
+    expect(out.hint).toBe('Reloading the page clears the document that is loaded, so you will need to choose it again.');
+    // "Upload New Document" would send the same kind of request to the same server.
+    expect(out.hint).not.toMatch(/Upload New Document/);
+  });
+
+  it('a 415 cannot be retried either, but reloading would not help: a different file would', () => {
+    const out = describeFailure(failure('The server cannot read this kind of file.', { status: 415 }));
+    expect(out.canRetry).toBe(false);
+    expect(out.reload).toBe(false);
+  });
+
+  it('a 400 is left as it was: it can be retried, and says to try a different file', () => {
+    const out = describeFailure(failure('The server could not read that request. Try again, or try a different file.', { status: 400 }));
+    expect(out.canRetry).toBe(true);
+    expect(out.reload).toBe(false);
+  });
+
+  it('nothing else asks for a reload', () => {
+    for (const status of [0, 400, 404, 408, 413, 429, 500, 502, 503, 504]) {
+      expect(describeFailure(failure('x', { status })).reload, String(status)).toBe(false);
+    }
+  });
+
   it('a 503 can be retried, after the wait the server asked for', () => {
     const out = describeFailure(failure('busy', { status: 503, retryAfter: 30 }));
     expect(out.canRetry).toBe(true);
