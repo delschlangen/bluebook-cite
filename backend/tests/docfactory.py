@@ -104,6 +104,82 @@ def make_docx(
     return buffer.getvalue()
 
 
+# The namespaces Word declares on the root of every part it writes (the ones these fixtures use).
+_WORD_ROOT = (
+    'xmlns:wpc="http://schemas.microsoft.com/office/word/2010/wordprocessingCanvas" '
+    'xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" '
+    'xmlns:o="urn:schemas-microsoft-com:office:office" '
+    'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" '
+    'xmlns:v="urn:schemas-microsoft-com:vml" '
+    'xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" '
+    'xmlns:w10="urn:schemas-microsoft-com:office:word" '
+    'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" '
+    'xmlns:w14="http://schemas.microsoft.com/office/word/2010/wordml" '
+    'xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape" '
+    'xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" '
+    'mc:Ignorable="w14"'
+)
+# Save As > Strict Open XML Document writes the same parts with these namespaces instead.
+_STRICT = {
+    "http://schemas.openxmlformats.org/wordprocessingml/2006/main": "http://purl.oclc.org/ooxml/wordprocessingml/main",
+    "http://schemas.openxmlformats.org/officeDocument/2006/relationships": "http://purl.oclc.org/ooxml/officeDocument/relationships",
+    "http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing": "http://purl.oclc.org/ooxml/drawingml/wordprocessingDrawing",
+    "http://schemas.openxmlformats.org/drawingml/2006/main": "http://purl.oclc.org/ooxml/drawingml/main",
+}
+_SEPARATORS = (
+    '<w:{kind} w:type="separator" w:id="-1"><w:p><w:pPr><w:spacing w:after="0" w:line="240" w:lineRule="auto"/></w:pPr>'
+    "<w:r><w:separator/></w:r></w:p></w:{kind}>"
+    '<w:{kind} w:type="continuationSeparator" w:id="0"><w:p><w:pPr><w:spacing w:after="0" w:line="240" w:lineRule="auto"/></w:pPr>'
+    "<w:r><w:continuationSeparator/></w:r></w:p></w:{kind}>"
+)
+SECT_PR = '<w:sectPr><w:pgSz w:w="12240" w:h="15840"/><w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440"/></w:sectPr>'
+
+
+def word_docx(
+    body: str,
+    *,
+    footnotes: str | None = None,
+    endnotes: str | None = None,
+    strict: bool = False,
+    extra_parts: dict[str, bytes] | None = None,
+) -> bytes:
+    """A .docx from WordprocessingML written out by hand, for the structures make_docx cannot
+    express: content controls, text boxes, tracked changes, fields.
+
+    `body` is what goes inside w:body; `footnotes` / `endnotes` are the w:footnote / w:endnote
+    elements (Word's separator notes are added in front, as Word writes them). The parts carry the
+    root element and namespace declarations Word writes; `strict=True` writes them the way Save As >
+    Strict Open XML Document does (the ISO namespaces and w:conformance="strict")."""
+    parts = {
+        "word/document.xml": f"<w:document {_WORD_ROOT}><w:body>{body}{SECT_PR}</w:body></w:document>",
+    }
+    for kind, notes in (("footnote", footnotes), ("endnote", endnotes)):
+        if notes is not None:
+            parts[f"word/{kind}s.xml"] = f"<w:{kind}s {_WORD_ROOT}>{_SEPARATORS.format(kind=kind)}{notes}</w:{kind}s>"
+    rels = "".join(
+        f'<Relationship Id="rId{n}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/{kind}s" Target="{kind}s.xml"/>'
+        for n, kind in enumerate(("footnote", "endnote"), start=10)
+        if f"word/{kind}s.xml" in parts
+    )
+    parts["word/_rels/document.xml.rels"] = (
+        f'<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">{rels}</Relationships>'
+    )
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr("[Content_Types].xml", _CONTENT_TYPES)
+        archive.writestr("_rels/.rels", _ROOT_RELS)
+        for name, xml in parts.items():
+            xml = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n' + xml
+            if strict:
+                for usual, iso in _STRICT.items():
+                    xml = xml.replace(usual, iso)
+                xml = xml.replace("<w:document ", '<w:document w:conformance="strict" ', 1)
+            archive.writestr(name, xml)
+        for name, data in (extra_parts or {}).items():
+            archive.writestr(name, data)
+    return buffer.getvalue()
+
+
 def _pdf_escape(text: str) -> str:
     return text.replace("\\", "\\\\").replace("(", "\\(").replace(")", "\\)")
 

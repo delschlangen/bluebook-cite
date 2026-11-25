@@ -204,6 +204,15 @@ class TestWordFootnotes:
         assert "Deleted." not in text
 
 
+def padded_part(root: str, size: int) -> str:
+    """A well-formed, empty footnotes or endnotes part of `size` bytes. The archive-limit tests
+    pad the parts the reader opens: the size limits are on those, and a part it never opens (a
+    picture, say) is not counted, whatever its size (tests/test_docx_word_structures.py)."""
+    head = f'<?xml version="1.0"?><w:{root} xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
+    tail = f"</w:{root}>"
+    return head + " " * (size - len(head) - len(tail)) + tail
+
+
 class TestArchiveFixturesAreValid:
     """The limit tests are only meaningful if the same archive is accepted when
     nothing is over a limit. Otherwise they pass because the file is broken."""
@@ -212,8 +221,8 @@ class TestArchiveFixturesAreValid:
         archive = io.BytesIO()
         with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED) as z:
             z.writestr("word/document.xml", WELL_FORMED_BODY)
-            for i in range(4):
-                z.writestr(f"word/padding{i}.bin", b"\x00" * (512 * 1024))
+            z.writestr("word/footnotes.xml", padded_part("footnotes", 2 * 1024 * 1024))
+            z.writestr("word/endnotes.xml", padded_part("endnotes", 768 * 1024))
         response = client.post("/api/upload", files={"file": ("ok.docx", archive.getvalue(), "")})
         assert response.status_code == 200
         assert "Brandenburg" in response.json()["full_text"]
@@ -254,15 +263,15 @@ class TestHostileAndUnsupportedFiles:
         bomb = io.BytesIO()
         with zipfile.ZipFile(bomb, "w", zipfile.ZIP_DEFLATED) as z:
             z.writestr("word/document.xml", WELL_FORMED_BODY)
-            z.writestr("word/padding.bin", b"\x00" * (2 * 1024 * 1024))
+            z.writestr("word/footnotes.xml", padded_part("footnotes", 2 * 1024 * 1024))
         assert len(bomb.getvalue()) < 20_000, "the bomb must be small on the wire"
         response = client.post("/api/upload", files={"file": ("bomb.docx", bomb.getvalue(), "")})
         assert response.status_code == 415
 
     def test_many_parts_that_add_up_past_the_total_limit_are_refused(self, client, monkeypatch):
         """Each part is under the per-part limit, so only the TOTAL check can stop
-        this. A bomb split into many small parts is the usual way round a per-part
-        limit."""
+        this. A bomb split across the parts that are read is the way round a
+        per-part limit."""
         import app.services.parser as parser_module
 
         monkeypatch.setattr(parser_module, "MAX_PART_BYTES", 1024 * 1024)
@@ -270,8 +279,8 @@ class TestHostileAndUnsupportedFiles:
         bomb = io.BytesIO()
         with zipfile.ZipFile(bomb, "w", zipfile.ZIP_DEFLATED) as z:
             z.writestr("word/document.xml", WELL_FORMED_BODY)
-            for i in range(4):
-                z.writestr(f"word/padding{i}.bin", b"\x00" * (512 * 1024))
+            z.writestr("word/footnotes.xml", padded_part("footnotes", 768 * 1024))
+            z.writestr("word/endnotes.xml", padded_part("endnotes", 768 * 1024))
         response = client.post("/api/upload", files={"file": ("bomb.docx", bomb.getvalue(), "")})
         assert response.status_code == 415
 

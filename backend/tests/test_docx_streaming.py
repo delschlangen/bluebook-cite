@@ -101,9 +101,17 @@ def test_tabs_breaks_and_no_break_hyphens_and_tracked_changes():
     assert read(docx_with(body)).text == "one two three-four inserted"
 
 
-def test_only_body_level_paragraphs_and_tables_are_read_as_before():
-    """Content inside a content control (w:sdt) was never read: pinned so a change is deliberate."""
+def test_content_inside_a_content_control_is_read():
+    """This test used to pin the opposite ("content inside w:sdt was never read: pinned so a change
+    is deliberate"). The change is deliberate: three reviewers found templated briefs, tables of
+    contents and whole documents silently dropped. See tests/test_docx_word_structures.py."""
     body = para("Kept.") + f"<w:sdt><w:sdtContent>{para('Inside a content control.')}</w:sdtContent></w:sdt>"
+    assert read(docx_with(body)).text == "Kept.\n\nInside a content control."
+
+
+def test_a_paragraph_in_an_unknown_wrapper_is_still_not_a_block():
+    """Only the containers Word is known to put around content are read through."""
+    body = para("Kept.") + f"<w:unknownWrapper>{para('Not a block.')}</w:unknownWrapper>"
     assert read(docx_with(body)).text == "Kept."
 
 
