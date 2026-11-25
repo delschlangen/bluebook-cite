@@ -34,8 +34,9 @@ UPLOAD_ENVELOPE_BYTES = 64 * 1024
 # Characters are at most 4 bytes in UTF-8 but ordinary text is 1 to 2, so this is generous.
 MAX_ANALYZE_BODY_BYTES = _number("MAX_ANALYZE_BODY_MB", "6") * 1024 * 1024
 
-# Every other endpoint takes one small JSON object (a citation, a few lines of pasted text).
-MAX_SMALL_BODY_BYTES = _number("MAX_SMALL_BODY_KB", "1024") * 1024
+# Every other endpoint takes one small JSON object (a citation, a few lines of pasted text): a few
+# kilobytes. The individual text fields are limited to MAX_FIELD_CHARS as well (main.py).
+MAX_SMALL_BODY_BYTES = _number("MAX_SMALL_BODY_KB", "64") * 1024
 
 MAX_TEXT_CHARS = _number("MAX_TEXT_CHARS", "1500000")
 MAX_PDF_PAGES = _number("MAX_PDF_PAGES", "400")

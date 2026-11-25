@@ -23,6 +23,57 @@ import httpx
 from ..models.citation import Citation, CitationStatus, CitationType
 from ..utils.safe_fetch import UnsafeURLError, safe_get
 
+# --- text patterns applied to what a client or an outside source sent ---------------------------
+#
+# These run on the event loop, on text whose only other limit is the request size. Every part is
+# bounded, and no two neighbouring parts can match the same character, so the cost is linear
+# whatever the text. The patterns they replace were written inline and were not:
+#
+#   (\d+)\s+([A-Za-z.\s]+)\s+(\d+)      three neighbouring parts that all match white space: "1"
+#                                       and 3,000 spaces took 45 s and the watchdog ended the process
+#   (\d+)\s*U\.?S\.?C\.?...             started again from every digit of a long run: 60,000 digits
+#                                       did the same
+#
+# tests/regex_inline_scan.py attacks every pattern in the app, inline ones included, with text
+# built from the pattern itself.
+
+# One word of a reporter name: it must contain a letter, so it can never be taken for the page
+# number that follows ("F.3d", "4th", "U.S.", "App'x").
+_REPORTER_WORD = r"(?=[0-9.']{0,19}[A-Za-z])[A-Za-z0-9.']{1,20}"
+
+# "410 U.S. 113", "123 F.3d 456", "5 Cal. App. 4th 100": volume, reporter, first page.
+VOLUME_REPORTER_PAGE = re.compile(
+    rf"[ \t]{{0,5}}(\d{{1,5}})[ \t]{{1,5}}"
+    rf"({_REPORTER_WORD}(?:[ \t]{{1,3}}{_REPORTER_WORD}){{0,5}})"
+    rf"[ \t]{{1,5}}(\d{{1,7}})(?![A-Za-z0-9])"
+)
+
+# "42 U.S.C. § 1983", "42 USC 1983", "42 U.S.C.A. § 1396a"
+_USC_IN_TEXT = re.compile(
+    r"(?<![0-9])(\d{1,3})\s{0,3}U\.?\s?S\.?\s?C\.?(?:\s?A\.?)?\s{0,3}§{0,2}\s{0,3}"
+    r"(\d{1,6}[a-z]{0,2}(?:-\d{1,4})?)",
+    re.IGNORECASE,
+)
+
+# "47 C.F.R. § 54.101", "47 CFR 54.101", "47 C.F.R. pt. 54"
+_CFR_IN_TEXT = re.compile(
+    r"(?<![0-9])(\d{1,3})\s{0,3}C\.?\s?F\.?\s?R\.?\s{0,3}(?:(?:§{1,2}|pt\.|part)\s{0,3})?"
+    r"(\d{1,5}(?:\.\d{1,8})?)",
+    re.IGNORECASE,
+)
+
+# The "v." between two party names, with the white space around it.
+_VERSUS = re.compile(r"(?<=\S)\s{1,10}v\.?\s{1,10}")
+
+
+def parse_volume_reporter_page(text: str) -> tuple[str, str, str] | None:
+    """("410", "U.S.", "113") from "410 U.S. 113", or None."""
+    match = VOLUME_REPORTER_PAGE.match(text or "")
+    if not match:
+        return None
+    return match.group(1), " ".join(match.group(2).split()), match.group(3)
+
+
 # Per-call read timeout. Several lookups can run for one citation, so this
 # must stay small enough that the worst case still fits inside a request.
 LOOKUP_READ_TIMEOUT = float(os.getenv("LOOKUP_READ_TIMEOUT", "8"))
@@ -634,7 +685,7 @@ class LegalLookupService:
         # Check if it looks like a case name
         if " v. " in text or " v " in text:
             # Extract party names
-            parts = re.split(r'\s+v\.?\s+', text, maxsplit=1)
+            parts = _VERSUS.split(text, maxsplit=1)
             if len(parts) == 2:
                 # Try just the party names
                 queries.append(f'"{parts[0]}" "{parts[1]}"')
@@ -735,7 +786,7 @@ class LegalLookupService:
         results = {"found": False, "data": None, "suggestions": [], "source": "Cornell Law"}
 
         # Try to extract USC citation
-        usc_match = re.search(r'(\d+)\s*U\.?S\.?C\.?\s*§?\s*(\d+[a-z]?)', text, re.IGNORECASE)
+        usc_match = _USC_IN_TEXT.search(text)
         if usc_match:
             title = usc_match.group(1)
             section = usc_match.group(2)
@@ -750,7 +801,7 @@ class LegalLookupService:
             return results
 
         # Try CFR
-        cfr_match = re.search(r'(\d+)\s*C\.?F\.?R\.?\s*§?\s*(\d+(?:\.\d+)?)', text, re.IGNORECASE)
+        cfr_match = _CFR_IN_TEXT.search(text)
         if cfr_match:
             title = cfr_match.group(1)
             section = cfr_match.group(2)
@@ -926,15 +977,14 @@ class CitationCompleter:
                 for cite in data["citation"]:
                     if isinstance(cite, str):
                         # Parse citation string
-                        import re
-                        match = re.match(r"(\d+)\s+([A-Za-z.\s]+)\s+(\d+)", cite)
-                        if match:
+                        parsed = parse_volume_reporter_page(cite)
+                        if parsed:
                             if not citation.volume:
-                                citation.volume = match.group(1)
+                                citation.volume = parsed[0]
                             if not citation.reporter:
-                                citation.reporter = match.group(2).strip()
+                                citation.reporter = parsed[1]
                             if not citation.page:
-                                citation.page = match.group(3)
+                                citation.page = parsed[2]
                             break
 
             if not citation.year and data.get("date_filed"):
