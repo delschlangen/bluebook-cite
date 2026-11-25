@@ -19,6 +19,7 @@ from ..services.extractor import CitationExtractor
 from ..services.lookup_service import (
     CONFIDENT_MATCH_THRESHOLD,
     LegalLookupService,
+    tally_lookups,
 )
 from ..utils.bluebook_patterns import abbreviate_party_name
 from ..utils.field_guidance import CITATION_TEMPLATES, guidance_for
@@ -363,14 +364,22 @@ class CitationRepairer:
     async def _try_to_fill(
         self, citation: Citation, result: RepairResult
     ) -> RepairResult:
+        # The lookup methods turn every failure (a refused request, a timeout, a rate limit) into
+        # "found: false", so "the source had no such record" and "the source could not be asked"
+        # look the same in the result. Counting at the point where each request is made keeps
+        # them apart, and a lawyer must not be told a case has no record when nobody looked.
         try:
-            lookup = await self.lookup.smart_complete(citation)
+            with tally_lookups() as tally:
+                lookup = await self.lookup.smart_complete(citation)
         except Exception:
             result.notes.append(
                 "The lookup service could not be reached, so only the parse "
                 "is shown. The missing fields above are still accurate."
             )
             return result
+
+        if lookup.get("unavailable"):
+            return result  # the caller says why nothing was looked up
 
         raw_candidates = lookup.get("suggestions") or []
         for raw in raw_candidates[:5]:
@@ -422,16 +431,31 @@ class CitationRepairer:
             )
             return result
 
+        if tally.unreachable:
+            result.notes.append(
+                "The outside sources could not be reached, so nothing was looked up. "
+                "That does not mean there is no such record. The missing fields above "
+                "are what this citation still needs."
+            )
+            return result
+
         rejected = lookup.get("rejected_count") or 0
         if rejected:
             result.notes.append(
                 f"{rejected} search result(s) were discarded as too dissimilar "
                 "to your input. Nothing is reported that cannot be verified."
             )
-        result.notes.append(
-            "No matching record was found. The missing fields above are what "
-            "this citation still needs."
-        )
+        if tally.failed:
+            result.notes.append(
+                "No matching record was found in the sources that answered, and some "
+                "sources could not be reached. The missing fields above are what this "
+                "citation still needs."
+            )
+        else:
+            result.notes.append(
+                "No matching record was found. The missing fields above are what "
+                "this citation still needs."
+            )
         return result
 
     def _merge(self, citation: Citation, data: dict[str, Any]) -> Citation:

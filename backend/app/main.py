@@ -884,7 +884,9 @@ class _OfflineLookup:
     still return the parse and the list of missing fields."""
 
     async def smart_complete(self, citation):
-        return {"found": False, "data": None, "suggestions": []}
+        # "unavailable" tells the repairer to say nothing about records: the endpoint adds
+        # its own note that the lookup timed out.
+        return {"found": False, "data": None, "suggestions": [], "unavailable": True}
 
 
 if __name__ == "__main__":
