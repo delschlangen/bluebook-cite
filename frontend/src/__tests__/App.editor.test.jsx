@@ -337,6 +337,40 @@ describe('a look-up belongs to the citation it was asked for', () => {
     expect(screen.queryByText(/^Found in/)).toBeNull();
   });
 
+  it('an answer that was already on its way when the person left is dropped, though the request was aborted', async () => {
+    const slow = deferred();
+    ctx.server.on('/api/lookup', () => slow.promise, { ignoreAbort: true });
+    await openResults(ctx);
+    fireEvent.click(card('A'));
+    fireEvent.click(lookupButton());
+    await settle();
+    fireEvent.click(card('B'));
+    expect(ctx.server.callsTo('/api/lookup')[0].signal.aborted).toBe(true);
+    await act(async () => { slow.resolve(json(found())); });
+    await settle();
+    expect(field('Parties').value).toBe('Beta v. Bison');
+    expect(screen.queryByText(/^Found in/)).toBeNull();
+    // Nor is it kept for card A: when the person comes back, A is as it was.
+    fireEvent.click(card('A'));
+    expect(field('Parties').value).toBe('Alpha v. Aardvark');
+    expect(screen.queryByText(/^Found in/)).toBeNull();
+  });
+
+  it('a failure that was already on its way when the person left is dropped too', async () => {
+    const slow = deferred();
+    ctx.server.on('/api/lookup', () => slow.promise, { ignoreAbort: true });
+    await openResults(ctx);
+    fireEvent.click(card('A'));
+    fireEvent.click(lookupButton());
+    await settle();
+    fireEvent.click(card('B'));
+    await act(async () => { slow.reject(networkError()); });
+    await settle();
+    expect(note()).toBeNull();
+    fireEvent.click(card('A'));
+    expect(note()).toBeNull();
+  });
+
   it('a late answer after the editor was closed is dropped quietly', async () => {
     const slow = deferred();
     ctx.server.on('/api/lookup', () => slow.promise);
@@ -461,14 +495,16 @@ describe('what was typed in the editor is kept until Save or Cancel', () => {
   it('Save throws it away, and the card shows what was saved', async () => {
     await openResults(ctx);
     fireEvent.click(card('A'));
-    type('Court', 'SAVED');
+    // Saved as two names with the spaces trimmed, which is not what was typed.
+    type('Parties', '  Xavier   v.   Yolanda  ');
     fireEvent.click(screen.getByRole('button', { name: 'Save Changes' }));
     fireEvent.click(card('A'));
-    expect(field('Court').value).toBe('SAVED');
+    expect(field('Parties').value).toBe('Xavier v. Yolanda');
     type('Court', 'SECOND DRAFT');
     fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
     fireEvent.click(card('A'));
-    expect(field('Court').value).toBe('SAVED');
+    expect(field('Court').value).toBe('Court A');
+    expect(field('Parties').value).toBe('Xavier v. Yolanda');
   });
 
   it('a new document starts with no drafts, and so does starting over', async () => {

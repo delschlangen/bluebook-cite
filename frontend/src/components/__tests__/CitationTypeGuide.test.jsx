@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 import React from 'react';
 import { renderToString } from 'react-dom/server';
 import { describe, expect, it } from 'vitest';
@@ -34,6 +35,50 @@ describe('CitationTypeGuide', () => {
 
   it('carries the edition caveat', () => {
     expect(html(<CitationTypeGuide style="law_review" />)).toContain('21st edition');
+  });
+});
+
+describe('the rule label and the guide rows fit a phone', () => {
+  const RULE = { number: '15', title: 'Books, Reports, and Other Nonperiodic Materials' };
+
+  const parse = (node) => {
+    const holder = document.createElement('div');
+    holder.innerHTML = renderToString(node);
+    return holder;
+  };
+
+  // jsdom has no layout, so this is structural; the browser check is in the Playwright script.
+  it('keeps "Rule N" in one piece and lets the title wrap, even inside a word if it must', () => {
+    const label = parse(<RuleLabel rule={RULE} />).firstElementChild;
+    const [number, title] = [...label.children].length ? [label.firstElementChild, label.lastElementChild] : [];
+    expect(number.className).toContain('whitespace-nowrap');
+    expect(number.textContent).toBe('Rule 15');
+    expect(title.textContent).toContain('Books, Reports, and Other Nonperiodic Materials');
+    expect(title.className).not.toContain('whitespace-nowrap');
+    expect(label.className).not.toContain('whitespace-nowrap');
+    expect(label.className).toContain('[overflow-wrap:anywhere]');
+    expect(label.className).toContain('min-w-0');
+    expect(label.className).toContain('max-w-full');
+  });
+
+  it('no part of the title is on a line that cannot break', () => {
+    const label = parse(<RuleLabel rule={{ number: '18', title: 'x'.repeat(70) }} />).firstElementChild;
+    const unbreakable = [...label.querySelectorAll('*')].filter((el) => el.className.includes('whitespace-nowrap'));
+    expect(unbreakable.map((el) => el.textContent)).toEqual(['Rule 18']);
+  });
+
+  it('every row of the guide, and every open item, can shrink to the width of the phone', () => {
+    const out = parse(<CitationTypeGuide style="law_review" defaultOpenId="agency_report" />);
+    out.querySelectorAll('button[aria-expanded]').forEach((row) => {
+      expect(row.className).toContain('min-h-[44px]');
+      expect(row.firstElementChild.className).toContain('min-w-0');
+    });
+    const nowrap = [...out.querySelectorAll('[class*="whitespace-nowrap"]')].map((el) => el.textContent);
+    expect(nowrap.length).toBeGreaterThan(0);
+    nowrap.forEach((text) => expect(text).toMatch(/^Rule [\d.]+$/));
+    out.querySelectorAll('li li .flex > span:first-child').forEach((name) => {
+      expect(name.className).toContain('min-w-0');
+    });
   });
 });
 

@@ -4,6 +4,7 @@ import { act, fireEvent, screen, within } from '@testing-library/react';
 import { chooseFile, findResults, renderApp, setup, tab } from './harness';
 import { json } from '../test/fakeServer';
 import { analysisBody, citation, claim, many, uploadBody } from '../test/fixtures';
+import { ambiguousReply, resolvedReply } from '../test/repairReplies';
 
 const TEXT = 'The court reasoned carefully about the statutory text. '.repeat(2200); // 121,000 characters
 
@@ -488,6 +489,92 @@ describe('touch targets and contrast of the controls the page owns', () => {
     await ctx.user.click(fixIt);
     const alert = await screen.findByRole('alert');
     expect(within(alert).getByRole('button', { name: 'Try again' }).className).toContain('min-h-[44px]');
+  });
+
+  describe('everything that can be tapped on the Fix a citation page is at least 44 px tall', () => {
+    const panel = () => window.document.getElementById('panel-repair');
+    const tappable = () =>
+      [...panel().querySelectorAll('button, a[href], [role="radio"]')].filter((el) => !el.closest('.sr-only'));
+    const allTall = (where) => {
+      const controls = tappable();
+      expect(controls.length, where).toBeGreaterThan(0);
+      const short = controls.filter((el) => !el.className.includes('min-h-[44px]')).map((el) => el.textContent.slice(0, 40));
+      expect(short, `${where}: controls without min-h-[44px]`).toEqual([]);
+    };
+    const type = (value) => fireEvent.change(screen.getByLabelText('Citation to repair'), { target: { value } });
+
+    it('on the landing: the two styles, the five examples and the link that browses every kind', async () => {
+      renderApp();
+      allTall('landing');
+      expect(screen.getAllByRole('radio')).toHaveLength(2);
+      expect(tappable().filter((el) => el.className.includes('font-mono'))).toHaveLength(5);
+      expect(screen.getByRole('button', { name: /Browse every kind/ }).className).toContain('inline-flex');
+    });
+
+    it('with text typed: Clear', async () => {
+      renderApp();
+      type('Moody');
+      expect(screen.getByRole('button', { name: 'Clear' }).className).toContain('min-h-[44px]');
+      allTall('typed');
+    });
+
+    it('with a result: Copy, and the link that verifies it, which is as tall as a button', async () => {
+      ctx.server.on('/api/repair', () => json(resolvedReply()));
+      renderApp();
+      type('Moody v. NetChoice');
+      await ctx.user.click(screen.getByRole('button', { name: 'Fix it' }));
+      const verify = await screen.findByRole('link', { name: 'Verify on CourtListener' });
+      expect(verify.className).toContain('min-h-[44px]');
+      expect(verify.className).toContain('inline-flex');
+      expect(verify.className).toContain('items-center');
+      expect(screen.getByRole('button', { name: 'Copy' }).className).toContain('min-h-[44px]');
+      allTall('result');
+    });
+
+    it('with candidates: each Open source link', async () => {
+      ctx.server.on('/api/repair', () => json(ambiguousReply()));
+      renderApp();
+      type('Moody v. NetChoice');
+      await ctx.user.click(screen.getByRole('button', { name: 'Fix it' }));
+      const links = await screen.findAllByRole('link', { name: 'Open source' });
+      expect(links).toHaveLength(2);
+      links.forEach((link) => {
+        expect(link.className).toContain('min-h-[44px]');
+        expect(link.className).toContain('inline-flex');
+      });
+      allTall('candidates');
+    });
+
+    it('with the guide open: every row of it', async () => {
+      renderApp();
+      await ctx.user.click(screen.getByRole('button', { name: /Browse every kind/ }));
+      const rows = [...panel().querySelectorAll('button[aria-expanded]')].filter((el) => el.textContent.match(/Show|Hide/));
+      expect(rows.length).toBeGreaterThan(20);
+      allTall('guide');
+      await ctx.user.click(rows[0]);
+      allTall('guide with an item open');
+    });
+
+    it('when the guide is shown for a paste that is not recognised', async () => {
+      renderApp();
+      type('zzzz qqqq');
+      await ctx.user.click(screen.getByRole('button', { name: 'Fix it' }));
+      await screen.findByText('What kind of source is it?');
+      allTall('unrecognised');
+    });
+
+    it('the editor sheet\u2019s source link, once a record is found', async () => {
+      ctx.server.on('/api/lookup', () => json({ found: true, source: 'CourtListener', data: { absolute_url: 'https://www.courtlistener.com/x/' } }));
+      serve(ctx, { citations: [citation(1)], claims: [] });
+      stubMatchMedia(true);
+      renderApp();
+      await chooseFile(ctx);
+      await findResults();
+      await ctx.user.click(window.document.querySelector('[data-citation-id="c1"]'));
+      await ctx.user.click(screen.getByRole('button', { name: 'Look Up in Database' }));
+      const link = await screen.findByRole('link', { name: 'View source →' });
+      expect(link.className).toContain('min-h-[44px]');
+    });
   });
 
   it('Cancel, while a file is going up and while the analysis runs, is at least 44 px tall', async () => {

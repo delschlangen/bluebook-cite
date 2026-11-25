@@ -406,6 +406,46 @@ describe('FileUpload', () => {
     expect(onFiles).toHaveBeenCalledTimes(2);
   });
 
+  describe('when an upload starts, Cancel is brought into view', () => {
+    const uploadingProps = { uploading: { file: new File(['x'], 'brief.txt'), phase: 'sending' } };
+
+    it('scrolls Cancel into view, only as far as needed, when the upload starts', () => {
+      const scroll = vi.fn();
+      Object.defineProperty(window.HTMLElement.prototype, 'scrollIntoView', { configurable: true, value: scroll });
+      try {
+        const { rerender } = render(<FileUpload onFiles={() => {}} onCancel={() => {}} />);
+        expect(scroll).not.toHaveBeenCalled();
+        rerender(<FileUpload onFiles={() => {}} onCancel={() => {}} {...uploadingProps} />);
+        expect(scroll).toHaveBeenCalledTimes(1);
+        expect(scroll).toHaveBeenCalledWith({ block: 'nearest' });
+        expect(scroll.mock.contexts[0]).toBe(screen.getByRole('button', { name: 'Cancel' }));
+        // Going on uploading (or checking why it stopped) does not scroll again.
+        rerender(<FileUpload onFiles={() => {}} onCancel={() => {}} uploading={{ ...uploadingProps.uploading, phase: 'checking' }} />);
+        expect(scroll).toHaveBeenCalledTimes(1);
+      } finally {
+        delete window.HTMLElement.prototype.scrollIntoView;
+      }
+    });
+
+    it('does not fail where scrollIntoView does not exist', () => {
+      expect(window.HTMLElement.prototype.scrollIntoView).toBeUndefined();
+      expect(() => render(<FileUpload onFiles={() => {}} onCancel={() => {}} {...uploadingProps} />)).not.toThrow();
+    });
+
+    it('puts the line about switching after Cancel, so it cannot push Cancel down the screen', () => {
+      render(<FileUpload onFiles={() => {}} onCancel={() => {}} {...uploadingProps} />);
+      const cancel = screen.getByRole('button', { name: 'Cancel' });
+      const line = screen.getByText('A file is uploading. Cancel the upload to switch.');
+      expect(cancel.compareDocumentPosition(line) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+      expect(screen.getByTestId('dropzone').compareDocumentPosition(cancel) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    });
+
+    it('the line is not there when nothing is uploading', () => {
+      render(<FileUpload onFiles={() => {}} onCancel={() => {}} />);
+      expect(screen.queryByText(/Cancel the upload to switch/)).toBeNull();
+    });
+  });
+
   it('hands up every file dropped, not only the first', () => {
     const onFiles = vi.fn();
     render(<FileUpload onFiles={onFiles} />);

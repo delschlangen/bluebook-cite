@@ -2,12 +2,15 @@
 // The Fix a citation page: what it says when a paste holds several citations or is too long,
 // when a request fails, when the server answers with something it cannot draw, and when an old
 // answer arrives after the person has moved on.
-import { describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, fireEvent, screen, within } from '@testing-library/react';
 import { advance, renderApp, setup } from './harness';
 import { deferred, json, networkError } from '../test/fakeServer';
-import { UNEXPECTED_FORMAT_MESSAGE } from '../services/api';
+import { UNEXPECTED_FORMAT_MESSAGE, checkHealth } from '../services/api';
 import { ambiguousReply, incompleteReply, resolvedReply } from '../test/repairReplies';
+
+// The chosen style is remembered in the browser; every test starts from none.
+beforeEach(() => window.localStorage.clear());
 
 const BROWN = 'Brown v. Board of Education, 347 U.S. 483 (1954)';
 const MARBURY = 'Marbury v. Madison, 5 U.S. 137 (1803)';
@@ -421,6 +424,27 @@ describe('a result is tied to the text it was worked out for', () => {
     await settle();
     expect(screen.getByTestId('stale-note')).toBeTruthy();
     expect(ctx.server.count('/api/repair')).toBe(0);
+  });
+});
+
+describe('a result is stale for the style too', () => {
+  const ctx = setup();
+
+  it('when the text is unchanged but the style was changed and the page could not ask again', async () => {
+    renderApp();
+    paste(BROWN);
+    submit();
+    await screen.findByText('Ready to use');
+    // The server now reports a lower limit than this text, so choosing a style cannot run it.
+    ctx.server.on('/health', () => json({ status: 'healthy', boot_id: 'a', limits: { max_repair_chars: 20 } }));
+    await act(async () => { await checkHealth(); });
+    expect(screen.getByTestId('citation-count').textContent).toContain('of 20 characters');
+    expect(screen.queryByTestId('stale-note')).toBeNull(); // same text, same style: still its result
+    fireEvent.click(screen.getByRole('radio', { name: /Court document/ }));
+    await settle();
+    expect(box().value).toBe(BROWN);
+    expect(screen.getByTestId('stale-note')).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Copy' }).disabled).toBe(true);
   });
 });
 
