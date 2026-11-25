@@ -10,6 +10,7 @@ import CitationTypeGuide, {
 } from './CitationTypeGuide';
 import ExternalLink from './ExternalLink';
 import RetryButton from './RetryButton';
+import { rovingKeys } from '../utils/roving';
 
 const EXAMPLES = [
   'Moody v. NetChoice',
@@ -95,6 +96,11 @@ export default function CitationRepair() {
   // after Clear or after a newer run belongs to a run that no longer exists and is dropped.
   const requestId = useRef(0);
   const controller = useRef(null);
+  // Where focus goes after a button that is about to vanish or change is pressed: the box after
+  // Clear, and the result after Fix it. (A disabled or removed button drops focus to the page.)
+  const inputRef = useRef(null);
+  const resultHeading = useRef(null);
+  const focusResult = useRef(false);
 
   useEffect(() => subscribeLimits(setLimits), []);
 
@@ -118,13 +124,17 @@ export default function CitationRepair() {
       cancelPending();
       const trimmed = value.trim();
       if (!trimmed) {
+        focusResult.current = false;
         setResult(null);
         setResultFor(null);
         setError(null);
         return;
       }
       // The server refuses more than this, and the page does not cut the text to fit it.
-      if (countCharacters(value) > limitRef.current) return;
+      if (countCharacters(value) > limitRef.current) {
+        focusResult.current = false;
+        return;
+      }
 
       const id = requestId.current;
       setError(null);
@@ -174,8 +184,16 @@ export default function CitationRepair() {
   const tooLong = characters > limit;
   const nearLimit = characters >= Math.floor(limit * COUNTER_FROM);
 
+  // Fix it stays focusable while it works or has nothing to do (aria-disabled, not disabled), so
+  // pressing it never drops focus to the page; pressing it then does nothing.
+  const submitOff = loading || !text.trim() || tooLong;
+
   const handleSubmit = (event) => {
     event.preventDefault();
+    // An empty box asked to be fixed clears the result and stops what is running (see run()). A
+    // box that is too long, or a check already under way, is a button that is off: nothing happens.
+    if (text.trim() && (loading || tooLong)) return;
+    focusResult.current = true;
     run(text, style);
   };
 
@@ -191,10 +209,13 @@ export default function CitationRepair() {
 
   const handleClear = () => {
     cancelPending();
+    focusResult.current = false;
     setText('');
     setResult(null);
     setResultFor(null);
     setError(null);
+    // Clear goes away with the text; the box is where the person is.
+    inputRef.current?.focus();
   };
 
   const handleCopy = async () => {
@@ -212,6 +233,12 @@ export default function CitationRepair() {
   };
 
   useEffect(() => {
+    if (!focusResult.current || loading || !result) return;
+    focusResult.current = false;
+    resultHeading.current?.focus();
+  }, [loading, result]);
+
+  useEffect(() => {
     if (!copied) return undefined;
     const timer = setTimeout(() => setCopied(false), 2000);
     return () => clearTimeout(timer);
@@ -224,10 +251,26 @@ export default function CitationRepair() {
   const missingDetails = list(result?.missing_details);
   const candidates = list(result?.candidates);
   const notes = list(result?.notes);
+  // What is spoken when a result arrives: a short summary, written into a region that is already in
+  // the page (a region created together with its text is often not announced at all).
+  const summary =
+    result && !loading && !stale
+      ? [
+          `${meta.label}.`,
+          partial ? 'Only part of your paste was formatted.' : '',
+          missingDetails.length
+            ? `${missingDetails.length} detail${missingDetails.length === 1 ? ' is' : 's are'} still needed.`
+            : '',
+          candidates.length ? `${candidates.length} possible match${candidates.length === 1 ? '' : 'es'}.` : '',
+        ]
+          .filter(Boolean)
+          .join(' ')
+      : '';
 
   return (
     <div className="bg-white rounded-lg shadow-lg p-6 md:p-8">
       <h2 className="text-xl font-semibold">Fix a citation</h2>
+      <p className="sr-only" role="status" data-testid="repair-status">{summary}</p>
       <p className="text-gray-600 mt-1 mb-5">
         Paste any legal citation, whole or partial. You get the Bluebook form, or the
         finished shape with exactly what is missing marked.
@@ -237,7 +280,8 @@ export default function CitationRepair() {
         <div
           role="radiogroup"
           aria-label="Citation style"
-          className="inline-flex rounded-lg border border-gray-200 p-0.5 mb-3 bg-gray-50"
+          onKeyDown={rovingKeys({ vertical: true })}
+          className="inline-flex flex-wrap max-w-full rounded-lg border border-gray-200 p-0.5 mb-3 bg-gray-50"
         >
           {STYLES.map((s) => (
             <button
@@ -245,6 +289,7 @@ export default function CitationRepair() {
               type="button"
               role="radio"
               aria-checked={style === s.id}
+              tabIndex={style === s.id ? 0 : -1}
               title={s.hint}
               onClick={() => chooseStyle(s.id)}
               className={`min-h-[44px] px-3 py-1.5 rounded-md text-xs font-medium transition-colors ${
@@ -260,6 +305,7 @@ export default function CitationRepair() {
           Citation to repair
         </label>
         <textarea
+          ref={inputRef}
           id="citation-input"
           value={text}
           onChange={(e) => setText(e.target.value)}
@@ -270,7 +316,7 @@ export default function CitationRepair() {
           placeholder="Moody v. NetChoice"
           aria-invalid={tooLong || undefined}
           aria-describedby={nearLimit ? 'citation-count' : undefined}
-          className={`w-full px-4 py-3 border rounded-lg font-mono text-sm
+          className={`w-full px-4 py-3 border rounded-lg font-mono text-base lg:text-sm
                      focus:ring-2 focus:ring-blue-500 focus:border-blue-500 resize-y ${
                        tooLong ? 'border-red-400' : 'border-gray-300'
                      }`}
@@ -300,9 +346,10 @@ export default function CitationRepair() {
         <div className="flex flex-wrap items-center gap-3 mt-3">
           <button
             type="submit"
-            disabled={loading || !text.trim() || tooLong}
+            aria-disabled={submitOff || undefined}
             className="min-h-[44px] px-5 py-2 bg-blue-600 text-white rounded-lg text-sm font-medium
-                       hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed
+                       hover:bg-blue-700 aria-disabled:bg-gray-200 aria-disabled:text-gray-700
+                       aria-disabled:hover:bg-gray-200 aria-disabled:cursor-not-allowed
                        transition-colors"
           >
             {loading ? 'Checking...' : 'Fix it'}
@@ -311,24 +358,25 @@ export default function CitationRepair() {
             <button
               type="button"
               onClick={handleClear}
-              className="min-h-[44px] px-3 py-2 text-sm text-gray-500 hover:text-gray-700"
+              className="min-h-[44px] px-3 py-2 text-sm text-gray-600 hover:text-gray-700"
             >
               Clear
             </button>
           )}
-          <span className="text-xs text-gray-400 ml-auto">Cmd/Ctrl + Enter</span>
+          {/* A keyboard shortcut: not offered where there is usually no such key. */}
+          <span className="hidden sm:inline text-xs text-gray-600 ml-auto">Cmd/Ctrl + Enter</span>
         </div>
       </form>
 
       {!result && !loading && (
         <div className="mt-6 border-t pt-5">
-          <p className="text-xs font-medium text-gray-500 mb-2">Try one of these</p>
+          <p className="text-xs font-medium text-gray-600 mb-2">Try one of these</p>
           <div className="flex flex-wrap gap-2">
             {EXAMPLES.map((example) => (
               <button
                 key={example}
                 type="button"
-                onClick={() => { setText(example); run(example, style); }}
+                onClick={() => { setText(example); focusResult.current = true; run(example, style); }}
                 className="min-h-[44px] px-3 py-1.5 bg-gray-50 border border-gray-200 rounded-full
                            text-xs font-mono text-gray-700 hover:bg-blue-50
                            hover:border-blue-200 transition-colors"
@@ -342,15 +390,15 @@ export default function CitationRepair() {
 
       {error && (
         <div className="mt-5 p-4 bg-red-50 border border-red-200 rounded-lg" role="alert">
-          <p className="text-sm font-medium text-red-900">{error.message}</p>
+          <p className="text-sm font-medium text-red-900 [overflow-wrap:anywhere]">{error.message}</p>
           {error.detail && (
-            <p className="text-xs text-red-700 mt-1 leading-relaxed">{error.detail}</p>
+            <p className="text-xs text-red-700 mt-1 leading-relaxed [overflow-wrap:anywhere]">{error.detail}</p>
           )}
           {error.canRetry && (
             <RetryButton
               key={error.id}
               waitSeconds={error.retryAfter}
-              onRetry={() => run(text, style)}
+              onRetry={() => { focusResult.current = true; run(text, style); }}
               className={RETRY_CLASS}
             />
           )}
@@ -359,12 +407,21 @@ export default function CitationRepair() {
 
       {result && !loading && (
         <div
-          className={`mt-6 rounded-lg border p-5 ${stale ? 'border-gray-200 bg-gray-50 opacity-70' : meta.tone}`}
-          aria-live="polite"
+          className={`mt-6 rounded-lg border p-5 ${stale ? 'border-gray-200 bg-gray-50' : meta.tone}`}
         >
+          <h3
+            ref={resultHeading}
+            tabIndex={-1}
+            className="mb-3 text-sm font-semibold text-gray-900 rounded focus:outline-none focus:ring-2 focus:ring-blue-500"
+          >
+            Your result
+          </h3>
           {stale && (
             <p className="mb-4 text-sm font-medium text-amber-900" data-testid="stale-note">
-              This result is for the text before you changed it. Press Fix it to update it.
+              {/* While the text is too long Fix it is off, so there is nothing to press. */}
+              {tooLong
+                ? 'This result is for the text before you changed it.'
+                : 'This result is for the text before you changed it. Press Fix it to update it.'}
             </p>
           )}
           <div className="flex flex-wrap items-center gap-2 mb-4">
@@ -372,7 +429,7 @@ export default function CitationRepair() {
               {meta.label}
             </span>
             {(result.kind_label || result.citation_type) && (
-              <span className="px-2 py-0.5 rounded text-xs bg-white/70 text-gray-700">
+              <span className="min-w-0 max-w-full px-2 py-0.5 rounded text-xs bg-white/70 text-gray-700 [overflow-wrap:anywhere]">
                 {result.kind_label || String(result.citation_type).replace('_', ' ')}
               </span>
             )}
@@ -382,7 +439,7 @@ export default function CitationRepair() {
           {partial && (
             <p
               data-testid="partial-note"
-              className="mb-4 rounded border border-amber-300 bg-amber-100 px-3 py-2 text-sm leading-relaxed text-amber-950"
+              className="mb-4 rounded border border-amber-300 bg-amber-100 px-3 py-2 text-sm leading-relaxed text-amber-950 [overflow-wrap:anywhere]"
             >
               {partialMessage(partial)}
             </p>
@@ -390,7 +447,7 @@ export default function CitationRepair() {
 
           {result.formatted && (
             <div className="mb-4">
-              <p className="text-base text-gray-900 leading-relaxed">
+              <p dir="auto" className="text-base text-gray-900 leading-relaxed [overflow-wrap:anywhere]">
                 {renderCitation(result.formatted)}
               </p>
               <div className="flex flex-wrap items-center gap-x-3 gap-y-1 mt-3">
@@ -400,13 +457,13 @@ export default function CitationRepair() {
                   disabled={stale}
                   className="min-h-[44px] px-4 py-1.5 bg-white border border-gray-300 rounded-lg
                              text-xs font-medium hover:bg-gray-50 transition-colors
-                             disabled:text-gray-500 disabled:cursor-not-allowed"
+                             disabled:text-gray-600 disabled:cursor-not-allowed"
                 >
                   {copied ? 'Copied' : 'Copy'}
                 </button>
                 <ExternalLink
                   href={result.verify_url}
-                  className="inline-flex items-center min-h-[44px] text-xs text-blue-700 hover:underline font-medium"
+                  className="inline-flex items-center min-h-[44px] max-w-full text-xs text-blue-700 hover:underline font-medium [overflow-wrap:anywhere]"
                 >
                   Verify on {result.source || 'the source'}
                 </ExternalLink>
@@ -419,10 +476,10 @@ export default function CitationRepair() {
               <p className="text-xs font-medium text-gray-600 mb-2">
                 What the finished citation looks like
               </p>
-              <p className="text-base text-gray-900 leading-relaxed">
+              <p dir="auto" className="text-base text-gray-900 leading-relaxed [overflow-wrap:anywhere]">
                 {renderTemplate(result.template)}
               </p>
-              <p className="text-xs text-gray-500 mt-1.5">
+              <p className="text-xs text-gray-600 mt-1.5">
                 Bracketed parts are what you still need to supply.
               </p>
             </div>
@@ -435,22 +492,22 @@ export default function CitationRepair() {
                 {missingDetails.map((detail, index) => (
                   <li
                     key={detail.field || detail.label || index}
-                    className="p-3 bg-white/80 border border-gray-200 rounded"
+                    className="min-w-0 p-3 bg-white/80 border border-gray-200 rounded"
                   >
                     <div className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-0.5">
-                      <span className="min-w-0 text-sm font-medium text-gray-900 [overflow-wrap:anywhere]">
+                      <span dir="auto" className="min-w-0 text-sm font-medium text-gray-900 [overflow-wrap:anywhere]">
                         {detail.label}
                       </span>
                       <RuleLabel rule={detail.display_rule} />
                     </div>
                     {detail.why && (
-                      <p className="text-xs text-gray-600 mt-1 leading-relaxed">{detail.why}</p>
+                      <p dir="auto" className="min-w-0 text-xs text-gray-600 mt-1 leading-relaxed [overflow-wrap:anywhere]">{detail.why}</p>
                     )}
                   </li>
                 ))}
               </ul>
               {missingDetails.some((d) => d.display_rule) && (
-                <p className="text-xs text-gray-500 mt-2 leading-relaxed">
+                <p className="text-xs text-gray-600 mt-2 leading-relaxed">
                   Rule numbers follow the Bluebook 21st edition. If you use the 22nd, confirm
                   the number there.
                 </p>
@@ -465,10 +522,10 @@ export default function CitationRepair() {
                 {candidates.map((candidate, index) => (
                   <li
                     key={`${index}-${candidate.verify_url}`}
-                    className="p-3 bg-white rounded border border-gray-200"
+                    className="min-w-0 p-3 bg-white rounded border border-gray-200"
                   >
-                    <p className="text-sm text-gray-900 [overflow-wrap:anywhere]">{candidate.label}</p>
-                    <p className="text-xs text-gray-500 mt-0.5">
+                    <p dir="auto" className="text-sm text-gray-900 [overflow-wrap:anywhere]">{candidate.label}</p>
+                    <p dir="auto" className="text-xs text-gray-600 mt-0.5 [overflow-wrap:anywhere]">
                       {[candidate.court, candidate.date].filter(Boolean).join(' · ')}
                     </p>
                     <ExternalLink
@@ -484,7 +541,7 @@ export default function CitationRepair() {
           )}
 
           {notes.map((note, index) => (
-            <p key={`${index}-${note}`} className="text-xs text-gray-600 leading-relaxed mt-1">
+            <p key={`${index}-${note}`} dir="auto" className="text-xs text-gray-600 leading-relaxed mt-1 [overflow-wrap:anywhere]">
               {note}
             </p>
           ))}
@@ -516,7 +573,7 @@ export default function CitationRepair() {
         </div>
       )}
 
-      <p className="mt-6 pt-4 border-t text-xs text-gray-500 leading-relaxed">
+      <p className="mt-6 pt-4 border-t text-xs text-gray-600 leading-relaxed">
         Nothing is reported as found unless it can be linked to a real record. Always open
         the source and confirm before filing.
       </p>

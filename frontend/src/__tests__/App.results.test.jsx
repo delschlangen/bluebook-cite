@@ -563,6 +563,19 @@ describe('touch targets and contrast of the controls the page owns', () => {
       allTall('unrecognised');
     });
 
+    it('the claims\u2019 search-term links, and every field of the editor', async () => {
+      serve(ctx, { citations: [citation(1)], claims: [claim(1, { suggested_search_terms: ['voter turnout study'] })] });
+      stubMatchMedia(true);
+      renderApp();
+      await chooseFile(ctx);
+      await findResults();
+      await ctx.user.click(tab('Unsourced Claims'));
+      expect(screen.getByRole('link', { name: /voter turnout study/ }).className).toContain('min-h-[44px]');
+      await ctx.user.click(tab('Citations'));
+      await ctx.user.click(window.document.querySelector('[data-citation-id="c1"]'));
+      for (const input of screen.getByRole('dialog').querySelectorAll('input')) expect(input.className, input.id).toContain('min-h-[44px]');
+    });
+
     it('the editor sheet\u2019s source link, once a record is found', async () => {
       ctx.server.on('/api/lookup', () => json({ found: true, source: 'CourtListener', data: { absolute_url: 'https://www.courtlistener.com/x/' } }));
       serve(ctx, { citations: [citation(1)], claims: [] });
@@ -604,7 +617,7 @@ describe('touch targets and contrast of the controls the page owns', () => {
     const next = screen.getByRole('button', { name: 'Next' });
     for (const button of [previous, next]) {
       expect(button.className).toContain('min-h-[44px]');
-      expect(button.className).toContain('disabled:text-gray-500');
+      expect(button.className).toContain('disabled:text-gray-600');
       expect(button.className).not.toContain('disabled:opacity');
     }
   });

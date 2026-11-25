@@ -80,6 +80,10 @@ FLOODS = {
     "em-dashes": repeated("a—b "),
     "percent": repeated("5% "),
     "claims": repeated("The Court held that about 5 people "),
+    "line-end-hyphens": repeated("ab-\ncd "),
+    "pdfium-hyphen-markers": repeated("ab\x02cd "),
+    "marked-url": "https://a.b/" + repeated("ab\x02\ncd-"),
+    "en-dash-ranges": repeated("12" + chr(0x2013) + "\n34 "),
     "emoji": repeated("\U0001f600"),
     "cjk": repeated("法"),
 }
@@ -177,6 +181,21 @@ def stages():
     except Exception as exc:
         print(f"NOTE no repair_text stage: {exc!r}", flush=True)
 
+    try:
+        from app.services import pdf_text  # noqa: PLC0415
+
+        def read_in_pages(text):
+            """The path a PDF takes: each page repaired on its own, then the line-end hyphens
+            settled over all of them and the running lines taken off."""
+            third = len(text) // 3 or 1
+            pages = [pdf_text._repair_page(text[i:i + third]) for i in range(0, len(text), third)]
+            return pdf_text.strip_running_lines(pdf_text._settle_hyphens(pages))
+
+        yield "pdf_text._repair_page", pdf_text._repair_page
+        yield "pdf_text pages, settled and stripped", read_in_pages
+    except Exception as exc:
+        print(f"NOTE no pdf_text page stages: {exc!r}", flush=True)
+
 
 def main() -> None:
     patterns = discover_patterns()
@@ -206,6 +225,7 @@ def main() -> None:
         "digits-and-spaces", "digits-and-commas", "capitalised-words", "initials", "all-caps-words",
         "case-names", "statute", "law-review", "url", "long-url", "numbered-lines", "claims",
         "section-signs", "open-brackets", "quotes", "newlines", "footnote-markers",
+        "line-end-hyphens", "pdfium-hyphen-markers", "marked-url", "en-dash-ranges", "letters-and-hyphens",
     ]
     for stage_name, stage in stages():
         for flood_name in stage_floods:

@@ -17,6 +17,8 @@ const MARBURY = 'Marbury v. Madison, 5 U.S. 137 (1803)';
 
 const box = () => screen.getByLabelText('Citation to repair');
 const fixIt = () => screen.getByRole('button', { name: /^(Fix it|Checking\.\.\.)$/ });
+// Fix it is aria-disabled, not disabled, so it keeps focus; this says whether it is off.
+const off = () => fixIt().getAttribute('aria-disabled') === 'true';
 const paste = (value) => fireEvent.change(box(), { target: { value } });
 const submit = () => fireEvent.click(fixIt());
 const alerts = () => screen.queryAllByRole('alert').map((a) => a.textContent);
@@ -75,6 +77,39 @@ describe('a paste with more than one citation is not reported as fully handled',
   });
 });
 
+describe('a long word in a result may break, so it cannot widen the page', () => {
+  const ctx = setup();
+  const breaks = (element) => element.className.includes('[overflow-wrap:anywhere]');
+
+  it('the formatted citation, the finished shape, the note about the others and an error', async () => {
+    ctx.server.on('/api/repair', () => json(resolvedReply({ formatted: `*A*, https://${'x'.repeat(80)}.example.org/y.` })));
+    renderApp();
+    paste(`${BROWN}; ${MARBURY}`);
+    submit();
+    expect(breaks(await screen.findByTestId('partial-note'))).toBe(true);
+    // The browser's own result, for the same paste, is drawn with the formatted citation too.
+    expect(breaks(screen.getByText(/Brown v\. Bd\. of Educ\./).closest('p'))).toBe(true);
+  });
+
+  it('the finished shape of a citation that is still missing parts', async () => {
+    ctx.server.on('/api/repair', () => json(incompleteReply({ template: `author, [title], https://${'x'.repeat(80)}.example.org/y.` })));
+    renderApp();
+    paste('https://www.example.com/article');
+    submit();
+    const shape = (await screen.findByText(/What the finished citation looks like/)).nextElementSibling;
+    expect(breaks(shape)).toBe(true);
+  });
+
+  it('an error message and its detail', async () => {
+    vi.stubGlobal('navigator', { onLine: false });
+    renderApp();
+    paste('Moody v. NetChoice');
+    submit();
+    const alert = await screen.findByRole('alert');
+    for (const line of alert.querySelectorAll('p')) expect(breaks(line)).toBe(true);
+  });
+});
+
 describe('the text is never cut to fit, and is refused openly when it is too long', () => {
   const ctx = setup();
   const counter = () => screen.queryByTestId('citation-count');
@@ -96,7 +131,7 @@ describe('the text is never cut to fit, and is refused openly when it is too lon
     paste(big(2000));
     expect(counter().textContent).toBe('2,000 of 2,000 characters.');
     expect(counter().className).not.toContain('text-red');
-    expect(fixIt().disabled).toBe(false);
+    expect(off()).toBe(false);
   });
 
   it('over the limit: says so, in words, and turns Fix it off instead of cutting the text', async () => {
@@ -107,7 +142,7 @@ describe('the text is never cut to fit, and is refused openly when it is too lon
         'or use Check a document for a longer text.'
     );
     expect(counter().className).toContain('text-red');
-    expect(fixIt().disabled).toBe(true);
+    expect(off()).toBe(true);
     expect(box().getAttribute('aria-invalid')).toBe('true');
     expect(box().getAttribute('aria-describedby')).toBe('citation-count');
     // Neither the keyboard shortcut nor the style buttons send anything.
@@ -121,9 +156,9 @@ describe('the text is never cut to fit, and is refused openly when it is too lon
   it('is on again as soon as the text fits', () => {
     renderApp();
     paste(big(2001));
-    expect(fixIt().disabled).toBe(true);
+    expect(off()).toBe(true);
     paste(big(2000));
-    expect(fixIt().disabled).toBe(false);
+    expect(off()).toBe(false);
     expect(screen.queryByText(/too long/)).toBeNull();
   });
 
@@ -145,9 +180,19 @@ describe('the text is never cut to fit, and is refused openly when it is too lon
     renderApp();
     paste('\u{1F600}'.repeat(1700)); // 3,400 UTF-16 units
     expect(counter().textContent).toBe('1,700 of 2,000 characters.');
-    expect(fixIt().disabled).toBe(false);
+    expect(off()).toBe(false);
     paste('\u{1F600}'.repeat(2001));
-    expect(fixIt().disabled).toBe(true);
+    expect(off()).toBe(true);
+  });
+
+  it('uses a limit that was learned before the page was drawn', async () => {
+    ctx.server.on('/health', () => json({ status: 'healthy', boot_id: 'a', limits: { max_repair_chars: 300 } }));
+    await act(async () => { await checkHealth(); });
+    ctx.server.on('/health', () => new Promise(() => {}));
+    renderApp();
+    paste(big(301));
+    expect(off()).toBe(true);
+    expect(counter().textContent).toContain('301 of 300 characters');
   });
 
   it('uses the limit the server reports, if it reports one', async () => {
@@ -155,7 +200,7 @@ describe('the text is never cut to fit, and is refused openly when it is too lon
     renderApp();
     await settle();
     paste(big(301));
-    expect(fixIt().disabled).toBe(true);
+    expect(off()).toBe(true);
     expect(counter().textContent).toContain('301 of 300 characters');
   });
 });
@@ -295,7 +340,7 @@ describe('Clear and an empty paste cancel what is running, and an old answer nev
     // Loading is reset, so nothing waits for the answer.
     paste('U.S. Const. amend. XIV');
     expect(fixIt().textContent).toBe('Fix it');
-    expect(fixIt().disabled).toBe(false);
+    expect(off()).toBe(false);
     // The request itself was cancelled, not just ignored.
     expect(ctx.server.callsTo('/api/repair')[0].signal.aborted).toBe(true);
     await act(async () => { slow.resolve(json(reply)); });
@@ -332,7 +377,7 @@ describe('Clear and an empty paste cancel what is running, and an old answer nev
     expect(screen.queryByText(/603 U\.S\. 707/)).toBeNull();
     expect(screen.getByText('Try one of these')).toBeTruthy();
     paste('Moody v. NetChoice');
-    expect(fixIt().disabled).toBe(false);
+    expect(off()).toBe(false);
   });
 
   it('an error that is explained after a newer request has succeeded is not shown', async () => {
@@ -372,6 +417,63 @@ describe('Clear and an empty paste cancel what is running, and an old answer nev
   });
 });
 
+describe('an answer or a failure that was already on its way is dropped, though its request was aborted', () => {
+  const ctx = setup();
+
+  it('an answer for the cleared text', async () => {
+    const slow = deferred();
+    ctx.server.on('/api/repair', () => slow.promise, { ignoreAbort: true });
+    renderApp();
+    paste('Moody v. NetChoice');
+    submit();
+    await settle();
+    fireEvent.click(screen.getByRole('button', { name: 'Clear' }));
+    await act(async () => { slow.resolve(json(resolvedReply())); });
+    await settle();
+    expect(screen.queryByText(/603 U\.S\. 707/)).toBeNull();
+    expect(screen.getByText('Try one of these')).toBeTruthy();
+  });
+
+  it('an answer for the first of two runs, arriving after the second began', async () => {
+    const first = deferred();
+    const second = deferred();
+    ctx.server.sequence('/api/repair', [() => first.promise, () => second.promise], { ignoreAbort: true });
+    renderApp();
+    paste('Moody v. NetChoice');
+    submit();
+    await settle();
+    fireEvent.click(screen.getAllByRole('radio').find((radio) => radio.getAttribute('aria-checked') === 'false'));
+    await settle();
+    await act(async () => { first.resolve(json(resolvedReply({ formatted: '*FIRST ANSWER*, 1 U.S. 1 (1990).' }))); });
+    await settle();
+    expect(screen.queryByText(/FIRST ANSWER/)).toBeNull();
+    await act(async () => { second.resolve(json(resolvedReply({ formatted: '*SECOND ANSWER*, 2 U.S. 2 (1991).' }))); });
+    await settle();
+    expect(screen.getByText(/SECOND ANSWER/)).toBeTruthy();
+  });
+
+  it('a failure of the first of two runs, arriving after the second began', async () => {
+    const first = deferred();
+    const second = deferred();
+    ctx.server.sequence('/api/repair', [() => first.promise, () => second.promise], { ignoreAbort: true });
+    ctx.server.on('/health', () => json({ status: 'healthy', boot_id: 'a', endpoints: ['/api/repair'] }));
+    renderApp();
+    paste('Moody v. NetChoice');
+    submit();
+    await settle();
+    fireEvent.click(screen.getAllByRole('radio').find((radio) => radio.getAttribute('aria-checked') === 'false'));
+    await settle();
+    const healthBefore = ctx.server.count('/health');
+    await act(async () => { first.resolve(json({ detail: 'The first one failed.' }, 500)); });
+    await settle();
+    expect(alerts()).toEqual([]);
+    expect(ctx.server.count('/health')).toBe(healthBefore); // not even explained
+    await act(async () => { second.resolve(json(resolvedReply())); });
+    await settle();
+    expect(screen.getByText(/603 U\.S\. 707/)).toBeTruthy();
+  });
+});
+
 describe('a result is tied to the text it was worked out for', () => {
   const ctx = setup();
 
@@ -387,6 +489,8 @@ describe('a result is tied to the text it was worked out for', () => {
     expect(screen.getByTestId('stale-note').textContent).toBe(
       'This result is for the text before you changed it. Press Fix it to update it.'
     );
+    // Dimming the card would also dim the note and the citation below the readable contrast.
+    expect(screen.getByTestId('stale-note').parentElement.className).not.toMatch(/opacity/);
     expect(screen.getByRole('button', { name: 'Copy' }).disabled).toBe(true);
 
     // Going back to the same text makes it current again; so does asking again.
@@ -422,7 +526,8 @@ describe('a result is tied to the text it was worked out for', () => {
     paste(`${BROWN}; `.repeat(200)); // too long: choosing a style cannot run
     fireEvent.click(screen.getByRole('radio', { name: /Court document/ }));
     await settle();
-    expect(screen.getByTestId('stale-note')).toBeTruthy();
+    // Fix it is off, so the note does not tell the person to press it.
+    expect(screen.getByTestId('stale-note').textContent).toBe('This result is for the text before you changed it.');
     expect(ctx.server.count('/api/repair')).toBe(0);
   });
 });

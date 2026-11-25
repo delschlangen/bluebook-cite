@@ -2,6 +2,7 @@ import React, { useEffect, useId, useRef, useState } from 'react';
 import { renderCitation } from '../utils/citationText';
 import { noteForLookup, noteForLookupFailure } from '../utils/lookupNote';
 import { safeHttpUrl } from '../utils/safeUrl';
+import { suggestionFor } from '../utils/suggestion';
 import ExternalLink from './ExternalLink';
 
 function toFormData(citation) {
@@ -21,6 +22,9 @@ function toFormData(citation) {
     url: citation.url || '',
   };
 }
+
+// Text from the document or the server may have no place to break a line; it breaks anywhere.
+const TEXT = '[overflow-wrap:anywhere]';
 
 const isObject = (value) => value !== null && typeof value === 'object' && !Array.isArray(value);
 
@@ -46,6 +50,7 @@ export default function CitationEditor({
   onCancel,
   draft = null,
   onDraftChange,
+  focusOnOpen = false,
 }) {
   const [state, setState] = useState(() => draft ?? freshDraft(citation));
   // The latest state, readable from a handler that started before the last change (a look-up
@@ -56,6 +61,15 @@ export default function CitationEditor({
   // longer the current one (the editor was put away, or asked again) is dropped, not applied.
   const lookupRun = useRef(0);
   const lookupAbort = useRef(null);
+
+  // Opened from a card: the person's place is the editor, not the card they came from. (On a phone
+  // the sheet around the editor takes focus after this, and is the better place.)
+  const heading = useRef(null);
+  useEffect(() => {
+    if (focusOnOpen) heading.current?.focus();
+    // Only when the editor first appears.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   useEffect(
     () => () => {
@@ -78,6 +92,9 @@ export default function CitationEditor({
   };
 
   const handleLookup = async () => {
+    // The button stays focusable while it works (aria-disabled, not disabled), so focus does not
+    // fall to the page and Escape still reaches the sheet; a second press does nothing.
+    if (lookingUp) return;
     const run = ++lookupRun.current;
     lookupAbort.current?.abort();
     const controller = new AbortController();
@@ -213,7 +230,7 @@ export default function CitationEditor({
       
       default:
         return (
-          <p className="text-sm text-gray-500">
+          <p className="text-sm text-gray-600">
             No editable fields for this citation type.
           </p>
         );
@@ -221,26 +238,26 @@ export default function CitationEditor({
   };
 
   return (
-    <div className="bg-white border border-gray-200 rounded-lg">
+    <div className="bg-white border border-gray-200 rounded-lg min-w-0">
       <div className="sticky top-0 z-10 p-4 border-b bg-gray-50 rounded-t-lg flex items-start justify-between gap-3">
-        <div>
-          <h3 className="font-medium">Edit Citation</h3>
-          <p className="text-xs text-gray-600 mt-1">{citation.type}</p>
+        <div className="min-w-0">
+          <h3 ref={heading} tabIndex={-1} className="font-medium focus:outline-none">Edit Citation</h3>
+          <p className={`text-xs text-gray-600 mt-1 ${TEXT}`}>{citation.type}</p>
         </div>
-        {/* On a phone the editor is a sheet over the list; this is the way back to it. */}
+        {/* The way back to the list: the sheet on a phone, and the panel beside the list. */}
         <button
           type="button"
           onClick={onCancel}
           aria-label="Close editor and go back to the list"
-          className="lg:hidden min-h-[44px] min-w-[44px] px-3 rounded-lg border border-gray-300 bg-white text-sm font-medium text-gray-700"
+          className="flex-shrink-0 min-h-[44px] min-w-[44px] px-3 rounded-lg border border-gray-300 bg-white text-sm font-medium text-gray-700"
         >
           Close
         </button>
       </div>
       
-      <div className="p-4 space-y-4">
+      <div className="p-4 space-y-4 min-w-0">
         {/* Original */}
-        <div className="p-3 bg-gray-50 rounded text-sm font-mono text-gray-600 wrap-anywhere">
+        <div dir="auto" className={`p-3 bg-gray-50 rounded text-sm font-mono text-gray-600 ${TEXT}`}>
           {citation.raw_text}
         </div>
 
@@ -250,8 +267,8 @@ export default function CitationEditor({
           <button
             type="button"
             onClick={handleLookup}
-            disabled={lookingUp}
-            className="w-full min-h-[44px] px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed text-sm font-medium transition-colors"
+            aria-disabled={lookingUp || undefined}
+            className="w-full min-h-[44px] px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 aria-disabled:bg-gray-200 aria-disabled:text-gray-700 aria-disabled:hover:bg-gray-200 aria-disabled:cursor-wait text-sm font-medium transition-colors"
           >
             {lookingUp ? 'Looking up...' : 'Look Up in Database'}
           </button>
@@ -264,7 +281,7 @@ export default function CitationEditor({
             {lookupNote && (
               <p
                 data-testid="lookup-note"
-                className={`p-3 rounded-lg border text-sm leading-relaxed [overflow-wrap:anywhere] ${
+                className={`p-3 rounded-lg border text-sm leading-relaxed ${TEXT} ${
                   lookupNote.kind === 'none'
                     ? 'bg-gray-50 border-gray-200 text-gray-800'
                     : 'bg-amber-50 border-amber-200 text-amber-950'
@@ -274,13 +291,13 @@ export default function CitationEditor({
               </p>
             )}
             {lookupResults?.found && (
-              <div className="p-3 bg-green-50 border border-green-100 rounded-lg">
-                <p className="text-xs font-medium text-green-700 mb-2">
+              <div className="p-3 bg-green-50 border border-green-100 rounded-lg min-w-0">
+                <p className={`text-xs font-medium text-green-800 mb-2 ${TEXT}`}>
                   Found in {lookupResults.source || 'the database'}
                 </p>
                 <ExternalLink
                   href={safeHttpUrl(lookupResults.data?.absolute_url) || lookupResults.data?.url}
-                  className="inline-flex items-center min-h-[44px] text-xs text-blue-600 hover:underline"
+                  className="inline-flex items-center min-h-[44px] text-xs text-blue-700 hover:underline"
                 >
                   View source →
                 </ExternalLink>
@@ -294,27 +311,34 @@ export default function CitationEditor({
           {renderFields()}
         </div>
 
-        {/* Suggestion */}
-        {suggestion?.suggested_form && (
-          <div className="p-3 bg-blue-50 border border-blue-100 rounded-lg">
-            <p className="text-xs font-medium text-blue-700 mb-1">Formatted suggestion:</p>
-            <p className="text-sm font-mono text-blue-800">{renderCitation(suggestion.suggested_form)}</p>
-          </div>
-        )}
+        {/* Suggestion: not when it only repeats the input, and "so far" when the citation is not complete. */}
+        {(() => {
+          const suggested = suggestionFor(citation, suggestion);
+          if (!suggested) return null;
+          return (
+            <div className="p-3 bg-blue-50 border border-blue-100 rounded-lg min-w-0">
+              <p className="text-xs font-medium text-blue-800 mb-1">
+                {suggested.complete ? 'Formatted suggestion:' : suggested.label}
+              </p>
+              <p dir="auto" className={`text-sm font-mono text-blue-900 ${TEXT}`}>{renderCitation(suggested.text)}</p>
+            </div>
+          );
+        })()}
 
         {/* Actions */}
-        <div className="flex gap-3 pt-2">
+        {/* The two buttons share a row when they fit, and stack when they do not (text at 200%). */}
+        <div className="flex flex-wrap gap-3 pt-2">
           <button
             type="button"
             onClick={onCancel}
-            className="flex-1 min-h-[44px] px-4 py-2 border border-gray-300 text-gray-700 rounded-lg hover:bg-gray-50 text-sm font-medium transition-colors"
+            className="flex-1 min-w-fit min-h-[44px] px-4 py-2 border border-gray-300 text-gray-700 rounded-lg hover:bg-gray-50 text-sm font-medium transition-colors"
           >
             Cancel
           </button>
           <button
             type="button"
             onClick={handleSave}
-            className="flex-1 min-h-[44px] px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 text-sm font-medium transition-colors"
+            className="flex-1 min-w-fit min-h-[44px] px-4 py-2 bg-green-700 text-white rounded-lg hover:bg-green-800 text-sm font-medium transition-colors"
           >
             Save Changes
           </button>
@@ -327,7 +351,7 @@ export default function CitationEditor({
 function Field({ label, value, onChange, placeholder, type = 'text' }) {
   const id = useId();
   return (
-    <div>
+    <div className="min-w-0">
       <label htmlFor={id} className="block text-xs font-medium text-gray-600 mb-1">{label}</label>
       <input
         id={id}
@@ -335,7 +359,7 @@ function Field({ label, value, onChange, placeholder, type = 'text' }) {
         value={value}
         onChange={e => onChange(e.target.value)}
         placeholder={placeholder}
-        className="w-full px-3 py-2 border border-gray-300 rounded-lg text-base lg:text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+        className="w-full min-w-0 min-h-[44px] px-3 py-2 border border-gray-300 rounded-lg text-base lg:text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
       />
     </div>
   );

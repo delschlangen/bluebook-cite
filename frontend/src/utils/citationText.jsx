@@ -39,10 +39,17 @@ export function toHtml(text) {
  */
 export async function copyCitation(text) {
   if (!text) return false;
+  return writeToClipboard(toPlainText(text), toHtml(text));
+}
 
-  const plain = toPlainText(text);
-  const html = toHtml(text);
+/** Copy several citations, one to a line, in the same two flavors. */
+export async function copyCitations(texts) {
+  const list = (texts || []).filter(Boolean);
+  if (list.length === 0) return false;
+  return writeToClipboard(list.map(toPlainText).join('\n'), list.map(toHtml).join('<br>'));
+}
 
+async function writeToClipboard(plain, html) {
   try {
     if (navigator.clipboard?.write && typeof ClipboardItem !== 'undefined') {
       await navigator.clipboard.write([

@@ -12,7 +12,7 @@ import { fmt } from '../utils/format';
 
 const navButton =
   'min-h-[44px] px-4 rounded border border-gray-300 bg-white text-gray-800 ' +
-  'disabled:bg-gray-100 disabled:text-gray-500 disabled:border-gray-200 disabled:cursor-not-allowed';
+  'disabled:bg-gray-100 disabled:text-gray-600 disabled:border-gray-200 disabled:cursor-not-allowed';
 
 /**
  * One window of the document at a time. The window being shown can be kept by the parent
@@ -102,25 +102,33 @@ export default function DocumentPreview({
         </button>
       </div>
 
+      {/* A named region that takes focus, so the arrow keys scroll it from the keyboard. */}
       <div
         ref={paneRef}
         data-testid="preview-pane"
-        className="p-4 bg-white border border-gray-200 rounded-lg max-h-[600px] overflow-y-auto"
+        role="region"
+        aria-label="Document text"
+        tabIndex={0}
+        className="p-4 bg-white border border-gray-200 rounded-lg max-h-[600px] overflow-y-auto focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
       >
-        <div className="prose prose-sm max-w-none font-serif text-gray-800 whitespace-pre-wrap wrap-anywhere">
+        <div dir="auto" className="prose prose-sm max-w-none font-serif text-gray-800 whitespace-pre-wrap wrap-anywhere [overflow-wrap:anywhere]">
           {segments.map((segment, index) => {
+            // A marked passage is marked for the eye by its colour and for everything else by the
+            // words in front of it. Those words are not selected or copied with the passage.
             if (segment.type === 'citation') {
               return (
-                <span key={index} className="citation-highlight" title={`Citation (${segment.status})`}>
-                  {segment.text}
-                </span>
+                <React.Fragment key={index}>
+                  <span className="sr-only select-none">{`Citation (${segment.status}): `}</span>
+                  <mark className="citation-highlight">{segment.text}</mark>
+                </React.Fragment>
               );
             }
             if (segment.type === 'unsourced') {
               return (
-                <span key={index} className="unsourced-highlight" title="May need citation">
-                  {segment.text}
-                </span>
+                <React.Fragment key={index}>
+                  <span className="sr-only select-none">Statement that may need a citation: </span>
+                  <mark className="unsourced-highlight">{segment.text}</mark>
+                </React.Fragment>
               );
             }
             return <span key={index}>{segment.text}</span>;

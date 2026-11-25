@@ -36,7 +36,7 @@ export function RuleLabel({ rule }) {
   return (
     <span className="min-w-0 max-w-full text-xs font-mono text-blue-700 [overflow-wrap:anywhere]">
       <span className="whitespace-nowrap">Rule {rule.number}</span>
-      <span className="font-sans text-gray-500"> · {rule.title}</span>
+      <span className="font-sans text-gray-600"> · {rule.title}</span>
     </span>
   );
 }
@@ -65,7 +65,7 @@ export default function CitationTypeGuide({ style, defaultOpenId = null }) {
     <div className="space-y-5">
       {families.map((family) => (
         <section key={family.id}>
-          <h3 className="text-xs font-semibold uppercase tracking-wide text-gray-500 mb-2">
+          <h3 className="text-xs font-semibold uppercase tracking-wide text-gray-600 mb-2">
             {family.label}
           </h3>
           <ul className="space-y-1.5">
@@ -82,13 +82,13 @@ export default function CitationTypeGuide({ style, defaultOpenId = null }) {
                                rounded-lg"
                   >
                     <span className="min-w-0">{type.label}</span>
-                    <span className="flex-shrink-0 text-xs font-normal text-gray-400">{open ? 'Hide' : 'Show'}</span>
+                    <span className="flex-shrink-0 text-xs font-normal text-gray-600">{open ? 'Hide' : 'Show'}</span>
                   </button>
 
                   {open && (
                     <div className="px-3 pb-3 space-y-3 border-t border-gray-100 pt-3">
                       <div>
-                        <p className="text-xs font-medium text-gray-500 mb-1">The finished shape</p>
+                        <p className="text-xs font-medium text-gray-600 mb-1">The finished shape</p>
                         <p className="text-sm text-gray-900 leading-relaxed">
                           {renderTemplate(type.template)}
                         </p>
@@ -96,7 +96,7 @@ export default function CitationTypeGuide({ style, defaultOpenId = null }) {
 
                       {type.example && (
                         <div>
-                          <p className="text-xs font-medium text-gray-500 mb-1">Example</p>
+                          <p className="text-xs font-medium text-gray-600 mb-1">Example</p>
                           <p className="text-sm text-gray-900 leading-relaxed">
                             {renderCitation(type.example)}
                           </p>
@@ -109,11 +109,11 @@ export default function CitationTypeGuide({ style, defaultOpenId = null }) {
                             <div className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-0.5">
                               <span className="min-w-0 font-medium text-gray-800 [overflow-wrap:anywhere]">
                                 {f.label}
-                                {!f.required && <span className="font-normal text-gray-400"> (optional)</span>}
+                                {!f.required && <span className="font-normal text-gray-600"> (optional)</span>}
                               </span>
                               <RuleLabel rule={f.display_rule} />
                             </div>
-                            <p className="text-gray-600 leading-relaxed">{f.why}</p>
+                            <p className="text-gray-600 leading-relaxed [overflow-wrap:anywhere]">{f.why}</p>
                           </li>
                         ))}
                       </ul>
@@ -121,14 +121,14 @@ export default function CitationTypeGuide({ style, defaultOpenId = null }) {
                       <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
                         <ConfidenceNote level={type.confidence} />
                         {!type.recognises && (
-                          <span className="text-xs text-gray-500">
+                          <span className="text-xs text-gray-600">
                             Guidance only: this tool will not rewrite a pasted citation of this kind.
                           </span>
                         )}
                       </div>
 
                       {type.notes.map((note) => (
-                        <p key={note} className="text-xs text-gray-600 leading-relaxed">{note}</p>
+                        <p key={note} dir="auto" className="text-xs text-gray-600 leading-relaxed [overflow-wrap:anywhere]">{note}</p>
                       ))}
                     </div>
                   )}
@@ -139,7 +139,7 @@ export default function CitationTypeGuide({ style, defaultOpenId = null }) {
         </section>
       ))}
 
-      {EDITION_NOTE && <p className="text-xs text-gray-500 leading-relaxed">{EDITION_NOTE}</p>}
+      {EDITION_NOTE && <p className="text-xs text-gray-600 leading-relaxed">{EDITION_NOTE}</p>}
     </div>
   );
 }

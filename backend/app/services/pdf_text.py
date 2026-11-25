@@ -59,92 +59,250 @@ _LIGATURES = {
 _LIG_TABLE = str.maketrans(_LIGATURES)
 # characters some producers use for the hyphen drawn at a line end
 _HYPHENS = "-\u2010\u2011\u00ad"
+# pdfium writes U+0002 (get_text_bounded) or U+FFFE (get_text_range) in place of a hyphen that ended
+# a line, where it joined the two halves. Both are read as U+0002 from here on.
+_MARKER = "\x02"
+# Two marks private to this module, written where a line ended in a hyphen: "frag<P>next" is a hyphen
+# the page alone cannot decide, "frag<P>-next" is one it kept. Control characters are removed from the
+# text before either is written, so neither can come from a file, and _settle_hyphens leaves none.
+_PENDING = "\x7f"
+_KEPT = _PENDING + "-"
 
-# A hyphen that ends a line: the word fragment before it, the hyphen, ONE line break, then the first
-# token of the next line and the token after it on that line (at most 40 characters of each: all the
-# decision needs). One line break only: a blank line is a paragraph break, and a word is never broken
-# across paragraphs ("five-\n\nyear" must not become "fiveyear").
+# A hyphen that ends a line: the word fragment before it, then either pdfium's marker (with or without
+# the line break pdfium_layout keeps after it) or a hyphen and ONE line break, then the first token of
+# the next line and the token after it on that line (at most 40 characters of each: all the decision
+# needs). One line break only: a blank line is a paragraph break, and a word is never broken across
+# paragraphs ("five-\n\nyear" must not become "fiveyear").
 _LINE_END_HYPHEN = re.compile(
-    rf"(?<![A-Za-z0-9])([A-Za-z0-9]++)([{_HYPHENS}])[ \t]*+\n[ \t]*+(?=(\S{{1,40}})(?:[ \t]++(\S{{1,40}}))?)"
+    rf"(?<![A-Za-z0-9])([A-Za-z0-9]++)"
+    rf"(?:({_MARKER})(?:[ \t]*+\n[ \t]*+(?=\S))?|([{_HYPHENS}])[ \t]*+\n[ \t]*+)"
+    rf"(?=(\S{{1,40}})(?:[ \t]++(\S{{1,40}}))?)"
 )
 
 # Line-end dehyphenation: is the hyphen one the typesetter added to break a word (drop it and join:
-# "regu-\nlation" -> "regulation") or part of the spelling (keep it: "state-\nof-the-art")? It
-# cannot be known from the text, so the rule keeps the hyphen whenever the compound reading is
-# plausible, because a wrongly kept hyphen ("regu-lation") costs a reader nothing while a wrongly
-# joined compound ("stateof-the-art", "Lopezde la Cruz") corrupts a name or a citation. It keeps it when
-#   1. the next line starts with a digit or a capital: GAO-\n16-552, 10-\nK, Smith-\nJones, 1981-\n1983
-#   2. the fragment is one character, holds a digit, or is an all-capitals acronym: e-\nmail, 5-\nyear,
-#      FDA-\napproved
-#   3. the fragment is a prefix that is nearly always hyphenated (non, anti, self, ...), or ends in the
-#      vowel the next line starts with (re-\nenacted, co-\noperate)
-#   4. the next line's first token is already hyphenated (state-\nof-the-art), or is "of" or "the" on its
-#      own, or is a name particle after a capitalised fragment and before a capitalised word or another
-#      particle (Lopez-\nde la Cruz, Garcia-\nde Leon)
-# and otherwise drops it, as it always did, except that "and" or "or" on its own is a suspended hyphen
-# ("pre-\nand post-trial" is "pre- and post-trial": the hyphen stays and so does the space). Particles are not accepted on their own because the last
-# syllable of an ordinary word is often one ("Sulli-\nvan", "gar-\nden", "or-\nder", "mo-\ndel"). A soft
-# hyphen (U+00AD) is the exception to 2-4: the typesetter chose that break and it is never part of a
-# spelling. Inside a URL a hyphen before a lower-case word is left alone: it is part of the address
-# wherever the line broke (_join_wrapped_urls joins a wrapped URL on its own evidence). If the next line
-# does not start with two lower-case letters (a quotation mark, a bracket, a single letter) the text is
+# "regu-\nlation" -> "regulation") or part of the spelling (keep it: "state-\nof-the-art",
+# ".../wp-\ndyn/content/")? One page cannot tell, and the two mistakes do not cost the same. A
+# typesetter's hyphen wrongly kept ("regu-lation") is visible but harmless in prose, though inside a
+# party name it breaks the lookup ("Massa-chusetts"). A real hyphen wrongly dropped corrupts a web
+# address beyond recovery ("wpdyn/content") or a compound ("concealedcarry"). And a document written
+# in Word has no typesetter's hyphens at all: every hyphen that ends a line in it is the author's.
+# So a hyphen that pdfium marked and a literal hyphen followed by one line break are decided by one
+# rule, and the rule asks the whole document:
+#   1. Inside a URL (the unbroken run of non-space characters before the break holds http://,
+#      https:// or www.) the hyphen is part of the address. A break pdfium marked is joined with its
+#      hyphen (pdfium marks only a break it joined across). A hyphen and a line break are left for
+#      _join_wrapped_urls, which joins a wrapped URL on its own evidence; once it has joined a line,
+#      every line-end hyphen in that line's first token is a hyphen of the address too.
+#   2. Before a digit or a capital the hyphen stays: GAO-\n16-552, 10-\nK, Smith-\nJones, 1981-\n1983.
+#      (A word in capitals broken before capitals, "MERCHANTABILI-\nTY", is asked about in 3b and 3c
+#      first and keeps its hyphen unless the document shows the word whole.)
+#   3. Before a lower-case word, in this order:
+#      a. On the page's own evidence it stays if the fragment is one character, holds a digit or is an
+#         all-capitals acronym (e-\nmail, 5-\nyear, FDA-\napproved), or if the next line starts with a
+#         name particle after a capitalised fragment and before a capitalised word or another
+#         particle (Lopez-\nde la Cruz, Garcia-\nde Leon; not "Sulli-\nvan": the last syllable of an
+#         ordinary word is often a particle). "and" or "or" on its own is a suspended hyphen
+#         ("pre-\nand post-trial" is "pre- and post-trial": the hyphen stays and so does the space).
+#         A soft hyphen (U+00AD) goes: the typesetter chose that break and it is never part of a
+#         spelling.
+#      b. The hyphenated form ("concealed-carry") stands elsewhere in the document on one line: it stays.
+#      c. The joined form ("regulation") stands elsewhere in the document as a word: it goes.
+#      d. The document is not hyphenated at all (see below): it stays.
+#      e. The guesses the rule always made: the fragment is a prefix that is nearly always hyphenated
+#         (non, anti, self, ...) or ends in the vowel the next line starts with (re-\nenacted,
+#         co-\noperate), or the next line's first token is already hyphenated (state-\nof-the-art) or
+#         is "of" or "the" on its own: it stays.
+#      f. It reads as a compound: both halves stand elsewhere in the document as words on their own,
+#         each of three letters or more and the fragment in lower case ("safe-\nstorage"), or the
+#         fragment follows a hyphen and is a word of the document ("lost-or-\nstolen"): it stays.
+#      g. Otherwise it goes: a fragment that is not a word ("regu-\nlation", "Sulli-\nvan",
+#         "Branden-\nburg").
+# The evidence in 3b, 3c and 3f is read from every page, in lower case, with URLs left out (a domain
+# runs words together: commonsense.org says nothing about "common-sense") and never from another
+# line end: a hyphen kept at a line end carries a private mark until every break is settled, so one
+# guess cannot vouch for the next.
+#
+# What kind of document it is (3d, 3e) is read off the breaks that 3b and 3c settle. None the
+# typesetter's and two or more real: nothing in it is hyphenated, and what is left is a compound with
+# a half the document uses only once ("evidence-\nbacked"), so 3d keeps it. More the typesetter's
+# than real: its typesetter breaks words, and two guesses of 3e then need more: "ex" needs a word of
+# the document after it ("ex-\nplained" is a broken word far more often than "ex-\nwife" is a
+# compound), and a next token that is already hyphenated needs both halves to be words of the
+# document ("roy-\nalty-free" is not "state-\nof-the-art"). The producer named in the PDF's metadata
+# is not asked: on the test corpus LibreOffice and Chromium each wrote both kinds of document.
+#
+# Why this order. 3a, 3b and 3c are evidence; 3d-3g are guesses, ordered so that a URL or a compound
+# is never damaged where the document speaks, and a name is joined unless the document shows it
+# hyphenated (a capitalised fragment is never taken for half of a compound in 3f: "Mary-\nland").
+# Three letters in 3f because two-letter words are also syllables ("in-\nformation", "is-\nsue").
+# A document with no evidence either way (one page, nothing repeated) gets 3a, 3e and 3g: exactly
+# what a literal hyphen always got. Across a blank line nothing is joined, and if the next line does
+# not start with a word (a quotation mark, a bracket, one letter after a literal hyphen) the text is
 # left as it is.
+#
+# Measured. The Word document this was written for has 148 line-end hyphens, 80 of them before a
+# lower-case word (70 inside URLs): the old rule dropped all 80, this one none. On six documents set
+# with real hyphenation (518 breaks) no word that was joined before is left broken.
 _STRONG_PREFIXES = frozenset(
     "non anti self ex quasi semi vice half well ill cross e co post multi counter all".split()
 )
 _SUSPENDED_WORDS = frozenset("and or".split())     # "pre-\nand post-trial": a suspended hyphen, then a space
 _JOINING_WORDS = frozenset("of the".split())
 _PARTICLES = frozenset("de la le el del della di da du des van von der den dos das do".split())
-
-
-def _dehyphenate(m: re.Match) -> str:
-    frag, hyphen, nxt, after = m.group(1), m.group(2), m.group(3), m.group(4)
-    first = nxt[0]
-    if first.isdigit() or ("A" <= first <= "Z"):
-        return frag + "-"
-    # Inside a URL (judged by the 300 characters before the fragment) the hyphen is part of the address.
-    before = m.string[max(0, m.start(1) - 300): m.start(1)]
-    token = before[max(before.rfind(" "), before.rfind("\t"), before.rfind("\n")) + 1:]
-    if _URL_START.match(token):
-        return m.group(0)
-    if not (len(nxt) >= 2 and nxt[:2].isascii() and nxt[:2].isalpha() and nxt[:2].islower()):
-        return m.group(0)
-    if hyphen == "\u00ad":
-        return frag
-    low, word = frag.lower(), nxt.lower()
-    if word in _SUSPENDED_WORDS:
-        return frag + "- "           # the line break stood where the space was
-    if (
-        len(frag) == 1
-        or any(c.isdigit() for c in frag)
-        or (len(frag) >= 2 and frag.isupper())
-        or low in _STRONG_PREFIXES
-        or (len(frag) >= 2 and low[-1] in "aeiou" and nxt[0].lower() == low[-1])
-        or "-" in nxt
-        or word in _JOINING_WORDS
-        or (
-            word in _PARTICLES
-            and frag[0].isupper()
-            and after is not None
-            and (after[0].isupper() or after.lower() in _PARTICLES)
-        )
-    ):
-        return frag + "-"
-    return frag
-
-
-# pdfium writes U+0002 (get_text_bounded) or U+FFFE (get_text_range) where it removed a line-end hyphen
-# and joined the two halves of the word
-_PDFIUM_HYPHEN_LOWER = re.compile(r"[\x02\ufffe](?=[a-z])")
-_CTRL = re.compile(r"[\x00-\x08\x0b\x0e-\x1f\x7f]")
-
-
-# the same marker followed by the line break that pdfium_layout keeps between rectangles
-_PDFIUM_HYPHEN_NL_LOWER = re.compile(r"[\x02\ufffe][ \t]*+\n[ \t]*+(?=[a-z])")
-_PDFIUM_HYPHEN_NL_KEEP = re.compile(r"[\x02\ufffe][ \t]*+\n[ \t]*+(?=[0-9A-Z])")
-
+# Rule 3d: the shortest half that counts as a word of a compound.
+_COMPOUND_HALF = 3
 
 _URL_START = re.compile(r"(?:https?://|www\.)", re.I)
+
+
+def _decide_line_end_hyphens(text: str) -> str:
+    """Rules 1, 2 and 3a for every line-end hyphen of one page; a break that needs the whole document
+    is left as _PENDING for _settle_hyphens. Linear: each match looks back no further than the match
+    before it."""
+    last_end, same_token, in_url = 0, False, False
+
+    def decide(m: re.Match) -> str:
+        nonlocal last_end, same_token, in_url
+        frag, marked, hyphen, nxt, after = m.group(1), m.group(2) is not None, m.group(3), m.group(4), m.group(5)
+        # Is the break inside a URL? The token it is in runs back to the last space, or, if there is
+        # none since the break before this one and that break was joined, it is the same token still.
+        s = m.string
+        space = max(s.rfind(" ", last_end, m.start()), s.rfind("\t", last_end, m.start()), s.rfind("\n", last_end, m.start()))
+        if space >= 0:
+            in_url = _URL_START.search(s, space + 1, m.end(1)) is not None
+        elif not (same_token and in_url):
+            in_url = _URL_START.search(s, last_end, m.end(1)) is not None
+        last_end = m.end()
+        same_token = True
+        first = nxt[0]
+        if first.isdigit() or ("A" <= first <= "Z"):
+            if in_url:
+                return frag + "-"
+            if len(frag) >= 2 and frag.isalpha() and frag.isupper() and nxt[:2].isascii() and nxt[:2].isalpha() and nxt[:2].isupper():
+                return frag + _PENDING          # a word in capitals: the document may show it whole (3c)
+            return frag + _KEPT
+        if in_url:
+            # pdfium marks only a break it joined across; a hyphen and a line break are left for
+            # _join_wrapped_urls, which joins a wrapped URL on its own evidence
+            return frag + "-" if marked else m.group(0)
+        if marked:
+            if not "a" <= first <= "z":
+                same_token = len(m.group(0)) == len(frag) + 1
+                return frag + "-" + m.group(0)[len(frag) + 1:]
+        elif not (len(nxt) >= 2 and nxt[:2].isascii() and nxt[:2].isalpha() and nxt[:2].islower()):
+            same_token = False
+            return m.group(0)
+        if hyphen == "\u00ad":
+            return frag
+        word = nxt.lower()
+        if word in _SUSPENDED_WORDS:
+            same_token = False
+            return frag + "- "           # the line break stood where the space was
+        if (
+            len(frag) == 1
+            or any(c.isdigit() for c in frag)
+            or (len(frag) >= 2 and frag.isupper())
+            or (
+                word in _PARTICLES
+                and frag[0].isupper()
+                and after is not None
+                and (after[0].isupper() or after.lower() in _PARTICLES)
+            )
+        ):
+            return frag + _KEPT
+        return frag + _PENDING
+
+    return _LINE_END_HYPHEN.sub(decide, text)
+
+
+# An undecided break: the fragment, the mark, then the word that follows and the rest of its token.
+_PENDING_BREAK = re.compile(rf"(?<![A-Za-z0-9])([A-Za-z0-9]++){_PENDING}(?=([A-Za-z][A-Za-z0-9]*+)(\S{{0,40}}))")
+# The evidence, read from lower-cased text with its URLs taken out: a word, and two words with a hyphen
+# between them on one line ("of-the" is found in "state-of-the-art"). Neither touches a mark, so a
+# hyphen that ended a line is never evidence for another one.
+_PLAIN_WORD = re.compile(rf"(?<![a-z0-9{_PENDING}])[a-z0-9]++(?!{_PENDING})")
+_PLAIN_PAIR = re.compile(rf"(?<![a-z0-9{_PENDING}])(?=([a-z0-9]++-[a-z0-9]++)(?!{_PENDING}))")
+_URL_TOKEN = re.compile(r"(?:https?://|www\.)\S++", re.I)
+
+
+def _settle_hyphens(pages: list[str]) -> list[str]:
+    """Rule 3b-3f for the breaks that _decide_line_end_hyphens left undecided, with every page of the
+    document as evidence; then the marks are taken out. Linear in the text: one pass to collect what
+    is asked about, one over the document to see which of it occurs, one to write the answers."""
+    if not any(_PENDING in page for page in pages):
+        return pages
+    asked: set[str] = set()
+    for page in pages:
+        if _PENDING in page:
+            for m in _PENDING_BREAK.finditer(page):
+                low, word = m.group(1).lower(), m.group(2).lower()
+                asked.update((low, word, low + word, f"{low}-{word}"))
+    seen: set[str] = set()
+    if asked:
+        for page in pages:
+            prose = _URL_TOKEN.sub(" ", page).lower()
+            seen.update(asked.intersection(_PLAIN_WORD.findall(prose)))
+            seen.update(asked.intersection(_PLAIN_PAIR.findall(prose)))
+
+    # What kind of document is this? Count the breaks the document itself settles: `real` have their
+    # compound written with a hyphen elsewhere (3b), `typeset` have their word written whole elsewhere
+    # and never with a hyphen (3c).
+    real = typeset = 0
+    for page in pages:
+        if _PENDING in page:
+            for m in _PENDING_BREAK.finditer(page):
+                low, word = m.group(1).lower(), m.group(2).lower()
+                if f"{low}-{word}" in seen:
+                    real += 1
+                elif low + word in seen:
+                    typeset += 1
+    hyphenated = typeset > real                    # set by a typesetter who breaks words
+    unhyphenated = typeset == 0 and real >= 2      # no word is broken anywhere: every hyphen is the author's
+
+    def settle(m: re.Match) -> str:
+        frag, rest = m.group(1), m.group(3)
+        low, word = frag.lower(), m.group(2).lower()
+        if f"{low}-{word}" in seen:
+            return frag + "-"                                                      # 3b
+        if low + word in seen:
+            return frag                                                            # 3c
+        if unhyphenated or m.group(2)[0].isupper():
+            return frag + "-"                                                      # 3d, and rule 2 for capitals
+        both = low in seen and word in seen
+        if (
+            (low in _STRONG_PREFIXES and not (hyphenated and low == "ex" and word not in seen))
+            or (len(frag) >= 2 and low[-1] in "aeiou" and word[0] == low[-1])
+            or ("-" in rest and (both or not hyphenated))
+            or (not rest and word in _JOINING_WORDS)
+        ):
+            return frag + "-"                                                      # 3e
+        if m.start() > 0 and m.string[m.start() - 1] == "-":
+            compound = low in seen and len(low) >= 2                               # 3f, inside a compound
+        else:
+            compound = both and frag.islower() and len(low) >= _COMPOUND_HALF and len(word) >= _COMPOUND_HALF
+        return frag + "-" if compound else frag                                    # 3f, else 3g
+
+    return [
+        _PENDING_BREAK.sub(settle, page).replace(_KEPT, "-").replace(_PENDING, "") if _PENDING in page else page
+        for page in pages
+    ]
+
+
+def _without_marks(text: str) -> str:
+    """A page as it reads with every undecided hyphen dropped: what the reader produced before the
+    document rule, and so what the garble measures and the URL evidence have always been given."""
+    return text.replace(_KEPT, "-").replace(_PENDING, "") if _PENDING in text else text
+
+
+# every control character but pdfium's marker, which the hyphen rule reads
+_CTRL = re.compile(r"[\x00\x01\x03-\x08\x0b\x0e-\x1f\x7f]")
+# A marker the hyphen rule could not read (no letter or digit before it, or nothing after it to
+# join): as before, dropped before a lower-case letter and a hyphen anywhere else.
+_PDFIUM_HYPHEN_NL_LOWER = re.compile(rf"{_MARKER}[ \t]*+\n[ \t]*+(?=[a-z])")
+_PDFIUM_HYPHEN_NL_KEEP = re.compile(rf"{_MARKER}[ \t]*+\n[ \t]*+(?=[0-9A-Z])")
+_PDFIUM_HYPHEN_LOWER = re.compile(rf"{_MARKER}(?=[a-z])")
+
+
 _CONT_CHARS = "/-_=&?#%"
 _CONT_TOKEN = re.compile(r"[A-Za-z0-9/_\-.%~#?=&:@+,;()]++")
 # The start of a new numbered, bulleted or footnote line: never a continuation of the URL above it.
@@ -186,7 +344,12 @@ def _is_url_continuation(tok: str, nxt_line: str, nxt_parts: list[str]) -> bool:
 
 def _join_wrapped_urls(text: str) -> str:
     """Re-join a URL that the producer wrapped (see _is_url_continuation for the evidence).
-    Linear in the text: each line is split once, and only the last token is carried forward."""
+    Linear in the text: each line is split once, and only the last token is carried forward.
+
+    The line that continues a URL may hold line-end hyphens of its own, decided before anyone knew
+    it was part of an address ("https://x.org/press/" above "gun-industry-" above "accountable.").
+    The evidence is read with those as they used to be read (_without_marks), and once the line is
+    joined every one of them in its first token is a hyphen of the address (rule 1)."""
     if "http" not in text and "www." not in text:
         return text
     lines = text.split("\n")
@@ -197,11 +360,16 @@ def _join_wrapped_urls(text: str) -> str:
         parts = lines[i].split()
         tok = parts[-1] if parts else ""
         while i + 1 < n and tok and _URL_START.match(tok) and len(tok) < _MAX_URL_CHARS:
-            nxt_parts = lines[i + 1].split()
-            if not nxt_parts or not _is_url_continuation(tok, lines[i + 1], nxt_parts):
+            nxt_line = lines[i + 1].lstrip()
+            nxt_parts = nxt_line.split()
+            if not nxt_parts or not _is_url_continuation(tok, _without_marks(lines[i + 1]), _without_marks(lines[i + 1]).split()):
                 break
+            if _PENDING in nxt_parts[0]:
+                first = nxt_parts[0].replace(_KEPT, "-").replace(_PENDING, "-")
+                nxt_line = first + nxt_line[len(nxt_parts[0]):]
+                nxt_parts[0] = first
             pieces[-1] = pieces[-1].rstrip()
-            pieces.append(lines[i + 1].lstrip())
+            pieces.append(nxt_line)
             tok = tok + nxt_parts[0] if len(nxt_parts) == 1 else nxt_parts[-1]
             i += 1
         out.append("".join(pieces))
@@ -209,20 +377,38 @@ def _join_wrapped_urls(text: str) -> str:
     return "\n".join(out)
 
 
-def repair_text(text: str) -> str:
+# A range of pages or of subsections broken after its en dash: "152\u2013\n53 (1973)", "\u00a7 12(a)\u2013\n(c)". Word,
+# Chrome and LibreOffice all break a line there, and the citation then ends at the dash (no pin cite,
+# no year). The halves are joined, as they already are after a hyphen (rule 2 above). Not before a
+# line that is only a number: that is a page number or the next footnote's, not the end of the range.
+_RANGE_BREAK = re.compile(r"(?<=[0-9)])\u2013[ \t]*+\n[ \t]*+(?=[0-9(])(?![0-9]{1,4}[ \t]*+(?:\n|\Z))")
+
+
+def _repair_page(text: str) -> str:
+    """Everything one page can be repaired with on its own. A line-end hyphen that needs the whole
+    document is left marked (_PENDING, _KEPT) for _settle_hyphens."""
     text = text.replace("\r\n", "\n").replace("\r", "\n").replace("\f", "\n")
-    text = _PDFIUM_HYPHEN_NL_LOWER.sub("", text)
-    text = _PDFIUM_HYPHEN_NL_KEEP.sub("-", text)
-    text = _PDFIUM_HYPHEN_LOWER.sub("", text)      # Enterpris\x02es -> Enterprises
-    text = text.replace("\x02", "-").replace("\ufffe", "-")   # GAO\x0216-552 -> GAO-16-552
+    text = text.replace("\ufffe", _MARKER)
     text = _CTRL.sub("", text)
     text = text.translate(_LIG_TABLE)
-    text = _LINE_END_HYPHEN.sub(_dehyphenate, text)
+    text = _decide_line_end_hyphens(text)
+    if _MARKER in text:
+        text = _PDFIUM_HYPHEN_NL_LOWER.sub("", text)
+        text = _PDFIUM_HYPHEN_NL_KEEP.sub("-", text)
+        text = _PDFIUM_HYPHEN_LOWER.sub("", text)
+        text = text.replace(_MARKER, "-")
     # a soft hyphen that survived inside a word was never printed
     text = text.replace("\u00ad", "")
     # U+2010/2011 inside words are plain hyphens for every regex downstream
     text = text.replace("\u2010", "-").replace("\u2011", "-")
+    text = _RANGE_BREAK.sub("\u2013", text)
     return _join_wrapped_urls(text)
+
+
+def repair_text(text: str) -> str:
+    """Repair one text that is a document on its own (read_pdf repairs page by page and settles the
+    line-end hyphens once, over all the pages)."""
+    return _settle_hyphens([_repair_page(text)])[0]
 
 
 # =========================== running header / footer / page-number removal ===========================
@@ -333,7 +519,43 @@ def _citation_veto(line: str) -> bool:
         return True
 
 
-def strip_running_lines(
+# How many times the edge of the page is looked at after running lines were taken off it, and the
+# share of the pages a line found that way must stand on. Nine in ten, not half: what comes to the
+# edge next is usually the body, and a line of the body that happens to repeat must stay (a
+# document made of one paragraph repeated lost 13% of its text to this at one half).
+_MAX_RUNNING_ROUNDS = 3
+_STACKED_FRACTION = 0.9
+
+
+def strip_running_lines(pages: list[str], *, return_report: bool = False, **rules):
+    """Return `pages` with running header/footer/page-number lines removed (same length, same order).
+
+    `veto(line) -> True` lets the caller protect additional lines (for example, anything the citation
+    extractor recognises).  With `return_report=True` the result is `(pages, report)` where report maps
+    each removed normalised line to the number of pages it was removed from. The other keywords are
+    those of _strip_running_lines_once.
+
+    A line is removed only if it stands in the first or last three lines of its page, repeats on
+    enough pages, is short, is not a citation, and, if its digits differ from page to page, they
+    count pages (_key, _digit_fields_are_page_counters). "Enough pages" is half of them, or half of
+    the even or of the odd ones for a line that stands on no page of the other kind (a law review
+    prints the author on the left-hand pages and the title on the right-hand ones). Once running
+    lines are gone the edge is looked at again: a letterhead of four lines at the top of every page
+    ends in a fourth line that is no less a running line than the first three. A line found on a
+    later look must stand on nine pages in ten (_STACKED_FRACTION).
+    """
+    out, report = _strip_running_lines_once(pages, **rules)
+    total: Counter = Counter(report)
+    stacked = {**rules, "min_fraction": max(rules.get("min_fraction", 0.5), _STACKED_FRACTION)}
+    for _ in range(_MAX_RUNNING_ROUNDS - 1):
+        if not report:
+            break
+        out, report = _strip_running_lines_once(out, **stacked)
+        total.update(report)
+    return (out, dict(total)) if return_report else out
+
+
+def _strip_running_lines_once(
     pages: list[str],
     *,
     edge_lines: int = 3,
@@ -345,20 +567,12 @@ def strip_running_lines(
     veto: Callable[[str], bool] | None = None,
     protect_short: bool = True,
     protect_citations: bool = True,
-    return_report: bool = False,
-):
-    """Return `pages` with running header/footer/page-number lines removed (same length, same order).
-
-    `veto(line) -> True` lets the caller protect additional lines (for example, anything the citation
-    extractor recognises).  With `return_report=True` the result is `(pages, report)` where report maps
-    each removed normalised line to the number of pages it was removed from.
-
-    A line is removed only if it repeats on enough pages (see the parameters), is short, is not a
-    citation, and, if its digits differ from page to page, they count pages (_key, _digit_fields_are_page_counters).
-    """
+) -> tuple[list[str], dict]:
+    """One look at the edge lines of every page: (pages without the running lines, what was removed)."""
     n_text_pages = sum(1 for p in pages if p and p.strip())
     if n_text_pages < boilerplate_min_pages:
-        return (list(pages), {}) if return_report else list(pages)
+        return list(pages), {}
+    of_parity = [sum(1 for pi, p in enumerate(pages) if pi % 2 == k and p and p.strip()) for k in (0, 1)]
 
     split = [p.split("\n") for p in pages]
     zones = [_edge_indices(lines, edge_lines) for lines in split]
@@ -391,9 +605,14 @@ def strip_running_lines(
         if protect_short and _letter_count(key) < 3 and not _is_boilerplate(raw, key):
             continue                                       # "Id.", "Ex. #", "Tr." and friends
         if _is_boilerplate(raw, key):
-            repeats = n_text_pages >= boilerplate_min_pages and count >= max(min_count, math.ceil(boilerplate_fraction * n_text_pages))
+            fraction, enough_pages = boilerplate_fraction, n_text_pages >= boilerplate_min_pages
         else:
-            repeats = n_text_pages >= min_pages and count >= max(min_count, math.ceil(min_fraction * n_text_pages))
+            fraction, enough_pages = min_fraction, n_text_pages >= min_pages
+        repeats = enough_pages and count >= max(min_count, math.ceil(fraction * n_text_pages))
+        if enough_pages and not repeats:
+            # an alternating head: on the left-hand pages only, or on the right-hand pages only
+            parities = {pi % 2 for pi in by_page}
+            repeats = len(parities) == 1 and count >= max(min_count, math.ceil(fraction * of_parity[parities.pop()]))
         if not repeats or not _digit_fields_are_page_counters(by_page):
             continue
         # Last, and only for a line that is about to be removed: a line that holds a citation, as far
@@ -430,11 +649,11 @@ def strip_running_lines(
                     continue
             keep.append(raw)
         out.append("\n".join(keep).strip("\n") if len(keep) != len(lines) else "\n".join(keep))
-    return (out, dict(removed)) if return_report else out
+    return out, dict(removed)
 
 
 # =========================== pdfium layout layer ===========================
-_LEAD_NUM = re.compile(r"^(\d{1,3})(?:\s+|(?=[A-Z\"\u201c\u2018(\[])|$)")
+_LEAD_NUM = re.compile(r"^(\d{1,4})(?:\s+|(?=[A-Z\"\u201c\u2018(\[])|$)")
 _BARE_NUMBER = re.compile(r"^\d{1,3}$")
 
 
@@ -462,12 +681,15 @@ def _build_lines(tp, whole: str, page_w: float, page_h: float, deadline: float |
         if not degenerate and (r < 0 or left > page_w or t < 0 or b > page_h):
             continue                      # off-page (hidden) text
         if cur is None:
-            cur = {"chars": [(ch, left, r)], "mb": b, "mt": t, "r": r, "l": left, "t": t, "b": b, "last": (left, b, r, t)}
+            cur = {"chars": [(ch, left, r)], "mb": b, "mt": t, "r": r, "l": left, "t": t, "b": b, "last": (left, b, r, t),
+                   "fh": None if degenerate or ch == " " else h}
             lines.append(cur)
             continue
         if degenerate:
             cur["chars"].append((ch, cur["r"], cur["r"]))
             continue
+        if cur["fh"] is None and ch != " ":
+            cur["fh"] = h                 # the height of the line's first character: see _mark_footnotes
         if (left, b, r, t) == cur["last"]:
             # pdfium expands a ligature glyph into 2-3 characters that all carry the glyph's box (same x AND y)
             cur["chars"].append((ch, left, r))
@@ -484,7 +706,8 @@ def _build_lines(tp, whole: str, page_w: float, page_h: float, deadline: float |
             if h > mh:
                 cur["mb"], cur["mt"] = b, t
         else:
-            cur = {"chars": [(ch, left, r)], "mb": b, "mt": t, "r": r, "l": left, "t": t, "b": b, "last": (left, b, r, t)}
+            cur = {"chars": [(ch, left, r)], "mb": b, "mt": t, "r": r, "l": left, "t": t, "b": b, "last": (left, b, r, t),
+                   "fh": None if ch == " " else h}
             lines.append(cur)
     for L in lines:
         L["h"] = L["mt"] - L["mb"]
@@ -559,28 +782,92 @@ def _drop_pleading_numbers(lines, page_w):
     return out
 
 
-def _mark_footnotes(lines, page_h, state):
-    weights = [(L["h"], len(L["text"])) for L in lines if len(L["text"]) > 25]
+def _body_height(lines) -> float | None:
+    """The line height of the page's body text: the largest height whose band (lines up to 7% lower)
+    holds a fifth of the characters in the page's long lines. None for a page of fewer than four.
+
+    It used to be the character-weighted median, which on a page that is more than half footnotes
+    (ordinary in a law review) is the height of the footnotes: nothing on the page was then smaller
+    than "the body" and no footnote on it was marked. A fifth, and a band, so that a heading, a
+    footer in larger type or one line in a bolder face is not taken for the body."""
+    weights = sorted(((L["h"], len(L["text"])) for L in lines if len(L["text"]) > 25), reverse=True)
     if len(weights) < 4:
-        return
-    weights.sort()
-    total = sum(w for _, w in weights)
-    acc, body_h = 0, weights[-1][0]
+        return None
+    need = 0.2 * sum(w for _, w in weights)
+    band = j = 0
     for h, w in weights:
-        acc += w
-        if acc >= total / 2:
-            body_h = h
-            break
+        while j < len(weights) and weights[j][0] > 0.93 * h:
+            band += weights[j][1]
+            j += 1
+        if band >= need:
+            return h
+        band -= w
+    return weights[-1][0]
+
+
+def _mark_footnotes(lines, page_h, state):
+    """Write "[^N] " in front of each line that starts a footnote, and set L["end"] on the last line
+    of a block of footnotes when other text of the page follows it (see _page_text).
+
+    A footnote starts with its number, and the numbers run on from page to page (state["next"]):
+    that is the evidence, whatever else varies. Where the footnotes stand is found in one of three
+    ways. (1) Lines smaller than the body, in the lower part of the page or with no body text below
+    them (on a page that is mostly footnotes they start near the top): the usual case. The first
+    line may be indented and the page may have two columns, so a start need not stand at the left
+    edge of the block. (2) A page with no body text at all (a long footnote runs over, or the page
+    is all footnotes): its text is smaller than the body of the pages before it (state["body"]), and
+    then only the number that is expected next is accepted, anywhere on the page, and not if the
+    number before it starts a line there too (that is a numbered list in small print). (3) Footnotes
+    set in the body's own size: a line in the lower part of the page that starts with a superscript
+    number."""
+    body_h = _body_height(lines)
+    if body_h is None:
+        return
+    chars = sum(len(L["text"]) for L in lines)
+    known = state.get("body")                     # (height, characters) of the document's body so far
+    overflow = known is not None and body_h < 0.93 * known[0] and chars < 2 * known[1]
+    if overflow:
+        body_h = known[0]
+    else:
+        sizes = state.setdefault("sizes", {})
+        key = round(body_h * 2)
+        seen_h, seen_chars = sizes.get(key, (0.0, 0))
+        sizes[key] = (max(seen_h, body_h), seen_chars + chars)
+        state["body"] = max(sizes.values(), key=lambda v: v[1])
     # geometry, not stream order: the block may be drawn before or after the body, and a running
     # footer may be drawn after it
-    region = [i for i, L in enumerate(lines) if L["h"] <= 0.93 * body_h and L["mt"] < 0.62 * page_h]
+    small = [i for i, L in enumerate(lines) if L["h"] <= 0.93 * body_h]
+    if overflow:
+        region = small
+    else:
+        # the lowest body line in each of 24 vertical strips of the page (a footer in large type, in
+        # the bottom tenth of the page, is not the body)
+        left = min(L["l"] for L in lines)
+        strip = max((max(L["r"] for L in lines) - left) / 24, 1.0)
+        floor = [page_h] * 24
+        for L in lines:
+            if L["h"] > 0.93 * body_h and len(L["text"]) > 25 and L["mt"] > 0.1 * page_h:
+                for k in range(max(0, int((L["l"] - left) / strip)), min(23, int((L["r"] - left) / strip)) + 1):
+                    floor[k] = min(floor[k], L["mb"])
+        region = [
+            i for i in small
+            if lines[i]["mt"] < 0.62 * page_h
+            or all(
+                lines[i]["mt"] <= floor[k]
+                for k in range(max(0, int((lines[i]["l"] - left) / strip)), min(23, int((lines[i]["r"] - left) / strip)) + 1)
+            )
+        ]
+    in_block = set(region)
     if not region:
-        return
-    left_edge = min(lines[i]["l"] for i in region)
+        # footnotes in the body's size: the number is still a superscript
+        region = [
+            i for i, L in enumerate(lines)
+            if L["mt"] < 0.62 * page_h and L["fh"] is not None and L["fh"] <= 0.8 * L["h"]
+        ]
     cands = []
     for i in region:
         m = _LEAD_NUM.match(lines[i]["text"])
-        if not m or lines[i]["l"] > left_edge + 6:
+        if not m:
             continue
         # a bare number in the page-footer zone is a page number, not a footnote
         if _BARE_NUMBER.match(lines[i]["text"]) and lines[i]["mt"] < 0.09 * page_h:
@@ -597,9 +884,13 @@ def _mark_footnotes(lines, page_h, state):
         return trial
 
     chosen: list = chain_from(exp, 0) if exp is not None else []
-    if not chosen:
+    if overflow and chosen and any(n == exp - 1 for i, n in cands if i < chosen[0][0]):
+        chosen = []
+    if not chosen and not overflow:
         # no history, or the counter was lost / restarted: accept the longest consecutive run on this page
         for s in range(len(cands)):
+            if cands[s][1] > 999:
+                continue                      # a year at the start of a line; four digits only continue a count
             trial = chain_from(cands[s][1], s)
             if len(trial) > len(chosen):
                 chosen = trial
@@ -607,8 +898,21 @@ def _mark_footnotes(lines, page_h, state):
             chosen = []                       # a lone number with no counter history is not evidence
     for i, n in chosen:
         lines[i]["text"] = _LEAD_NUM.sub(f"[^{n}] ", lines[i]["text"], count=1)
-    if chosen:
-        state["next"] = chosen[-1][1] + 1
+    if not chosen:
+        return
+    state["next"] = chosen[-1][1] + 1
+    # Where each run of footnotes ends: it goes on while the next line in the stream is below the one
+    # before and (when footnotes are smaller than the body) small. If it stops short of the next
+    # footnote or of the end of the page, what follows is not footnote text.
+    starts = {i for i, _ in chosen}
+    for i in starts:
+        j = i
+        while j + 1 < len(lines) and j + 1 not in starts:
+            nxt = lines[j + 1]
+            if nxt["mt"] > lines[j]["mt"] + 0.5 * lines[j]["h"] or (in_block and j + 1 not in in_block):
+                lines[j]["end"] = True
+                break
+            j += 1
 
 
 def _page_text(page, tp, state, deadline: float | None = None, layout: bool = True):
@@ -634,7 +938,10 @@ def _page_text(page, tp, state, deadline: float | None = None, layout: bool = Tr
     if not lines or before < 0.97 * n_plain or before > 1.03 * n_plain:
         return plain
     _mark_footnotes(lines, page_h, state)
-    return "\n".join(L["text"] for L in lines)
+    # A blank line closes a block of footnotes that other text of the page follows (a second column,
+    # a footer drawn afterwards); the blank line between pages closes the last one. Nothing else
+    # puts a blank line inside a page, so: a footnote ends at the next "[^N]" or the next blank line.
+    return "\n".join(L["text"] + "\n" if L.get("end") else L["text"] for L in lines)
 
 
 # ===========================================================================================
@@ -832,10 +1139,12 @@ def _pages_in_file(content: bytes, declared: int, max_pages: int) -> int:
     """The page count the file really has, when the declared one is too SMALL.
 
     pdfium trusts /Count, so a PDF that says 5 and holds 401 would be read as 5 pages and the other
-    396 dropped without a word. Only if the file visibly holds more page objects than it declares is
-    a second reader asked (it walks the page tree and ignores /Count); a file that does not is
-    taken at its word. Counts up to max_pages + 1, which is enough to refuse an over-long file."""
-    if _count_page_objects(content, declared) <= declared:
+    396 dropped without a word. A second reader is asked (it walks the page tree and ignores /Count)
+    if the file visibly holds more page objects than it declares, or if it keeps objects in
+    compressed object streams, where the quick count cannot see them (PDF 1.5 and later; the walk
+    takes 5 to 70 ms on files of 30 to 600 pages). A file that does neither is taken at its word.
+    Counts up to max_pages + 1, which is enough to refuse an over-long file."""
+    if _count_page_objects(content, declared) <= declared and b"/ObjStm" not in content:
         return declared
     try:
         with _time_limit(_PAGE_WALK_BUDGET_S):
@@ -977,9 +1286,9 @@ def _second_opinion(content: bytes, index: int, first: str, deadline: float | No
     try:
         with _time_limit(remaining):
             for alt in _pdfminer_pages(content, [index]):
-                alt = repair_text(alt)
+                alt = _repair_page(alt)
                 s1, c1, id1 = _quality(first)
-                s2, c2, id2 = _quality(alt)
+                s2, c2, id2 = _quality(_without_marks(alt))
                 better = (s2 >= s1 + 0.10 and c2 <= c1) or (c1 > 0.01 and c2 < c1 / 2 and not id2)
                 return alt if better else first
     except (_TimeUp, Exception):
@@ -996,6 +1305,7 @@ def read_pdf(content: bytes, *, max_pages: int | None = None, max_chars: int | N
     warnings: list[str] = []
     engine = "pdfium"
     still_garbled = 0
+    unread = 0                 # pages that could not be read at all
 
     try:
         declared = page_count(content)
@@ -1016,8 +1326,8 @@ def read_pdf(content: bytes, *, max_pages: int | None = None, max_chars: int | N
                         raise PdfTooLongError(_too_long(len(pages) + 1, max_pages))
                     if time.monotonic() > deadline:
                         raise PdfTimeoutError(_TOO_SLOW)
-                    text = repair_text(raw)
-                    total += len(text)
+                    text = _repair_page(raw)
+                    total += len(text) - text.count(_PENDING)    # a hyphen not yet decided is not yet text
                     if total > max_chars:
                         raise PdfTooLongError(_too_much_text(max_chars))
                     pages.append(text)
@@ -1059,7 +1369,7 @@ def read_pdf(content: bytes, *, max_pages: int | None = None, max_chars: int | N
         reader = iter_pdf_pages(content, stats, budget=budget, max_chars=max_chars, limit=n)
         try:
             for i, raw in enumerate(reader):
-                text = repair_text(raw)           # garbled-ness is judged on the RAW text; repair drops control characters
+                text = _repair_page(raw)          # garbled-ness is judged on the RAW text; repair drops control characters
                 evidence = _garble_evidence(raw)
                 if evidence == "strong":
                     # Only hard evidence earns the slow second reader. A page that merely has few
@@ -1070,7 +1380,7 @@ def read_pdf(content: bytes, *, max_pages: int | None = None, max_chars: int | N
                     garbled.append(i)
                     if len(kept_raw) < MAX_FALLBACK_PAGES:
                         kept_raw[i] = raw
-                total += len(text)
+                total += len(text) - text.count(_PENDING)        # a hyphen not yet decided is not yet text
                 if total > max_chars:
                     raise PdfTooLongError(_too_much_text(max_chars))
                 pages.append(text)
@@ -1091,7 +1401,7 @@ def read_pdf(content: bytes, *, max_pages: int | None = None, max_chars: int | N
                     pages[i], replaced, engine = alt, True, "pdfium+pdfminer"
             # A page whose second opinion did not clearly improve it still counts toward
             # rejecting the file (only strong evidence is ever in this list).
-            if not replaced or _looks_garbled(pages[i]):
+            if not replaced or _looks_garbled(_without_marks(pages[i])):
                 still_garbled += 1
 
         if in_file > n:
@@ -1099,7 +1409,7 @@ def read_pdf(content: bytes, *, max_pages: int | None = None, max_chars: int | N
             try:
                 with _time_limit(max(0.0, deadline - time.monotonic())):
                     for raw in _pdfminer_pages(content, set(range(n, in_file))):
-                        pages.append(repair_text(raw))
+                        pages.append(_repair_page(raw))
             except _TimeUp:
                 raise PdfTimeoutError(_TOO_SLOW) from None
             except PdfReadError:
@@ -1128,15 +1438,22 @@ def read_pdf(content: bytes, *, max_pages: int | None = None, max_chars: int | N
                     f"This PDF says it has {declared} pages but the file holds {real}. "
                     f"All {real} were read."
                 )
-        if sum(len(p) for p in pages) > max_chars:
-            raise PdfTooLongError(_too_much_text(max_chars))
         if stats.get("failed_pages"):
+            unread = stats["failed_pages"]
             warnings.append(f"{stats['failed_pages']} page(s) of this PDF could not be read and were skipped.")
         if stats.get("unlaid_pages"):
             warnings.append(
                 f"{stats['unlaid_pages']} page(s) hold an unusually large amount of text and were read "
                 "without layout analysis, so footnote marks may be missing there."
             )
+
+    # The line-end hyphens that one page could not decide are settled here, once, with every page as
+    # evidence: after the last page is in (so the evidence is the whole document) and before anything
+    # below reads the text. Until now each was one private character that the counts above left out,
+    # so the text limit is checked on the text as it finally reads.
+    pages = _settle_hyphens(pages)
+    if sum(len(p) for p in pages) > max_chars:
+        raise PdfTooLongError(_too_much_text(max_chars))
 
     empty = sum(1 for p in pages if len(p.strip()) < 20)
     if still_garbled and still_garbled >= 0.5 * len(pages):
@@ -1150,7 +1467,9 @@ def read_pdf(content: bytes, *, max_pages: int | None = None, max_chars: int | N
         warnings.append(f"{empty} of {len(pages)} pages have no readable text (scanned pages need OCR).")
     if still_garbled:
         warnings.append(f"{still_garbled} page(s) have an unreadable text layer and may need OCR.")
-    if b"/Encrypt" in content:
+    # Encryption is worth a word only when something did not come out: a file that is merely locked
+    # against copying (an owner password, no user password) opens and reads like any other.
+    if b"/Encrypt" in content and (empty or still_garbled or unread or engine == "pdfminer"):
         warnings.append("This PDF is encrypted, so some text may be missing.")
 
     pages = strip_running_lines(pages, veto=_citation_veto)

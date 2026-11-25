@@ -84,6 +84,15 @@ describe('Look Up in Database says what happened', () => {
     expect(within(status()).getByText('Found in CourtListener')).toBeTruthy();
   });
 
+  it('a record found with no source named is "Found in the database", never "Found in undefined"', async () => {
+    ctx.server.on('/api/lookup', () => json({ found: true, data: { case_name: 'Alpha v. Aardvark (LOOKED UP)' } }));
+    await openResults(ctx);
+    fireEvent.click(card('A'));
+    fireEvent.click(lookupButton());
+    expect(await screen.findByText('Found in the database')).toBeTruthy();
+    expect(screen.queryByText(/undefined/)).toBeNull();
+  });
+
   it('nothing found: says so, that the citation was not changed, and that it is not a verdict', async () => {
     ctx.server.on('/api/lookup', () => json({ found: false, source: 'CourtListener', data: null }));
     await openResults(ctx);
@@ -586,9 +595,9 @@ describe('the editor is not remounted when the window crosses the width where a 
     expect(shell.getAttribute('aria-label')).toBeNull();
     expect(shell.getAttribute('tabindex')).toBeNull();
     expect(shell.className).not.toContain('fixed');
-    // On a wide screen Escape does nothing to the editor.
+    // Beside the list Escape closes the editor too, as it does the sheet.
     fireEvent.keyDown(shell, { key: 'Escape' });
-    expect(screen.getByText('Edit Citation')).toBeTruthy();
+    expect(screen.queryByText('Edit Citation')).toBeNull();
   });
 
   it('focus goes to the sheet when the window narrows, and the page behind stops scrolling', async () => {
@@ -651,11 +660,13 @@ describe('on a phone, Back closes the sheet', () => {
 
   it('the page does not take its own entry away a second time when Back already did', async () => {
     await phone();
+    // An entry that looks like a sheet's is below this one, so the state after Back says "sheet".
+    window.history.pushState({ sheet: true }, '');
     fireEvent.click(card('A'));
     const back = vi.spyOn(window.history, 'back');
     await pressBack();
-    expect(back).toHaveBeenCalledTimes(1); // the test’s own call, and none made by the page
     expect(screen.queryByRole('dialog')).toBeNull();
+    expect(back).toHaveBeenCalledTimes(1); // the test\u2019s own call, and none made by the page
   });
 
   it.each([
@@ -738,6 +749,34 @@ describe('on a phone, Back closes the sheet', () => {
     const back = vi.spyOn(window.history, 'back');
     view.unmount();
     expect(back).not.toHaveBeenCalled();
+  });
+});
+
+describe('the suggestion in the editor says only what is true of the citation', () => {
+  const ctx = setup();
+  const suggestion = (id, suggested_form, extra = {}) => ({ citation_id: id, suggested_form, short_form_type: 'full', explanation: null, ...extra });
+  const open = async (c, suggestions) => {
+    await openResults(ctx, { citations: [c], body: { suggestions } });
+    fireEvent.click(card(c.id));
+  };
+  // The card in the list says some of the same things; this is about the editor.
+  const editor = () => within(screen.getByRole('heading', { name: 'Edit Citation' }).closest('div.bg-white'));
+
+  it('a complete citation with a different suggestion: "Formatted suggestion:"', async () => {
+    await open(A, [suggestion('A', '*Alpha v. Aardvark*, 111 U.S. 1 (1951).')]);
+    expect(editor().getByText('Formatted suggestion:')).toBeTruthy();
+  });
+
+  it('an incomplete citation: "Formatted so far:", not a suggestion of the finished citation', async () => {
+    await open(citation(1, { id: 'I', status: 'incomplete', raw_text: 'The Court said so in Heller v. District of Columbia', parties: ['Heller', 'District of Columbia'] }), [suggestion('I', '*Heller v. District of Columbia*')]);
+    expect(editor().getByText('Formatted so far:')).toBeTruthy();
+    expect(editor().queryByText('Formatted suggestion:')).toBeNull();
+  });
+
+  it('a suggestion that only repeats the input is not shown, complete or not', async () => {
+    await open(citation(1, { id: 'I', status: 'incomplete', raw_text: 'District of Columbia v. Heller', parties: ['District of Columbia', 'Heller'] }), [suggestion('I', '*District of Columbia v. Heller*')]);
+    expect(editor().queryByText('Formatted so far:')).toBeNull();
+    expect(editor().queryByText('Formatted suggestion:')).toBeNull();
   });
 });
 

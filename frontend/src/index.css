@@ -6,19 +6,30 @@ body {
   font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
 }
 
+/* Marked passages in the document preview. They are <mark> elements, so the browser's own yellow
+   and black are put back to the page's colours; nothing about them can be clicked, so the pointer
+   stays an arrow and nothing changes under it. */
+.citation-highlight,
+.unsourced-highlight {
+  color: inherit;
+}
+
 .citation-highlight {
   background-color: rgba(59, 130, 246, 0.1);
   border-bottom: 2px solid #3b82f6;
-  cursor: pointer;
-}
-
-.citation-highlight:hover {
-  background-color: rgba(59, 130, 246, 0.2);
 }
 
 .unsourced-highlight {
   background-color: rgba(239, 68, 68, 0.1);
   border-bottom: 2px dashed #ef4444;
+}
+
+@layer base {
+  /* The browser's grey is 2.5:1 on white. This is 4.8:1. */
+  input::placeholder,
+  textarea::placeholder {
+    color: #6b7280;
+  }
 }
 
 @layer utilities {
@@ -30,9 +41,15 @@ body {
   }
 }
 
-/* The citation editor on a phone: a sheet over the list, not a panel 20,000 px down the page. */
+/* The citation editor on a phone: a sheet over the list, not a panel 20,000 px down the page. It
+   is as wide as the screen and no wider (a fixed box whose content is wider than the screen is
+   otherwise as wide as the content, with its buttons off the edge), and a field that is
+   tabbed to is scrolled to below the header that sticks to its top, not under it. */
 .editor-sheet {
   max-height: 88vh;
+  max-width: 100%;
+  min-width: 0;
+  scroll-padding-top: 6rem;
 }
 @supports (height: 1dvh) {
   .editor-sheet {

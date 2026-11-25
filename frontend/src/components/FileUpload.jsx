@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { getLimits, subscribeLimits } from '../services/api';
+import { focusIfLost } from '../utils/focus';
 import { CHECKING_SERVER_MESSAGE, limitsSummary, uploadingMessage } from '../utils/uploadChecks';
 
 /**
@@ -60,6 +61,12 @@ export default function FileUpload({ uploading = null, error = null, notice = nu
     if (busy) cancelRef.current?.scrollIntoView?.({ block: 'nearest' });
   }, [busy]);
 
+  // A refusal or a note appears where the file input (disabled while uploading) was.
+  const problem = useRef(null);
+  useEffect(() => {
+    if (error) focusIfLost(problem.current);
+  }, [error]);
+
   return (
     <div className="w-full">
       <label
@@ -80,8 +87,8 @@ export default function FileUpload({ uploading = null, error = null, notice = nu
         <div className="flex flex-col items-center justify-center px-4 pt-5 pb-6 text-center">
           {busy ? (
             <>
-              <div className="animate-spin rounded-full h-10 w-10 border-4 border-blue-200 border-t-blue-600 mb-3"></div>
-              <p className="text-sm text-gray-700 wrap-anywhere" role="status">
+              <div className="animate-spin motion-reduce:animate-none rounded-full h-10 w-10 border-4 border-blue-200 border-t-blue-600 mb-3"></div>
+              <p dir="auto" className="text-sm text-gray-700 wrap-anywhere [overflow-wrap:anywhere]" role="status">
                 {uploading.phase === 'checking' ? CHECKING_SERVER_MESSAGE : uploadingMessage(uploading.file)}
               </p>
             </>
@@ -125,14 +132,14 @@ export default function FileUpload({ uploading = null, error = null, notice = nu
       )}
 
       {notice && (
-        <p className="mt-3 text-sm text-gray-700" role="status" data-testid="upload-notice">
+        <p dir="auto" className="mt-3 text-sm text-gray-700 [overflow-wrap:anywhere]" role="status" data-testid="upload-notice">
           {notice}
         </p>
       )}
 
       {error && (
-        <div className="mt-3 p-3 bg-red-50 border border-red-200 rounded-lg" role="alert">
-          <p className="text-sm text-red-700 wrap-anywhere">{error}</p>
+        <div ref={problem} tabIndex={-1} className="mt-3 p-3 bg-red-50 border border-red-200 rounded-lg focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500" role="alert">
+          <p dir="auto" className="text-sm text-red-700 wrap-anywhere [overflow-wrap:anywhere]">{error}</p>
         </div>
       )}
     </div>

@@ -207,10 +207,13 @@ with "this PDF has 450 pages", a count that is too small no longer drops the res
 without a word, and either mismatch is reported in the warnings. Running lines are removed only if
 they really run: a URL is compared exactly (a different regulations.gov docket on every page is
 five citations, not a footer), digits that differ between pages must count pages, and nothing the
-citation extractor reads as a citation is removed. A line-end hyphen is dropped only when it
-is the typesetter's (regu-/lation) and kept when it may be part of the spelling
-(state-/of-the-art, GAO-/16-552), and not across a blank line; the rule is written in
-`pdf_text.py` next to the code and pinned by a table of right and wrong cases.
+citation extractor reads as a citation is removed. A line-end hyphen is decided with the whole
+document as evidence, whether or not pdfium had already marked it: inside a web address it is
+always kept, elsewhere it is kept when the document writes the compound with its hyphen on one
+line (concealed-/carry) or shows no typesetter's hyphenation at all (a paper exported from Word),
+dropped when the document has the word whole (regu-/lation), and never joined across a blank
+line; the rule is written in `pdf_text.py` next to the code and pinned by tables of right and
+wrong cases.
 
 What it cannot do: a scanned PDF has no text to read (run OCR first), and a PDF whose fonts carry
 no text map comes out as codes, which is reported rather than passed on as text. The test

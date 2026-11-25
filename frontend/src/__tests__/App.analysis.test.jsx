@@ -237,7 +237,7 @@ describe('Try again and what it is told about the failure', () => {
     await chooseFile(ctx);
     await findResults();
     const label = screen.getByText(name);
-    expect(label.className).toContain('wrap-anywhere');
+    expect(label.className).toContain('[overflow-wrap:anywhere]');
     expect(label.className).toContain('min-w-0');
     // Its row may wrap, so the name never has to sit beside the heading.
     expect(label.parentElement.className).toContain('flex-wrap');

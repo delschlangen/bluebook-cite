@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import React from 'react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { cleanup, fireEvent, render, screen, within } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import CitationList from '../components/CitationList';
 import DocumentPreview from '../components/DocumentPreview';
@@ -119,6 +119,149 @@ describe('CitationList: what is printed on a card', () => {
   it.each([[undefined], [null], [''], [-1]])('prints no note for a footnote number of %j', (value) => {
     render(<CitationList citations={[citation(1, { footnote_number: value })]} {...props} />);
     expect(within(firstCard()).queryByText(/^Note/)).toBeNull();
+  });
+});
+
+describe('CitationList: the box under a citation says only what is true of it', () => {
+  const sug = (citation_id, suggested_form, extra = {}) => ({ citation_id, suggested_form, short_form_type: 'full', explanation: null, ...extra });
+  const cardOf = (id) => window.document.querySelector(`[data-citation-id="${id}"]`);
+  const heller = (extra = {}) =>
+    citation(1, { status: 'incomplete', raw_text: 'District of Columbia v. Heller', parties: ['District of Columbia', 'Heller'], volume: null, reporter: null, page: null, year: null, missing: [], ...extra });
+
+  it('a complete citation whose suggestion differs keeps "Suggested (full):", in the green box', () => {
+    render(<CitationList citations={[citation(1)]} shortFormSuggestions={[sug('c1', '*Brown v. Bd. of Educ.*, 347 U.S. 1 (1954).')]} onSelect={() => {}} />);
+    const box = within(cardOf('c1')).getByText('Suggested (full):').parentElement;
+    expect(box.className).toContain('bg-green-50');
+    expect(box.textContent).toContain('Brown v. Bd. of Educ., 347 U.S. 1 (1954).');
+  });
+
+  it('an incomplete citation whose suggestion only repeats it gets no box at all (the real "District of Columbia v. Heller")', () => {
+    render(<CitationList citations={[heller()]} shortFormSuggestions={[sug('c1', '*District of Columbia v. Heller*')]} onSelect={() => {}} />);
+    const text = cardOf('c1').textContent;
+    expect(text).not.toContain('Suggested');
+    expect(text).not.toContain('Formatted so far');
+    expect(cardOf('c1').querySelector('.bg-green-50')).toBeNull();
+    // What is still missing is said, from the fields it lacks, though the server sent no list.
+    expect(text).toContain('Still missing: volume number, reporter, first page, year');
+  });
+
+  it('an incomplete citation whose suggestion differs says "Formatted so far", in a box that is not green', () => {
+    render(
+      <CitationList
+        citations={[heller({ raw_text: 'The Court said so in District of Columbia v. Heller' })]}
+        shortFormSuggestions={[sug('c1', '*District of Columbia v. Heller*')]}
+        onSelect={() => {}}
+      />
+    );
+    const card = cardOf('c1');
+    const label = within(card).getByText('Formatted so far:');
+    expect(label.parentElement.className).not.toContain('bg-green');
+    expect(card.textContent).not.toContain('Suggested (full)');
+    expect(card.textContent).toContain('Still missing: volume number, reporter, first page, year');
+  });
+
+  it('builds "Still missing" from the `missing` the server sent, with the finished shape, and only once', () => {
+    const cfr = citation(2, { type: 'regulation', status: 'incomplete', raw_text: '47 CFR 54.101', kind_label: 'Code of Federal Regulations', missing: ['year'], template: '47 C.F.R. § 54.101 ([year]).' });
+    render(<CitationList citations={[cfr]} shortFormSuggestions={[sug('c2', '47 CFR 54.101')]} onSelect={() => {}} />);
+    const card = cardOf('c2');
+    expect(card.textContent.match(/Still missing/g)).toHaveLength(1);
+    expect(card.textContent).toContain('Still missing: year');
+    expect(card.textContent).toContain('47 C.F.R. § 54.101 (year).');
+    expect(card.textContent).not.toContain('Suggested');
+    expect(card.textContent).not.toContain('Still needs');
+  });
+
+  it('says nothing about what is missing when it does not know, and nothing at all for a complete citation', () => {
+    const site = citation(3, { type: 'website', status: 'incomplete', raw_text: 'https://example.com/a', missing: [] });
+    render(<CitationList citations={[site, citation(1)]} shortFormSuggestions={[sug('c3', 'https://example.com/a.'), sug('c1', '*Brown v. Board of Education*, 347 U.S. 1 (1954)')]} onSelect={() => {}} />);
+    expect(cardOf('c3').textContent).not.toContain('Still missing');
+    expect(cardOf('c3').textContent).not.toContain('Suggested');
+    expect(cardOf('c1').textContent).not.toContain('Still missing');
+  });
+
+  it('a complete citation whose suggestion is the same text (italics and a final period aside) has no box', () => {
+    render(
+      <CitationList
+        citations={[citation(1, { raw_text: 'Brown v. Board of Education, 347 U.S. 1 (1954)' })]}
+        shortFormSuggestions={[sug('c1', '*Brown v. Board of Education*, 347 U.S. 1 (1954).')]}
+        onSelect={() => {}}
+      />
+    );
+    expect(cardOf('c1').textContent).not.toContain('Suggested');
+  });
+
+  it('a short form keeps its own label, and its explanation', () => {
+    render(
+      <CitationList
+        citations={[citation(4, { raw_text: 'Brown, 347 U.S. at 495' })]}
+        shortFormSuggestions={[sug('c4', 'Id. at 495', { short_form_type: 'id', explanation: 'Same source as the previous citation.' })]}
+        onSelect={() => {}}
+      />
+    );
+    const card = cardOf('c4');
+    expect(within(card).getByText('Suggested (id):')).toBeTruthy();
+    expect(within(card).getByText('Same source as the previous citation.')).toBeTruthy();
+  });
+});
+
+describe('CitationList: copying what was edited', () => {
+  const written = [];
+  const clipboard = () => {
+    written.length = 0;
+    Object.defineProperty(window.navigator, 'clipboard', {
+      configurable: true,
+      value: { writeText: vi.fn(async (text) => { written.push(text); }) },
+    });
+  };
+  // fireEvent, not userEvent: userEvent puts a clipboard of its own over the one these tests watch.
+  const press = async (element) => { await act(async () => { fireEvent.click(element); }); };
+  const props = { shortFormSuggestions: [], onSelect: () => {} };
+  const edited = (n, extra = {}) => citation(n, { edited: true, year: 1999, ...extra });
+
+  it('puts a Copy button on an edited card, beside it and not inside it, and none on a card that was not edited', () => {
+    render(<CitationList citations={[edited(1), citation(2)]} {...props} />);
+    const [first, second] = window.document.querySelectorAll('[data-card-index]');
+    const copy = screen.getByRole('button', { name: 'Copy edited citation 1' });
+    expect(first.contains(copy)).toBe(false); // a button inside a card that is a button is not allowed
+    expect(first.parentElement.contains(copy)).toBe(true);
+    expect(copy.className).toContain('min-h-[44px]');
+    expect(second.parentElement.querySelector('button')).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Copy edited citation 2' })).toBeNull();
+  });
+
+  it('copies the edited citation as it reads now, says so, and says "Copied"', async () => {
+    clipboard();
+    render(<CitationList citations={[edited(1)]} {...props} />);
+    await press(screen.getByRole('button', { name: 'Copy edited citation 1' }));
+    expect(written).toEqual(['Brown v. Bd. of Educ., 347 U.S. 1 (1999).']);
+    expect(screen.getByTestId('copy-notice').textContent).toBe('Copied edited citation 1 to the clipboard.');
+    expect(screen.getByRole('button', { name: 'Copy edited citation 1' }).textContent).toBe('Copied');
+  });
+
+  it('says so when it could not copy', async () => {
+    Object.defineProperty(window.navigator, 'clipboard', { configurable: true, value: { writeText: vi.fn(async () => { throw new Error('no'); }) } });
+    document.execCommand = vi.fn(() => false);
+    render(<CitationList citations={[edited(1)]} {...props} />);
+    await press(screen.getByRole('button', { name: 'Copy edited citation 1' }));
+    expect(screen.getByTestId('copy-notice').textContent).toContain('Could not copy');
+    delete document.execCommand;
+  });
+
+  it('"Copy all edited" copies every edited citation, one to a line, and nothing else', async () => {
+    clipboard();
+    render(<CitationList citations={[edited(1), citation(2), edited(3, { year: 2001 })]} {...props} />);
+    const all = screen.getByRole('button', { name: 'Copy all edited (2)' });
+    expect(all.className).toContain('min-h-[44px]');
+    await press(all);
+    expect(written).toEqual(['Brown v. Bd. of Educ., 347 U.S. 1 (1999).\nBrown v. Bd. of Educ., 347 U.S. 3 (2001).']);
+    expect(screen.getByTestId('copy-notice').textContent).toBe('Copied 2 edited citations to the clipboard.');
+  });
+
+  it('has no "Copy all edited" when nothing was edited, and its status is in the page before it says anything', () => {
+    render(<CitationList citations={[citation(1)]} {...props} />);
+    expect(screen.queryByRole('button', { name: /Copy all edited/ })).toBeNull();
+    expect(screen.getByTestId('copy-notice').getAttribute('role')).toBe('status');
+    expect(screen.getByTestId('copy-notice').textContent).toBe('');
   });
 });
 
@@ -345,6 +488,17 @@ describe('DocumentPreview', () => {
   it('says so when there is no text', () => {
     render(<DocumentPreview text="" citations={[]} unsourcedClaims={[]} />);
     expect(screen.getByText('No document content to display.')).toBeTruthy();
+  });
+
+  it('marks the right stretch when the text changes and the citations do not', () => {
+    // The same two arrays both times, as they are when the parent has not changed them.
+    const citations = [{ id: 'c1', status: 'complete', position_start: 6, position_end: 11 }];
+    const none = [];
+    const { rerender } = render(<DocumentPreview text="Intro ALPHA ends here." citations={citations} unsourcedClaims={none} />);
+    expect(window.document.querySelector('.citation-highlight').textContent).toBe('ALPHA');
+    // The same positions, in a text that has emoji before them: the server would count them differently.
+    rerender(<DocumentPreview text={'\u{1F600}\u{1F600} In BRAVO ends.'} citations={citations} unsourcedClaims={none} />);
+    expect(window.document.querySelector('.citation-highlight').textContent).toBe('BRAVO');
   });
 
   it('marks the citation the server found, not a stretch shifted by the emoji before it', () => {

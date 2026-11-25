@@ -49,40 +49,40 @@ export default function SourceSuggestions({ claims, notice, shown: controlledSho
       <p className="text-sm text-gray-600">
         The following statements may need citations. Review each and consider adding appropriate sources.
       </p>
-      {notice && <p className="text-xs text-gray-600" data-testid="claims-notice">{notice}</p>}
+      {notice && <p className="text-xs text-gray-600 [overflow-wrap:anywhere]" data-testid="claims-notice">{notice}</p>}
       
       {claims.slice(0, shown).map((claim, index) => (
         <div
           key={claim.id || index}
           data-claim-index={index}
           tabIndex={-1}
-          className="p-4 bg-red-50 border border-red-100 rounded-lg focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
+          className="min-w-0 p-4 bg-red-50 border border-red-100 rounded-lg focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
         >
           <div className="flex items-start justify-between gap-3 mb-3">
-            <div className="flex items-center gap-2">
-              <span className="text-xs font-medium text-gray-500">#{index + 1}</span>
+            <div className="flex flex-wrap items-center gap-2 min-w-0">
+              <span className="text-xs font-medium text-gray-600">#{index + 1}</span>
               {/* A claim with no type gets no label; one this page does not know is drawn in the
                   neutral colour. Neither is ever printed as "undefined". */}
               {typeof claim.claim_type === 'string' && claim.claim_type && (
-                <span className={`px-2 py-0.5 rounded text-xs font-medium ${claimTypeColor(claim.claim_type)}`}>
+                <span className={`min-w-0 max-w-full px-2 py-0.5 rounded text-xs font-medium [overflow-wrap:anywhere] ${claimTypeColor(claim.claim_type)}`}>
                   {claim.claim_type}
                 </span>
               )}
               {Number.isFinite(claim.confidence) && (
-                <span className="text-xs text-gray-500">
+                <span className="text-xs text-gray-600">
                   {Math.round(claim.confidence * 100)}% confidence
                 </span>
               )}
             </div>
           </div>
           
-          <p className="text-sm text-gray-800 mb-3 leading-relaxed wrap-anywhere">
+          <p dir="auto" className="text-sm text-gray-800 mb-3 leading-relaxed wrap-anywhere [overflow-wrap:anywhere]">
             "{claim.text}"
           </p>
           
           {Array.isArray(claim.suggested_search_terms) && claim.suggested_search_terms.length > 0 && (
             <div className="mt-3">
-              <p className="text-xs font-medium text-gray-500 mb-2">Suggested search terms:</p>
+              <p className="text-xs font-medium text-gray-600 mb-2">Suggested search terms:</p>
               <div className="flex flex-wrap gap-2">
                 {claim.suggested_search_terms.map((term, i) => (
                   <a
@@ -90,7 +90,8 @@ export default function SourceSuggestions({ claims, notice, shown: controlledSho
                     href={`https://www.courtlistener.com/?q=${encodeURIComponent(term)}`}
                     target="_blank"
                     rel="noopener noreferrer"
-                    className="max-w-full wrap-anywhere px-2 py-1 bg-white border border-gray-200 rounded text-xs text-blue-700 hover:bg-blue-50 hover:border-blue-200 transition-colors"
+                    dir="auto"
+                    className="inline-flex items-center min-h-[44px] max-w-full wrap-anywhere [overflow-wrap:anywhere] px-3 py-1 bg-white border border-gray-200 rounded text-xs text-blue-700 hover:bg-blue-50 hover:border-blue-200 transition-colors"
                   >
                     {term} →
                   </a>

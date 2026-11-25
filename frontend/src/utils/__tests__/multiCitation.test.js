@@ -74,6 +74,26 @@ describe('a paste with more than one citation says which was formatted and which
     expect(r.partial.others).toEqual([MARBURY]);
   });
 
+  it('finds an other citation that only the data-driven engine reads (a constitutional amendment, a court rule)', () => {
+    const r = repairLocally(`${BROWN}; U.S. Const. amend. XIV, § 1`);
+    expect(r.partial.used).toBe(BROWN);
+    expect(r.partial.others).toEqual(['U.S. Const. amend. XIV, § 1']);
+    const rule = repairLocally(`${BROWN}; Fed. R. Civ. P. 12(b)(6)`);
+    expect(rule.partial.others).toEqual(['Fed. R. Civ. P. 12(b)(6)']);
+  });
+
+  it('counts a citation once when the engine and the older readers both find part of it', () => {
+    // The engine reads the whole GAO report; the older reader finds "Smith v. Jones" inside its title.
+    const gao = "U.S. GOV'T ACCOUNTABILITY OFF., GAO-16-552, Smith v. Jones (2016)";
+    const long = 'Zeran v. America Online Incorporated Holdings Group, 129 F.3d 327, 330-31 (4th Cir. 1997)';
+    for (const paste of [`${long}; ${gao}`, `${gao}; ${long}`]) {
+      const r = repairLocally(paste);
+      expect(r.partial.used).toBe(long);
+      expect(r.partial.others).toEqual([gao]);
+      expect(r.partial.more).toBe(0);
+    }
+  });
+
   it('drops the signal "In" from a name, but keeps "In re", which is part of one', () => {
     const gault = 'In re Gault, 387 U.S. 1 (1967)';
     const keep = otherCitations(`${gault}; ${BROWN}`, { start: 0, end: gault.length });

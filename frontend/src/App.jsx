@@ -3,6 +3,7 @@ import FileUpload from './components/FileUpload';
 import CitationList from './components/CitationList';
 import CitationEditor from './components/CitationEditor';
 import CitationRepair from './components/CitationRepair';
+import ConfirmDialog from './components/ConfirmDialog';
 import SourceSuggestions from './components/SourceSuggestions';
 import DocumentPreview from './components/DocumentPreview';
 import RetryButton from './components/RetryButton';
@@ -18,8 +19,10 @@ import {
 } from './services/api';
 import { normalizeAnalysis, normalizeUpload } from './utils/analysisShape';
 import { editedFieldsDiffer } from './utils/editedCitation';
+import { focusIfLost } from './utils/focus';
 import { describeFailure } from './utils/failures';
 import { PAGE_SIZE } from './utils/paging';
+import { rovingKeys } from './utils/roving';
 import { analysisNotices, checkFileBeforeUpload, claimsNotice } from './utils/uploadChecks';
 
 // Below this width the results are one column, so the editor cannot sit beside the list.
@@ -265,7 +268,15 @@ function App() {
   const selectedRef = useRef(null);
   selectedRef.current = selectedCitation;
 
+  // True from the moment a card is chosen until the editor has appeared: the editor takes focus then,
+  // and not when it is brought back by returning to the Citations tab.
+  const focusEditor = useRef(false);
+  useEffect(() => {
+    focusEditor.current = false;
+  });
+
   const handleCitationSelect = useCallback((citation, trigger) => {
+    focusEditor.current = true;
     returnFocusRef.current = trigger || null;
     setSavedNotice('');
     setSelectedCitation(citation);
@@ -306,7 +317,12 @@ function App() {
 
   const handleLookup = useCallback((citation, options) => lookupCitation(citation, options), []);
 
+  // After starting over, the button that was pressed is gone; focus goes to the first thing on the
+  // landing page instead of falling to the top of the document.
+  const focusLanding = useRef(false);
+
   const handleReset = useCallback(() => {
+    focusLanding.current = true;
     runRef.current++;
     abortRef.current?.abort();
     setLoading(false);
@@ -318,6 +334,31 @@ function App() {
     setError(null);
     setSavedNotice('');
   }, [drafts]);
+
+  const resetButton = useRef(null);
+  const [confirmingReset, setConfirmingReset] = useState(false);
+  const editedCount = analysis ? analysis.analysis.citations.filter((c) => c.edited).length : 0;
+  // Starting over throws the results away, edited citations included. With edits, ask first.
+  const requestReset = () => {
+    if (editedCount > 0) setConfirmingReset(true);
+    else handleReset();
+  };
+  const keepWorking = () => {
+    setConfirmingReset(false);
+    // The dialog is leaving; the button that opened it is where the person was.
+    window.setTimeout(() => resetButton.current?.focus(), 0);
+  };
+  const discardAndStartOver = () => {
+    setConfirmingReset(false);
+    handleReset();
+  };
+
+  const landingFocus = mode === 'repair' ? 'mode-repair' : 'mode-upload';
+  useEffect(() => {
+    if (doc || !focusLanding.current) return;
+    focusLanding.current = false;
+    window.document.getElementById(landingFocus)?.focus();
+  }, [doc, landingFocus]);
 
   // On a phone the editor is a sheet over the page; the page behind should not scroll with it.
   const sheetOpen = narrow && Boolean(selectedCitation) && activeTab === 'citations';
@@ -387,22 +428,51 @@ function App() {
 
   const uploading = Boolean(upload);
   const editorOpen = Boolean(selectedCitation && analysis);
+  const progressNotice = loading
+    ? checkingServer
+      ? 'Checking whether the server is still running.'
+      : 'Analyzing citations.'
+    : analysis && doc
+      ? `Analysis finished. ${analysis.stats.total_citations} citation${analysis.stats.total_citations === 1 ? '' : 's'} found.`
+      : '';
+
+  // The page that was being worked on is gone when the analysis finishes or fails (the box the file
+  // was chosen in, the Cancel that was pressed). Focus goes to what has just appeared, when it was lost.
+  const summaryHeading = useRef(null);
+  const errorBox = useRef(null);
+  const hadResults = useRef(false);
+  useEffect(() => {
+    if (analysis && doc && !loading) {
+      if (!hadResults.current) {
+        hadResults.current = true;
+        focusIfLost(summaryHeading.current);
+      }
+    } else if (!analysis) {
+      hadResults.current = false;
+    }
+  }, [analysis, doc, loading]);
+  useEffect(() => {
+    if (error) focusIfLost(errorBox.current);
+  }, [error]);
 
   return (
-    <div className="min-h-screen bg-gray-50">
+    <div className="min-h-screen bg-gray-50 overflow-x-clip">
       {/* Header */}
       <header className="bg-blue-900 text-white py-6 px-4 shadow-lg">
-        <div className="max-w-7xl mx-auto flex justify-between items-center gap-3">
-          <div className="min-w-0">
-            <h1 className="text-2xl font-bold">Bluebook Citation Generator</h1>
-            <p className="text-blue-200 mt-1 text-sm">
+        {/* The title and the button share a row when there is room, and the button goes under the
+            title when there is not (a narrow phone, or text enlarged to 200%). */}
+        <div className="max-w-7xl mx-auto flex flex-wrap justify-between items-center gap-3">
+          <div className="min-w-0 flex-1 basis-[11rem]">
+            <h1 className="text-2xl font-bold [overflow-wrap:anywhere]">Bluebook Citation Generator</h1>
+            <p className="text-blue-100 mt-1 text-sm">
               Automated citation formatting per Bluebook 21st Edition
             </p>
           </div>
           {doc && (
             <button
-              onClick={handleReset}
-              className="flex-shrink-0 max-w-[8.5rem] sm:max-w-none min-h-[44px] px-3 sm:px-4 py-2 bg-blue-700 hover:bg-blue-600 rounded-lg text-sm transition-colors"
+              ref={resetButton}
+              onClick={requestReset}
+              className="flex-shrink-0 max-w-full min-h-[44px] px-3 sm:px-4 py-2 bg-blue-700 hover:bg-blue-600 rounded-lg text-sm transition-colors"
             >
               Upload New Document
             </button>
@@ -413,17 +483,19 @@ function App() {
       <main className="max-w-7xl mx-auto py-8 px-4">
         {/* Spoken, not shown: the result of saving an edit. */}
         <p className="sr-only" role="status">{savedNotice}</p>
+        {/* Spoken, not shown: how the analysis is going. In the page before it has anything to say. */}
+        <p className="sr-only" role="status" data-testid="progress-status">{progressNotice}</p>
 
         {/* Error Display */}
         {error && (
-          <div role="alert" className="bg-red-50 border border-red-200 rounded-lg p-4 mb-6">
+          <div ref={errorBox} tabIndex={-1} role="alert" className="bg-red-50 border border-red-200 rounded-lg p-4 mb-6 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500">
             <div className="flex items-start">
               <svg className="w-5 h-5 text-red-500 mr-2 mt-0.5 flex-shrink-0" fill="currentColor" viewBox="0 0 20 20" aria-hidden="true">
                 <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM8.707 7.293a1 1 0 00-1.414 1.414L8.586 10l-1.293 1.293a1 1 0 101.414 1.414L10 11.414l1.293 1.293a1 1 0 001.414-1.414L11.414 10l1.293-1.293a1 1 0 00-1.414-1.414L10 8.586 8.707 7.293z" clipRule="evenodd" />
               </svg>
               <div className="min-w-0">
-                <p className="text-red-800 wrap-anywhere">{error.message}</p>
-                {error.hint && <p className="mt-1 text-sm text-red-800 wrap-anywhere">{error.hint}</p>}
+                <p dir="auto" className="text-red-800 [overflow-wrap:anywhere]">{error.message}</p>
+                {error.hint && <p dir="auto" className="mt-1 text-sm text-red-800 [overflow-wrap:anywhere]">{error.hint}</p>}
               </div>
             </div>
           </div>
@@ -455,7 +527,7 @@ function App() {
             mounted, hidden when not in use, so what was typed or chosen in one survives a trip
             to the other and back, and a trip through the results. */}
         <div hidden={Boolean(doc || loading)}>
-          <div className="flex gap-2 mb-5" role="tablist" aria-label="Choose a mode">
+          <div className="flex flex-wrap gap-2 mb-5" role="tablist" aria-label="Choose a mode" onKeyDown={rovingKeys()}>
             <ModeButton
               id="mode-repair"
               controls="panel-repair"
@@ -523,8 +595,8 @@ function App() {
         {/* Loading State */}
         {loading && (
           <div className="bg-white rounded-lg shadow-lg p-6 sm:p-12 text-center">
-            <div className="animate-spin rounded-full h-12 w-12 border-4 border-blue-200 border-t-blue-600 mx-auto"></div>
-            <p className="mt-4 text-gray-700" role="status">
+            <div className="animate-spin motion-reduce:animate-none rounded-full h-12 w-12 border-4 border-blue-200 border-t-blue-600 mx-auto"></div>
+            <p className="mt-4 text-gray-700">
               {checkingServer ? 'Checking whether the server is still running...' : 'Analyzing citations...'}
             </p>
             <p className="mt-2 text-sm text-gray-600">
@@ -548,8 +620,8 @@ function App() {
             {/* Stats Overview */}
             <div className="bg-white rounded-lg shadow p-6">
               <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-1 mb-4">
-                <h2 className="text-lg font-semibold">Analysis Summary</h2>
-                <span className="min-w-0 text-sm text-gray-600 wrap-anywhere">{doc.filename}</span>
+                <h2 ref={summaryHeading} tabIndex={-1} className="text-lg font-semibold focus:outline-none">Analysis Summary</h2>
+                <span dir="auto" className="min-w-0 text-sm text-gray-600 [overflow-wrap:anywhere]">{doc.filename}</span>
               </div>
               {(doc.footnote_count > 0 || doc.endnote_count > 0) && (
                 <p className="text-xs text-gray-600 mb-4">
@@ -561,10 +633,10 @@ function App() {
                 </p>
               )}
               {analysisNotices(analysis).map((notice) => (
-                <p key={notice} className="text-xs text-gray-600 mb-3">{notice}</p>
+                <p key={notice} dir="auto" className="text-xs text-gray-600 mb-3 [overflow-wrap:anywhere]">{notice}</p>
               ))}
               {doc.warnings?.map((w, i) => (
-                <p key={`${i}-${w}`} className="text-xs text-amber-800 mb-2">{w}</p>
+                <p key={`${i}-${w}`} dir="auto" className="text-xs text-amber-800 mb-2 [overflow-wrap:anywhere]">{w}</p>
               ))}
               <div className="grid grid-cols-2 md:grid-cols-5 gap-4">
                 <StatCard label="Total Citations" value={analysis.stats.total_citations} color="blue" />
@@ -578,7 +650,7 @@ function App() {
             {/* Tabs */}
             <div className="bg-white rounded-lg shadow">
               <div className="border-b">
-                <nav className="flex -mb-px" role="tablist" aria-label="Results">
+                <nav className="flex -mb-px" role="tablist" aria-label="Results" onKeyDown={rovingKeys()}>
                   <TabButton
                     id="citations"
                     active={activeTab === 'citations'}
@@ -618,7 +690,10 @@ function App() {
                         onShownChange={setCitationsShown}
                       />
                     </div>
-                    <div className="min-w-0">
+                    {/* Beside the list the editor stays in view while the list scrolls, and scrolls inside
+                        itself if it is taller than the screen: opened from far down a long list it
+                        would otherwise be thousands of pixels above. */}
+                    <div className="min-w-0 lg:sticky lg:top-4 lg:self-start lg:max-h-[calc(100vh-2rem)] lg:overflow-y-auto">
                       {/* The backdrop is a sibling, and the editor is ONE element whether it is a
                           sheet or a panel, so the screen changing width never remounts it. */}
                       {sheetOpen && <SheetBackdrop onClose={closeEditor} />}
@@ -633,6 +708,7 @@ function App() {
                             onSave={handleCitationUpdate}
                             onLookup={handleLookup}
                             onCancel={closeEditor}
+                            focusOnOpen={focusEditor.current}
                             draft={drafts.get(selectedCitation.id)}
                             onDraftChange={drafts.set}
                           />
@@ -672,6 +748,23 @@ function App() {
           </div>
         )}
       </main>
+
+      {confirmingReset && (
+        <ConfirmDialog
+          title="Discard your edits?"
+          confirmLabel="Start over and discard"
+          cancelLabel="Keep working"
+          onConfirm={discardAndStartOver}
+          onCancel={keepWorking}
+        >
+          <p>
+            {editedCount === 1 ? '1 citation has' : `${editedCount} citations have`} been edited here.
+            Starting over removes the results and {editedCount === 1 ? 'that edit' : 'those edits'}.
+            To keep {editedCount === 1 ? 'it' : 'them'}, choose Keep working, then use the Copy buttons on the
+            Citations tab.
+          </p>
+        </ConfirmDialog>
+      )}
 
       {/* Footer */}
       <footer className="bg-gray-800 text-gray-300 py-6 px-4 mt-12">
@@ -716,13 +809,13 @@ function EditorShell({ sheet, onClose, children }) {
   }, [sheet]);
 
   const handleKeyDown = (event) => {
-    if (!sheet) return;
     if (event.key === 'Escape') {
       event.stopPropagation();
       onClose();
       return;
     }
-    if (event.key !== 'Tab' || !shell.current) return;
+    // Beside the list the page is not covered, so Tab may leave the editor.
+    if (!sheet || event.key !== 'Tab' || !shell.current) return;
     // Keep Tab inside the sheet; the page behind it is covered.
     const stops = Array.from(
       shell.current.querySelectorAll('button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])')
@@ -747,7 +840,7 @@ function EditorShell({ sheet, onClose, children }) {
         'aria-label': 'Edit citation',
         tabIndex: -1,
         className:
-          'editor-sheet fixed inset-x-0 bottom-0 z-50 overflow-y-auto overscroll-contain rounded-t-2xl bg-white shadow-2xl focus:outline-none',
+          'editor-sheet fixed inset-x-0 bottom-0 z-50 max-w-full min-w-0 overflow-y-auto overscroll-contain rounded-t-2xl bg-white shadow-2xl focus:outline-none',
       }
     : {};
 
@@ -770,7 +863,7 @@ function StatCard({ label, value, color }) {
   return (
     <div className={`${colors[color]} p-4 rounded-lg text-center`}>
       <div className="text-3xl font-bold">{value}</div>
-      <div className="text-sm opacity-80">{label}</div>
+      <div className="text-sm">{label}</div>
     </div>
   );
 }
@@ -783,9 +876,11 @@ function ModeButton({ children, id, controls, active, disabled = false, onClick 
       id={id}
       aria-controls={controls}
       aria-selected={active}
+      // The selected tab is the one stop in the Tab order; the arrow keys move between them.
+      tabIndex={active ? 0 : -1}
       disabled={disabled}
       onClick={onClick}
-      className={`min-h-[44px] px-4 py-2 rounded-lg text-sm font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-60 ${
+      className={`min-h-[44px] px-4 py-2 rounded-lg text-sm font-medium transition-colors disabled:cursor-not-allowed disabled:bg-gray-100 disabled:text-gray-600 ${
         active
           ? 'bg-blue-600 text-white shadow'
           : 'bg-white text-gray-700 border border-gray-200 hover:bg-gray-50'
@@ -805,6 +900,7 @@ function TabButton({ children, id, active, onClick, count }) {
       id={`tab-${id}`}
       aria-selected={active}
       aria-controls={`panel-${id}`}
+      tabIndex={active ? 0 : -1}
       onClick={onClick}
       className={`flex-1 sm:flex-none min-h-[48px] min-w-0 px-1 sm:px-6 py-2 sm:py-3 flex flex-col sm:flex-row items-center justify-center gap-1 text-xs sm:text-sm font-medium border-b-2 transition-colors ${
         active
@@ -812,7 +908,7 @@ function TabButton({ children, id, active, onClick, count }) {
           : 'border-transparent text-gray-600 hover:text-gray-800 hover:border-gray-300'
       }`}
     >
-      <span>{children}</span>
+      <span className="min-w-0 [overflow-wrap:anywhere]">{children}</span>
       {count !== undefined && (
         <span className={`sm:ml-2 px-2 py-0.5 rounded-full text-xs ${
           active ? 'bg-blue-100 text-blue-700' : 'bg-gray-100 text-gray-700'

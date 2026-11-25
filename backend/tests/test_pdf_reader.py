@@ -301,10 +301,12 @@ def test_a_password_protected_pdf_has_a_clear_message():
     assert "password" in str(caught.value).lower()
 
 
-def test_an_owner_password_only_pdf_reads_and_warns():
+def test_an_owner_password_only_pdf_reads_and_nothing_is_said_about_encryption():
+    """Locked against copying, not against reading: every page comes out, so there is nothing to
+    warn about. (It used to say "encrypted, so some text may be missing" for any encrypted file.)"""
     result = P.read_pdf(load("i_encrypted_ownerpw_only"))
-    assert "Brandenburg v. Ohio, 395 U.S. 444" in result.text
-    assert any("encrypted" in w for w in result.warnings)
+    assert result.text.count("Brandenburg v. Ohio, 395 U.S. 444") == 3
+    assert result.warnings == []
 
 
 @pytest.mark.parametrize("name", ["i_truncated_55pct", "i_truncated_noeof_trailer"])
@@ -658,3 +660,94 @@ def test_the_readers_time_budget_is_answered_like_any_other_limit_the_document_e
     monkeypatch.setattr(P, "PDF_TIME_BUDGET_S", 0.0)
     with pytest.raises(DocumentTooComplexError, match=r"too complex to read within this server's limits \(reading it took longer than the 0 seconds"):
         DocumentParser().parse_document(text_pdf(5), "a.pdf")
+
+
+# --- line-end hyphens are settled once, over the whole document -----------------------------------
+#
+# A page is repaired on its own, but whether "Own-/voice" keeps its hyphen is for the document to
+# say, so the pages carry a private mark at each undecided break until the last page is in. These
+# check the path through read_pdf: the evidence crosses pages, the limits and the garble measures
+# see the text and not the marks, and nothing private is left in what comes out.
+
+FFFE = chr(0xFFFE)
+
+
+def _lines(*texts: str, top: int = 700) -> list[tuple[int, str]]:
+    return [(top - 14 * i, text) for i, text in enumerate(texts)]
+
+
+class TestLineEndHyphensAcrossTheDocument:
+    PAGE_ONE = _lines(
+        "The court upheld the law. Own-",
+        "voice accounts are rare, and the regu-",
+        "lation was upheld. See https://www.example.org/wp-",
+        "dyn/content/article.html and https://example.org/gun-industry-",
+        "accountable. The 2d Cir. (No. 14-",
+        "319) agreed.",
+    )
+    FILLER = _lines("A second page with ordinary words only, enough of them to be a page of text.")
+    LAST = _lines("An own-voice account and the regulation are discussed here at some length.")
+
+    def test_pdfium_hands_these_hyphens_over_as_its_marker(self):
+        """So the tests below go the way a real upload goes: four markers, and one literal hyphen
+        (pdfium leaves a hyphen after a digit as it is)."""
+        raw = next(iter(P.iter_pdf_pages(make_pdf_pages([self.PAGE_ONE]))))
+        assert raw.count(FFFE) == 4 and "14-\n319" in raw
+
+    def test_a_break_on_page_one_is_decided_by_what_page_three_says(self):
+        text = P.read_pdf(make_pdf_pages([self.PAGE_ONE, self.FILLER, self.LAST])).text
+        assert "Own-voice accounts are rare, and the regulation was upheld." in text
+        # the first page alone has nothing to go on, and both are joined as a typesetter's would be
+        alone = P.read_pdf(make_pdf_pages([self.PAGE_ONE])).text
+        assert "Ownvoice accounts are rare, and the regulation was upheld." in alone
+
+    def test_a_web_address_broken_at_a_hyphen_comes_out_whole(self):
+        text = P.read_pdf(make_pdf_pages([self.PAGE_ONE])).text
+        assert (
+            "See https://www.example.org/wp-dyn/content/article.html and "
+            "https://example.org/gun-industry-accountable. The 2d Cir. (No. 14-319) agreed."
+        ) in text
+
+    def test_no_private_mark_reaches_the_text(self):
+        for pages in ([self.PAGE_ONE], [self.PAGE_ONE, self.FILLER, self.LAST]):
+            text = P.read_pdf(make_pdf_pages(pages)).text
+            assert P._PENDING not in text and FFFE not in text and "\x02" not in text
+
+    def test_the_text_limit_counts_the_text_as_it_finally_reads(self):
+        # three undecided hyphens that the document drops: counted as characters they would put
+        # this text three over a limit it meets exactly
+        dropped = make_pdf_pages([_lines("the regu-", "lation and the regu-", "lation and the regu-", "lation; regulation.")])
+        final = P.read_pdf(dropped).text
+        assert final == "the regulation and the regulation and the regulation; regulation."
+        assert P.read_pdf(dropped, max_chars=len(final)).text == final
+        with pytest.raises(P.PdfTooLongError):
+            P.read_pdf(dropped, max_chars=len(final) - 1)
+        # three that the document keeps: they are not text until they are settled, and then they are
+        kept = make_pdf_pages([_lines("an own-", "voice and an own-", "voice and an own-", "voice; own-voice.")])
+        final = P.read_pdf(kept).text
+        assert final == "an own-voice and an own-voice and an own-voice; own-voice."
+        assert P.read_pdf(kept, max_chars=len(final)).text == final
+        with pytest.raises(P.PdfTooLongError):
+            P.read_pdf(kept, max_chars=len(final) - 1)
+
+    def test_the_second_opinion_is_judged_with_undecided_hyphens_out_of_the_way(self, monkeypatch):
+        """The second reader's page replaces the first when it has ten more ordinary words in a
+        hundred. Five words broken at a line end are five words, as they were before the document
+        rule, not ten: counted as ten this page would have 10 in 105 and be thrown away."""
+        first = "zq " * 100
+        alt = "the " * 10 + "zq " * 85 + "regu-\nlation " * 5
+        monkeypatch.setattr(P, "_pdfminer_pages", lambda content, page_numbers=None: iter([alt]))
+        chosen = P._second_opinion(b"", 0, first)
+        assert chosen is not first and chosen.count("regu" + P._PENDING + "lation") == 5
+
+    def test_a_replaced_page_is_judged_for_garbling_with_the_marks_out_of_the_way(self, monkeypatch):
+        """Codes are evidence of garbling from 2% of the page. This page is at 2% exactly; the one
+        private mark in it must not make it 2,001 characters and let it pass as readable."""
+        good = "The court held that the statute does not apply to the conduct at issue in this case. " * 4
+        page = "(cid:12)" * 5 + " regu" + P._PENDING + "lations"
+        page += " x" * ((2001 - len(page)) // 2)
+        assert len(page) == 2001 and P._looks_garbled(page) is False and P._looks_garbled(P._without_marks(page)) is True
+        monkeypatch.setattr(P, "_second_opinion", lambda content, i, first, deadline=None: page if i == 0 else good)
+        result = P.read_pdf(load("i_no_tounicode_chromium"))
+        assert "1 page(s) have an unreadable text layer and may need OCR." in result.warnings
+        assert P._PENDING not in result.text and "regulations" in result.text

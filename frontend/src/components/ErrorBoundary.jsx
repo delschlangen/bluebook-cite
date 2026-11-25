@@ -28,7 +28,7 @@ export default class ErrorBoundary extends React.Component {
   render() {
     if (this.state.error) {
       return (
-        <div className="min-h-screen bg-gray-50 flex items-start justify-center px-4 py-12">
+        <main className="min-h-screen bg-gray-50 flex items-start justify-center px-4 py-12">
           <div role="alert" className="max-w-lg w-full bg-white rounded-lg shadow-lg p-6">
             <h1 className="text-xl font-semibold text-gray-900">This page stopped working</h1>
             <p className="mt-3 text-gray-700">
@@ -52,7 +52,7 @@ export default class ErrorBoundary extends React.Component {
               </button>
             </div>
           </div>
-        </div>
+        </main>
       );
     }
     return this.props.children;
