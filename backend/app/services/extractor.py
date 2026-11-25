@@ -406,6 +406,19 @@ def read_party_right(text: str, position: int, ceiling: int | None = None) -> tu
     return accepted[-1][0], collision
 
 
+# A book's title is a title. The book pattern accepts "Author, anything (Year)", and in a catalog
+# of statements that was a whole entry: two names, then a description, a quotation, a line
+# labelled "Context:" and a report's name, reported as a book and set in a book's capitals. A
+# title does not contain a labelled line ("Context: ...", "Source: ..." at the start of a line).
+# Length is NOT the test: real titles run to fifty words, and a bound on length once dropped
+# them without a word.
+_LABELLED_LINE = re.compile(r"\n[ \t]{0,8}[A-Z][A-Za-z]{2,20}:[ \t]")
+
+
+def _reads_as_a_title(title: str) -> bool:
+    return not _LABELLED_LINE.search(title)
+
+
 class CitationExtractor:
     """Extracts citations from legal text using Bluebook patterns."""
 
@@ -877,6 +890,8 @@ class CitationExtractor:
             # (A pinpoint at the end of a title, "... Policies § 11.2", is not a section sign in
             # the title: the formatter separates the two.)
             if bp.NOT_AN_AUTHOR.search(author) or "§" in BluebookFormatter._split_pinpoint(title)[0]:
+                continue
+            if not _reads_as_a_title(title):
                 continue
             if self._overlaps(start, match.end(), spans):
                 continue
