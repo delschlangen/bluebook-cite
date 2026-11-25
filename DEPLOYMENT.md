@@ -52,7 +52,8 @@ Optional environment variables, all with working defaults:
 | `MAX_CITATIONS_RETURNED` | `2000` | citations in one response (the true total is still reported) |
 | `MAX_CLAIMS_RETURNED` | `500` | unsourced claims in one response |
 | `MAX_REPAIR_CHARS` | `2000` | paste size cap |
-| `MAX_SMALL_BODY_KB` | `1024` | request body for every endpoint except upload and analyze |
+| `MAX_SMALL_BODY_KB` | `64` | request body for every endpoint except upload and analyze |
+| `MAX_FIELD_CHARS` | `2000` | longest text field those endpoints accept (one citation, a case name, a search phrase); longer is a 413 that names the field |
 | `MAX_CITATIONS_ANALYZED` | `50000` | citations one analysis will build; more is a 413 |
 | `MAX_CLAIMS_FOR_SOURCES` | `25` | claims the legacy source-finding endpoints search outside sources for |
 | `EVENT_LOOP_STALL_EXIT_S` | `45` | end the process if the event loop stalls this long, so the host restarts it (`0` = off) |

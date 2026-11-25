@@ -244,6 +244,19 @@ counted where the request is made, so the response says how many were found and 
 (`lookup.matched`, `lookup.failed`) and "the sources refused us" is no longer reported as
 "nothing found".
 
+The small endpoints (one citation, a case name, a search phrase) refuse any text field longer than
+`MAX_FIELD_CHARS`: a 3 KB string of spaces once held the event loop for 45 seconds in a pattern
+written inline in a handler. Two tests now guard every pattern in the code:
+`tests/test_regex_floods.py` (about eighty floods of one repeated shape over every import-time
+pattern and every stage) and `tests/test_regex_inline.py`, which reads the source of every module,
+collects every `re.` call wherever it is written, and attacks each with text built from the
+pattern's own structure, reporting any that is slow and growing faster than its input.
+
+When a container runs out of memory the kernel ends one process without asking. The child that
+reads an upload marks itself as the first to go, so a hostile file costs that one upload and not
+the server (measured in a 512 MB container: the server was ended 4 times in 4 before, and not
+once in 350 hostile uploads after).
+
 Two last-resort checks exist because a regular expression holds the interpreter lock for the
 whole of one match, and nothing inside Python can interrupt it: not a deadline, not a timer, not
 another thread. `EVENT_LOOP_STALL_EXIT_S` (45 s) ends the process if the event loop has not run
@@ -259,7 +272,8 @@ of it.
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `MAX_SMALL_BODY_KB` | `1024` | request body for every endpoint except upload and analyze |
+| `MAX_SMALL_BODY_KB` | `64` | request body for every endpoint except upload and analyze |
+| `MAX_FIELD_CHARS` | `2000` | longest text field those endpoints accept (one citation, a case name, a search phrase); longer is a 413 that names the field |
 | `MAX_CITATIONS_ANALYZED` | `50000` | citations one analysis will build; more is a 413 |
 | `MAX_CLAIMS_FOR_SOURCES` | `25` | claims the legacy source-finding endpoints search outside sources for |
 | `EVENT_LOOP_STALL_EXIT_S` | `45` | end the process if the event loop stalls this long (`0` = off) |
