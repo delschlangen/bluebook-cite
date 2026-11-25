@@ -22,3 +22,6 @@ dist/
 
 # Local env
 .env.local
+
+# Working copies that coding agents create for themselves; never project content
+.claude/worktrees/
