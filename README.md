@@ -255,7 +255,7 @@ pattern's own structure, reporting any that is slow and growing faster than its 
 When a container runs out of memory the kernel ends one process without asking. The child that
 reads an upload marks itself as the first to go, so a hostile file costs that one upload and not
 the server (measured in a 512 MB container: the server was ended 4 times in 4 before, and not
-once in 350 hostile uploads after).
+once in about 350 hostile uploads after).
 
 Two last-resort checks exist because a regular expression holds the interpreter lock for the
 whole of one match, and nothing inside Python can interrupt it: not a deadline, not a timer, not
