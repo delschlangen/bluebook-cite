@@ -67,11 +67,13 @@ PATTERNS: dict[str, Pattern] = {
     ),
 
     # Law review articles: Author, Title, Volume Journal Page (Year)
+    # (White space and numbers are bounded like everything else: "\s+" and "\d+" between two
+    # parts that can fail let a search restart inside the run.)
     "law_review": re.compile(
-        r"([A-Z][a-zA-Z\.\s]{1,100}),\s+"
-        r"([^,]{1,250}),\s+"
-        r"(\d+)\s+([A-Z][a-zA-Z\.\s&]{1,100}(?:L\.|Law|J\.|Journal|Rev\.|Review)[a-zA-Z\.\s]{0,40})\s+"
-        r"(\d+)(?:,\s*(\d+(?:-\d+)?))?\s*"
+        r"([A-Z][a-zA-Z\.\s]{1,100}),\s{1,4}"
+        r"([^,]{1,250}),\s{1,4}"
+        r"(\d{1,4})\s{1,4}([A-Z][a-zA-Z\.\s&]{1,100}(?:L\.|Law|J\.|Journal|Rev\.|Review)[a-zA-Z\.\s]{0,40})\s{1,4}"
+        r"(\d{1,6})(?:,\s{0,4}(\d{1,6}(?:-\d{1,6})?))?\s{0,4}"
         r"\((\d{4})\)"
     ),
 
@@ -80,11 +82,11 @@ PATTERNS: dict[str, Pattern] = {
         # "&" and apostrophes/hyphens are allowed in the author. Without "&", the first
         # author of "Roy M. Mersky & Donald J. Dunn, Title (8th ed. 2002)" was silently
         # dropped and the citation attributed to the second author alone.
-        r"([A-Z][a-zA-Z\.\s&'\-]{1,100}),\s+"
-        r"([A-Z][^(]{1,250})\s*"
+        r"([A-Z][a-zA-Z\.\s&'\-]{1,100}),\s{1,4}"
+        r"([A-Z][^(]{1,250})"
         # Bluebook ordinals are "2d" and "3d", not "2nd" and "3rd"
         # (Rule 6.2(b)), so both spellings must be accepted.
-        r"\((?:(\d+(?:st|nd|rd|th|d))\s+ed\.\s+)?(\d{4})\)"
+        r"\((?:(\d{1,3}(?:st|nd|rd|th|d))\s{1,4}ed\.\s{1,4})?(\d{4})\)"
     ),
 
     # Short forms - Id.
@@ -99,7 +101,7 @@ PATTERNS: dict[str, Pattern] = {
 
     # Hereinafter designation
     "hereinafter": re.compile(
-        r"\[hereinafter\s+([^\]]+)\]"
+        r"\[hereinafter\s{1,5}([^\]\s][^\]]{0,300})\]"
     ),
 
     # URL citations. The run of address characters is taken whole (possessive, so it is never

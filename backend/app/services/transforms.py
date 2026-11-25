@@ -56,7 +56,19 @@ def thousands(value: str, style: str = "law_review") -> str:
     """
     # String-based on purpose, so very long numbers keep every digit and the browser
     # (which cannot hold them exactly as numbers) produces the same answer.
-    return re.sub(r"\d{5,}", lambda m: re.sub(r"\B(?=(\d{3})+(?!\d))", ",", m.group()), value)
+    # By slicing, not with a lookahead: "every position followed by a multiple of three digits"
+    # reads to the end of the run from each of its digits, which is quadratic, and a long run of
+    # digits after "Fed. Reg." froze an analysis.
+    return _LONG_NUMBER.sub(lambda m: _grouped(m.group()), value)
+
+
+_LONG_NUMBER = re.compile(r"\d{5,}")
+
+
+def _grouped(digits: str) -> str:
+    """ "50379" -> "50,379": commas between groups of three, counted from the right."""
+    head = len(digits) % 3 or 3
+    return digits[:head] + "".join("," + digits[i:i + 3] for i in range(head, len(digits), 3))
 
 
 def ordinal(value: str, style: str = "law_review") -> str:
