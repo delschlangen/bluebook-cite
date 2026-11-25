@@ -96,6 +96,10 @@ FLOODS = {
     "url-dots": "https://a.b/" + "." * (SIZE - 12),
     "url-wrapped-extension": repeated("https://a.b/c.\npdf.\n"),
     "url-last-visited": repeated("https://a.b/c (last visited Mar. 3, 2024) "),
+    # Notes end at a blank line: lines of nothing but spaces, and note markers between them.
+    "blank-lines": repeated("\n   \t \n"),
+    "notes-and-blank-lines": repeated("[^1] A v. B\n\nC v. D\n"),
+    "newline-then-spaces": repeated("\n" + " " * 250 + "a"),
 }
 
 
@@ -223,6 +227,7 @@ def main() -> None:
         "versus", "ampersands", "names-and-connectors", "names-then-versus", "names-with-suffixes",
         "names-over-line-breaks", "bare-versus", "abbreviated-names",
         "url-then-punctuation", "url-brackets", "url-dots", "url-wrapped-extension", "url-last-visited",
+        "blank-lines", "notes-and-blank-lines", "newline-then-spaces",
     ]
     for stage_name, stage in stages():
         for flood_name in stage_floods:

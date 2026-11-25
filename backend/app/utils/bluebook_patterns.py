@@ -154,6 +154,10 @@ PATTERNS: dict[str, Pattern] = {
     "footnote_marker": re.compile(
         rf"(?m)^[ \t]*(\d{{1,3}})[.)]?[ \t]+(?!{_REPORTER_LOOKAHEAD})(?=[A-Z\"'])"
     ),
+
+    # A line with nothing on it. A note ends at the first one after its marker: what follows is
+    # the next page's body text (PDF) or the next block (Word), not more of the note.
+    "blank_line": re.compile(r"\n[ \t\r\f\v]{0,200}\n"),
 }
 
 # Reporter abbreviations (Bluebook Table 1)

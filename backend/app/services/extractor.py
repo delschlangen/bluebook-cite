@@ -787,34 +787,43 @@ class CitationExtractor:
         return citations
 
     def _assign_footnotes(self, citations: list[Citation], text: str) -> None:
-        """Assign footnote numbers to citations based on document structure."""
+        """Say which note each citation is in, if it is in one.
+
+        A note runs from its marker to the next marker or the next blank line, whichever comes
+        first. What follows a blank line is body text again: the next page of a PDF, or the next
+        block of a Word file (whose notes are written one to a line after the body). The number
+        used to be carried forward until the next marker, however far away: in a paper whose
+        only markers were notes 1 and 2, every one of the 300 citations after them, 56 pages of
+        body text, was reported as note 2.
+        """
         # A Word document carries real footnote numbers, written in front of each
         # note by the parser. When any are present they are the truth, and the
         # guess below, which would misread numbered headings and lines that begin
         # with a reporter volume, is skipped entirely.
-        footnote_positions = []
         explicit = list(PATTERNS["footnote_marker_explicit"].finditer(text))
         if explicit:
-            # Endnotes are numbered separately and would collide with footnotes.
-            footnote_positions = [
-                (int(m.group(2)), m.start()) for m in explicit if not m.group(1)
-            ]
-            endnote_positions = [
-                (int(m.group(2)), m.start()) for m in explicit if m.group(1)
-            ]
-            footnote_positions += endnote_positions
+            # Endnotes are numbered separately from footnotes: "[^e3]" is not note 3 again.
+            markers = [(m.start(), int(m.group(2)), "endnote" if m.group(1) else "footnote") for m in explicit]
         else:
-            for match in PATTERNS["footnote_marker"].finditer(text):
-                footnote_positions.append((int(match.group(1)), match.start()))
+            markers = [(m.start(), int(m.group(1)), "footnote") for m in PATTERNS["footnote_marker"].finditer(text)]
+        if not markers:
+            return
 
-        footnote_positions.sort(key=lambda x: x[1])
-        fn_positions = [pos for _, pos in footnote_positions]
-        fn_numbers = [num for num, _ in footnote_positions]
+        marker_starts = [start for start, _, _ in markers]
+        blank_lines = [m.start() for m in PATTERNS["blank_line"].finditer(text)]
 
-        # Nearest footnote marker at or before each citation: a binary search per
-        # citation instead of a scan from the top of the document.
+        # Nearest marker at or before each citation: a binary search per citation instead of a
+        # scan from the top of the document. Then the first blank line after that marker.
         for citation in citations:
-            i = bisect_right(fn_positions, citation.position_start) - 1
-            current_footnote = fn_numbers[i] if i >= 0 else 0
-            if current_footnote > 0:
-                citation.footnote_number = current_footnote
+            i = bisect_right(marker_starts, citation.position_start) - 1
+            if i < 0:
+                continue
+            start, number, note_type = markers[i]
+            j = bisect_left(blank_lines, start)
+            if j < len(blank_lines) and blank_lines[j] < citation.position_start:
+                # the note ended before this citation: it is in the body
+                citation.footnote_number = None
+                continue
+            if number > 0:
+                citation.footnote_number = number
+                citation.note_type = note_type
