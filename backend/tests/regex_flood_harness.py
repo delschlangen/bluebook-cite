@@ -82,6 +82,14 @@ FLOODS = {
     "claims": repeated("The Court held that about 5 people "),
     "emoji": repeated("\U0001f600"),
     "cjk": repeated("法"),
+    # Party names are read word by word outwards from every "v."; these are the shapes that
+    # reader accepts, each as dense as it can be made.
+    "names-and-connectors": repeated("Alpha of the Beta and Gamma for a Delta & "),
+    "names-then-versus": repeated("Alpha Beta Gamma Delta Epsilon v. "),
+    "names-with-suffixes": repeated("Alpha, Inc. v. Beta, LLC, "),
+    "names-over-line-breaks": repeated("Alpha\nBeta v.\nGamma\n"),
+    "bare-versus": repeated("v. "),
+    "abbreviated-names": repeated("Nat'l Ass'n of Mfrs. v. U.S. Dep't of Lab. "),
 }
 
 
@@ -206,6 +214,8 @@ def main() -> None:
         "digits-and-spaces", "digits-and-commas", "capitalised-words", "initials", "all-caps-words",
         "case-names", "statute", "law-review", "url", "long-url", "numbered-lines", "claims",
         "section-signs", "open-brackets", "quotes", "newlines", "footnote-markers",
+        "versus", "ampersands", "names-and-connectors", "names-then-versus", "names-with-suffixes",
+        "names-over-line-breaks", "bare-versus", "abbreviated-names",
     ]
     for stage_name, stage in stages():
         for flood_name in stage_floods:

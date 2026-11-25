@@ -46,6 +46,13 @@ class Citation(BaseModel):
     court: str | None = None
     year: int | None = None
     parallel_citations: list[str] | None = None
+    # A case cited by its docket ("No. 23-1214", or several: "Nos. 14-1290, 14-1292"), the full
+    # date in its parenthetical when the document gives one ("June 15, 2026"), and what happened
+    # to it afterwards ("cert. denied, No. 25-1026 (U.S. June 15, 2026)"). All as the document
+    # states them; none is ever filled in by guessing.
+    docket_number: str | None = None
+    decision_date: str | None = None
+    subsequent_history: str | None = None
 
     # Article/book components
     author: str | None = None
@@ -60,9 +67,21 @@ class Citation(BaseModel):
     section: str | None = None
     subsection: str | None = None
 
-    # URL components
+    # URL components. `access_date` is the day the AUTHOR visited the page and is only set when
+    # the document says so ("last visited ..."). The day the page was published is a different
+    # fact and has its own field; it comes from the page itself when it is looked up.
     url: str | None = None
     access_date: str | None = None
+    publication_date: str | None = None
+    site_name: str | None = None
+
+    # Which written form was recognised, when a type has more than one layout (a state code
+    # cited by title or chapter, a session law, a case cited by docket number). The formatter
+    # uses it to put the parts back in the order that form requires.
+    form: str | None = None
+    # "footnote" or "endnote" when `footnote_number` came from a note the reader marked. A Word
+    # file numbers the two separately, so note 3 of each is a different note.
+    note_type: Literal["footnote", "endnote"] | None = None
 
     # Processing metadata
     suggested_correction: str | None = None

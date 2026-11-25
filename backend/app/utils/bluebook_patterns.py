@@ -6,55 +6,6 @@ Based on Bluebook 21st Edition.
 import re
 from re import Pattern
 
-# --- Building blocks for party names -----------------------------------------
-#
-# A party name is a bounded run of words, optionally ending in a corporate
-# suffix that sits behind a comma. The comma matters: without it,
-# "NetChoice, LLC v. Paxton" extracts as "LLC v. Paxton" and
-# "Students for Fair Admissions, Inc. v. Harvard" becomes "Inc. v. Harvard",
-# because matching restarts after the comma it cannot cross.
-
-# A single word inside a party name. Allows internal periods (abbreviations),
-# apostrophes (Ass'n), ampersands, and hyphens.
-#
-# A word must contain a letter. A purely numeric token is never part of a party
-# name, and allowing one let "Brandenburg v Ohio 395 US 444" absorb the volume,
-# reporter and page into the defendant, then report all three as missing.
-# "3M" and similar still match, because they are digits followed by a letter.
-# A standalone "Id." is the short form for the authority just cited. It is never a word in a
-# party name, and letting it be one swallowed it: "Id. Brown v. Board" read as a party called
-# "Id. Brown", and "Marbury v. Madison. Id. at 177" as a defendant called "Id. at".
-# "Idaho", "Ida." and "Id.Co" are unaffected: the lookahead needs "Id." followed by a non-word.
-_NOT_ID = r"(?!Id\.(?![A-Za-z0-9]))"
-
-# Every repetition is bounded. An unbounded one makes a failed match retry from each possible
-# starting point, which is quadratic in the length of any run that never breaks: well under
-# 100 KB of odd but plausible text (capitals with no punctuation, one very long token) took
-# tens of seconds and froze the whole server. The bounds are far beyond any real name.
-_PARTY_WORD = (
-    rf"(?:{_NOT_ID}[A-Za-z][A-Za-z0-9.'&\-]{{0,60}}|[0-9]{{1,10}}[A-Za-z][A-Za-z0-9.'&\-]{{0,60}})"
-)
-
-# Entity suffixes that legitimately follow a comma inside a party name.
-_ENTITY_SUFFIX = (
-    r"(?:Inc|LLC|L\.L\.C|Corp|Co|Ltd|L\.P|LP|LLP|PLLC|P\.C|N\.A|S\.A|PLC|"
-    r"Ass'n|Assn|Found|Univ)\.?"
-)
-
-# Up to eight words, plus at most one comma-separated entity suffix. The bound
-# is what keeps a greedy match from swallowing the sentence before " v. ".
-# The first token may also begin with digits followed by a letter ("3M"),
-# but not with digits alone, so "395 US" cannot start a party name.
-_PARTY_FIRST = (
-    rf"(?:{_NOT_ID}[A-Z][A-Za-z0-9.'&\-]{{0,60}}|[0-9]{{1,10}}[A-Z][A-Za-z0-9.'&\-]{{0,60}})"
-)
-
-_PARTY = (
-    rf"{_PARTY_FIRST}"
-    rf"(?:\s+{_PARTY_WORD}){{0,7}}"
-    rf"(?:,\s*{_ENTITY_SUFFIX})?"
-)
-
 # Reporter abbreviations that must never be mistaken for a footnote marker.
 _REPORTER_LOOKAHEAD = (
     r"(?:U\.\s?S\.|S\.\s?Ct\.|L\.\s?Ed\.|F\.\s?(?:Supp\.|App'x|\dd|\dth)|F\.|"
@@ -62,36 +13,56 @@ _REPORTER_LOOKAHEAD = (
     r"Cal\.|N\.\s?Y\.|U\.\s?S\.\s?C|C\.\s?F\.\s?R|Stat\.|Fed\.)"
 )
 
+# --- Shapes shared by several patterns --------------------------------------------------------
+#
+# Every repetition below is bounded, and no two neighbouring repetitions can match the same
+# characters. An unbounded one makes a failed match retry from each possible starting point,
+# which is quadratic in the length of any run that never breaks: well under 100 KB of odd but
+# plausible text (capitals with no punctuation, one very long token) took tens of seconds and
+# froze the whole server, because a regular expression holds the interpreter lock for the whole
+# of one match. tests/test_regex_floods.py runs every pattern here over floods of one repeated
+# shape; add a flood there for every new shape a pattern accepts.
+
+# A page or range of pages, with the footnote form the Bluebook uses for a pin cite to a note:
+# "153", "842-43", "152 n.4", "152 & n.4", "140 nn.3-4". (En dashes are hyphens by the time a
+# pattern sees them: see text_normalize.) The lookaheads stop the engine from giving back a digit
+# to make a later part fit, and keep ", 93 S. Ct. 705" from being read as a pin cite of 93.
+_PIN = (
+    r"\d{1,6}(?:-\d{1,6})?(?![\d-])"
+    r"(?:\s{1,2}(?:&\s)?nn?\.\s?\d{1,4}(?:-\d{1,4})?(?!\d))?"
+    r"(?!\s{1,2}[A-Z])"
+)
+_PINS = rf"{_PIN}(?:,\s{{1,2}}{_PIN}){{0,5}}"
+
+# A section number and the subsections after it: "922(g)(1)", "2C:58-33", "59.1-148.5", "898-a",
+# "505/2DDDD". It starts with a digit and ends with a letter or digit, so a sentence's own full
+# stop is never taken into it.
+_SECTION = r"\d(?:[0-9A-Za-z.:/\-]{0,28}[0-9A-Za-z])?(?:\([0-9A-Za-z]{1,5}\)){0,8}"
+# What may follow the first section: the end of a range ("to 898-e", "to -35", "-(c)", "through
+# 706") or the next item of a list (", 1346(a)(2)", "and 1367"). A list item may not be followed
+# by a capitalised word, which is how ", 134 Stat. 281" and ", 28 U.S.C." are left alone.
+_SECTION_MORE = (
+    rf"(?:\s{{0,2}}(?:-|\bto\b|\bthrough\b)\s{{0,2}}(?:-?{_SECTION}|(?:\([0-9A-Za-z]{{1,5}}\)){{1,8}})"
+    rf"|,?\s{{1,2}}and\s{{1,2}}{_SECTION}(?!\s{{1,2}}[A-Z])"
+    rf"|,\s{{1,2}}{_SECTION}(?!\s{{1,2}}[A-Z]))"
+)
+_SECTIONS = rf"{_SECTION}(?:{_SECTION_MORE}){{0,8}}"
+
+# A reporter citation after a case name, read from where the name ends. The two patterns are only
+# ever applied there (with .match), never searched for through a document.
+_REPORTER_CITE = r"(\d{1,5})\s{1,3}([A-Z][a-zA-Z\.\s\d]{0,40}?[a-zA-Z\.\d])\s{1,3}(\d{1,6})"
+
 # Citation detection patterns
 PATTERNS: dict[str, Pattern] = {
-    # Cases: Party v. Party, Volume Reporter Page (Court Year)
-    "case_complete": re.compile(
-        rf"({_PARTY})\s+v\.?\s+({_PARTY}),\s*"
-        r"(\d+)\s+([A-Z][a-zA-Z\.\s\d]{0,40}?[a-zA-Z\.\d])\s+(\d+)"
-        r"(?:,\s*(\d+(?:-\d+)?))?\s*"
-        r"\(([^)]{1,200})\)"
+    # ", Volume Reporter Page[, Pin] (Court Year)" after a case name.
+    "case_tail_complete": re.compile(
+        rf",\s{{0,3}}{_REPORTER_CITE}(?:,\s{{0,3}}(\d{{1,6}}(?:-\d{{1,6}})?))?\s{{0,3}}\(([^)]{{1,200}})\)"
     ),
-
-    # Case with a reporter citation but no year parenthetical, e.g.
-    # "Brandenburg v Ohio 395 US 444". The volume, reporter and page are all
-    # present and must be recognised as such rather than reported missing.
-    "case_no_year": re.compile(
-        rf"({_PARTY})\s+v\.?\s+({_PARTY}),?\s+"
-        r"(\d+)\s+([A-Z][a-zA-Z\.\s\d]{0,40}?[a-zA-Z\.\d])\s+(\d+)"
-        r"(?!\s*[\d,]*\s*\()"
-    ),
-
-    # Incomplete case: just Party v. Party (missing reporter info).
-    #
-    # The second party is an atomic group: once it has matched the whole name it is never
-    # shortened. It used to be followed by a negative lookahead that refused a reporter citation
-    # after it (", 5 U.S."); when the lookahead failed the engine did not give up, it backed off
-    # one letter at a time until it found a place where the lookahead passed, so "Roe v. Wade,
-    # 410 U.S. ___ (1973)" was reported as "Roe v. Wad" and the lookup searched for a case that
-    # does not exist. The citation is now reported with the names whole; what follows them was not
-    # recognised as a reporter citation by the fuller patterns, which already had their turn.
-    "case_incomplete": re.compile(
-        rf"({_PARTY})\s+v\.?\s+(?>({_PARTY}))"
+    # A reporter citation with no year parenthetical, e.g. "Brandenburg v Ohio 395 US 444". The
+    # volume, reporter and page are all present and must be recognised as such rather than
+    # reported missing.
+    "case_tail_no_year": re.compile(
+        rf",?\s{{1,3}}{_REPORTER_CITE}(?!\s{{0,3}}[\d,]{{0,12}}\s{{0,3}}\()"
     ),
 
     # Federal statutes: Title U.S.C. § Section
@@ -577,3 +548,205 @@ def abbreviate_party_name(party: str) -> str:
         result = result.replace(placeholder, state_name)
 
     return result.strip()
+
+
+# =============================================================================================
+# What a party name is made of
+# =============================================================================================
+#
+# A case name used to be "any run of up to eight words that starts with a capital", which took
+# the prose on both sides of the name with it. The extractor now reads a name word by word
+# (extractor.py, "Party names"); these tables are what it knows about the words.
+
+# --- Words that end in a full stop without ending a sentence ---------------------------------
+#
+# Table T6 (case names), T7 (court names) and T10 (geographical terms) abbreviations, plus the
+# titles, entity suffixes and months that appear inside names and citations. The tables above
+# hold the T6 and T10 entries this tool APPLIES; the list here is wider, because recognising an
+# abbreviation someone else applied is a different job from applying one. Word length is not
+# evidence either way: "Roe." and "Ohio." end sentences, "Indep." and "Envtl." do not.
+_ABBREVIATIONS_SEEN_IN_NAMES = """
+Acad. Admin. Adm. Advert. Advoc. Aff. Afr. Agric. All. Alt. Am. Amend. Anc. Ann. App. Arb. Assoc.
+Assocs. Assn. Atl. Auth. Auto. Ave. Bankr. Bd. Behav. Bhd. Bros. Broad. Bldg. Bus. Cap. Cas. Cath.
+Ctr. Cent. Chem. Child. Chron. Cir. Civ. Coal. Coll. Com. Comm. Cmty. Co. Cos. Comp. Comput.
+Condo. Conf. Cong. Consol. Const. Constr. Cont. Contemp. Conv. Coop. Corp. Corr. Cosm. Couns.
+Cnty. Cty. Ct. Cts. Crim. Def. Delinq. Dept. Det. Dev. Dig. Dipl. Dir. Disc. Disp. Distrib.
+Distribs. Dist. Div. Dr. E. Econ. Ed. Educ. Elec. Elecs. Emp. Enter. Enters. Ent. Envtl. Equal.
+Equip. Est. Eur. Exch. Exec. Explor. Exp. Fac. Fam. Fed. Fid. Fin. Found. Gen. Glob. Grp. Guar.
+Hist. Hosp. Hous. Hum. Immigr. Imp. Inc. Indem. Indep. Indus. Ineq. Info. Inj. Inst. Ins. Intell.
+Int. Intl. Inv. Invs. Jud. Jurid. Juris. Just. Juv. Lab. Labs. Legis. Liab. Libr. Ltd. Litig. Loc.
+Mach. Mag. Maint. Mgmt. Mgr. Mfr. Mfrs. Mfg. Mar. Mkt. Mktg. Matrim. Mech. Med. Merch. Metro. Mil.
+Min. Mod. Mortg. Mun. Mut. Nat. Natl. Negl. Negot. N. Ne. Nw. No. Nos. Off. Op. Ord. Org. Pac.
+Parl. Pat. Pers. Pharm. Phil. Plan. Pol. Prac. Pres. Priv. Prob. Probs. Proc. Prod. Prods. Prof.
+Prop. Prot. Psych. Pub. Ry. Rec. Ref. Refin. Regul. Rehab. Rel. Rep. Reprod. Rsch. Rsrv. Resol.
+Res. Resp. Rest. Ret. Rev. Rts. Rd. Sav. Sch. Sci. Scot. Sec. Serv. Servs. Soc. Socio. Sol. S.
+Se. Sw. St. Ste. Stat. Sts. Subcomm. Supt. Sup. Super. Sur. Surv. Symp. Sys. Tchr. Tech.
+Telecomm. Telecomms. Tel. Temp. Twp. Transcon. Transp. Tr. Tpk. Unif. Univ. Urb. Util. Utils.
+Vill. W. Commw. Cl. Eq. Magis. Par. Terr. Trib. Pl.
+Mr. Mrs. Ms. Messrs. Hon. Sen. Gov. Col. Capt. Lt. Sgt. Jr. Sr. Esq. Mt. Ft. Pt. Blvd. Hwy.
+Jan. Feb. Apr. Jun. Jul. Aug. Sept. Sep. Oct. Nov. Dec.
+Ida. Calif. Penn. Penna. Wisc. Ore. Kans. Nebr. Balt. Bos. Chi. Dall. Phila. Phx.
+rel. al. cf. etc. viz. vs. v. art. cl. ch. pt. tit. vol. eds. supp. sess.
+"""
+
+
+def _abbreviation_tokens() -> frozenset[str]:
+    tokens = {t.lower() for t in _ABBREVIATIONS_SEEN_IN_NAMES.split()}
+    for table in (PARTY_ABBREVIATIONS, STATE_ABBREVIATIONS, COURT_ABBREVIATIONS, REPORTER_ABBREVIATIONS):
+        for value in table.values():
+            tokens.update(t.lower() for t in value.split() if t.endswith("."))
+    return frozenset(tokens)
+
+
+ABBREVIATION_TOKENS: frozenset[str] = _abbreviation_tokens()
+# The Table T6 words among them (the capitalised ones; not months, titles or "art."), which are
+# the only ones whose plural is formed by adding "s".
+_PLURAL_STEMS: frozenset[str] = frozenset(
+    t.lower() for t in _ABBREVIATIONS_SEEN_IN_NAMES.split("Mr. Mrs.")[0].split() if len(t) > 3
+) | frozenset(t.lower() for v in PARTY_ABBREVIATIONS.values() for t in v.split() if t.endswith(".") and len(t) > 3)
+
+# "U.S.", "L.A.", "N.Y.", "Ges.m.b.H.": a full stop INSIDE the token is the mark of an
+# abbreviation, and so is a single capital initial ("John F. Kennedy").
+_INTERNAL_FULL_STOP = re.compile(r"[A-Za-z]\.[A-Za-z]")
+
+
+def is_abbreviation(token: str) -> bool:
+    """True when `token`, which ends in a full stop, is an abbreviation and not the last word of
+    a sentence. Decided from the tables and from the token's shape, never from its length."""
+    if not token.endswith("."):
+        return False
+    low = token.lower()
+    if low in ABBREVIATION_TOKENS:
+        return True
+    # Table T6 forms a plural by adding "s": "Cmtys.", "Indus.", "Hosps.", "Sch." -> "Schs."
+    if token[0].isupper() and low.endswith("s.") and low[:-2] + "." in _PLURAL_STEMS:
+        return True
+    if _INTERNAL_FULL_STOP.search(token, 0, len(token) - 1):
+        return True
+    return len(token) == 2 and token[0].isalpha() and token[0].isupper()
+
+
+# --- Entity suffixes --------------------------------------------------------------------------
+#
+# Compared against a whole token. The old pattern tried them as prefixes, so the "Co" of
+# "Colo. Ct. App." was read as a company suffix and the defendant became "Hickenlooper, Co".
+ENTITY_SUFFIXES: frozenset[str] = frozenset(
+    "inc. inc incorporated llc llc. l.l.c. corp. corp corporation co. ltd. ltd limited l.p. lp llp "
+    "l.l.p. lllp pllc p.l.l.c. p.c. pc n.a. s.a. plc p.a. gmbh ag n.v. b.v. s.p.a. pty. pte.".split()
+)
+# What may follow a comma INSIDE a name: an entity suffix or a personal one ("Fallon, Jr.").
+COMMA_SUFFIXES: frozenset[str] = ENTITY_SUFFIXES | frozenset("jr. sr. ii iii iv m.d. esq. ph.d.".split())
+
+# --- Lower-case words that belong inside a name -----------------------------------------------
+#
+# Only BETWEEN two name words: "Board of Education", "Friends of the Earth", "Students for Fair
+# Admissions", "City and County of San Francisco", "United States ex rel. Schutte", "Smith d/b/a
+# Acme", "de la Cruz". Left dangling at either edge of a name they are prose and are dropped.
+NAME_CONNECTORS: frozenset[str] = frozenset(
+    "of the for and & de la las los le del della der den van von du di da des dos el al y "
+    "ex rel. d/b/a a/k/a f/k/a n/k/a o/b/o et al.".split()
+)
+# Particles that may BEGIN the second party: "Hernandez v. de la Cruz", "Treasury Employees v.
+# Von Raab" (capitalised there, lower case in many names).
+NAME_PARTICLES: frozenset[str] = frozenset("de la las los le del della der den van von du di da des dos el al".split())
+
+# "on", "in", "to" and "against" are ordinary prose far more often than they are part of a name
+# ("the Second Circuit in National Shooting Sports Foundation v. James", "press statement on
+# McDonald v. City of Chicago", "according to Smith v. Jones"). They are read as part of a name
+# only straight after the kind of word that heads an organisation's name. The lists come from
+# reported captions: Committee on Children's Television, Council on American-Islamic Relations,
+# Commission on Human Rights, Leadership Conference on Civil Rights, Center on Budget & Policy
+# Priorities, Institute on Taxation & Economic Policy, Task Force on ..., Coalition on
+# Homelessness, Project on Government Oversight; People in Interest of A.B., Committee in
+# Solidarity with the People of El Salvador, Women in City Government United; Citizens to
+# Preserve Overton Park, Committee to Defend Reproductive Rights, Coalition to Defend
+# Affirmative Action, Campaign to ...; Mothers against Drunk Driving, Citizens against ....
+CONDITIONAL_CONNECTORS: dict[str, frozenset[str]] = {
+    "on": frozenset(
+        "committee comm. subcommittee subcomm. council commission comm'n conference conf. board bd. "
+        "center ctr. centre institute inst. force coalition coal. alliance all. project panel forum "
+        "campaign consortium bureau office off. initiative".split()
+    ),
+    "in": frozenset("people committee comm. women".split()),
+    "to": frozenset(
+        "committee comm. citizens coalition coal. campaign alliance all. council society soc'y "
+        "project people association ass'n americans".split()
+    ),
+    "against": frozenset("mothers citizens coalition coal. people americans students parents women".split()),
+}
+# "Citizens for a Better Environment": an article is part of a name only straight after one of
+# the prepositions above or below.
+NAME_ARTICLES: frozenset[str] = frozenset({"a", "an"})
+_ARTICLE_AFTER: frozenset[str] = frozenset({"for", "of", "on", "in", "to", "against"})
+
+# --- Capitalised words that are prose, not the start of a name --------------------------------
+#
+# What can stand directly in front of a case name at the start of a sentence or clause: signals,
+# prepositions, conjunctions and the participles lawyers introduce a citation with. A party
+# whose own name begins with one of these ("Under Armour, Inc.") loses that word; that is rare,
+# and "In Brown v. Board" and "Under Chevron" are on every page. "The" is here because Rule
+# 10.2.1(d) drops it from the front of a party's name.
+LEFT_STOP_WORDS: frozenset[str] = frozenset(
+    "See Also But Cf. Compare Accord Contra E.g. In Under After Since Before Following Unlike Like "
+    "Per Until By From With On At To Of About And Or Both Either Neither When While Although Though "
+    "Because If As That Whether Thus Hence Then Even Only Citing Quoting Applying Overruling "
+    "Reversing Affirming Distinguishing Discussing Cases The This These Those Its His Her Their Our "
+    "Indeed However Moreover Furthermore Similarly Likewise Instead Rather Yet So Notably "
+    "Specifically Finally Later Earlier Recently Here There Where Whereas Despite Given Consider "
+    "Considering Regarding Concerning Unless Absent Beyond Between Among Within Without Through "
+    "Throughout During Upon Nor Recall Contrast Relying Echoing Invoking Extending Revisiting "
+    "Overturning Upholding Rejecting Adopting Interpreting Construing Limiting Clarifying "
+    "Reaffirming Decided Held Source Context Generally".split()
+)
+# After an abbreviation's full stop the next capitalised word normally continues the name
+# ("Mut. Auto. Ins. Co."), unless it is one of the words a new sentence begins with.
+SENTENCE_STARTERS: frozenset[str] = LEFT_STOP_WORDS | frozenset(
+    "It He She We They You I A An Such Each Every Some Many Most All No None Not Neither Another "
+    "Other Others Congress Justice Justices Judge Judges Plaintiff Plaintiffs Defendant Defendants "
+    "Petitioner Petitioners Respondent Respondents Appellant Appellants Appellee Appellees Amici "
+    "Amicus Courts Therefore Accordingly Nevertheless Nonetheless Still Now Today Next First Second "
+    "Third Fourth Fifth Lastly Further Additionally Importantly Conversely Otherwise Meanwhile "
+    "Ultimately Subsequently Previously Initially Originally Historically Traditionally Typically "
+    "Usually Often Sometimes Perhaps Certainly Clearly Obviously Arguably Presumably Apparently "
+    "What Which Who Whose How Why Whatever Whenever Wherever Once Again Twice Nothing Something "
+    "Everything Anything Nobody Everyone Anyone Someone".split()
+)
+# A capitalised word that follows a complete name in running prose and is not part of it: "In
+# Roe v. Wade Justice Blackmun wrote".
+RIGHT_STOP_TITLES: frozenset[str] = frozenset({"Justice", "Justices", "Judge", "Judges"})
+
+# "Ohio's Arnold v. Cleveland framework", "the Court's Heller decision", "Justice Scalia's
+# ...": a possessive place, court or government body directly in front of a name is prose.
+# Possessives that are part of a name stay ("Children's Hospital", "Sportsmen's Clubs",
+# "L.A. Sheriff's Dept."), which is why this is a list of possessors and not a rule about "'s".
+PROSE_POSSESSORS: frozenset[str] = frozenset(
+    {name.lower() for name in STATE_ABBREVIATIONS}
+    | {abbr.lower() for abbr in STATE_ABBREVIATIONS.values()}
+    | set(
+        "court circuit district state city county government congress legislature nation country "
+        "commonwealth agency department majority dissent panel plaintiff plaintiffs defendant "
+        "defendants petitioner petitioners respondent respondents appellant appellants appellee "
+        "appellees amici brief america states".split()
+    )
+)
+# Titles whose bearer's possessive is prose too: "Justice Blackmun's Roe v. Wade opinion".
+PERSON_TITLES: frozenset[str] = frozenset("justice judge chief president senator governor professor".split())
+
+# Procedural case-name forms where the leading words ARE the name and must survive cleanup.
+LEGAL_NAME_PREFIXES: tuple[str, ...] = (
+    "in re ",
+    "ex parte ",
+    "ex rel. ",
+    "in the matter of ",
+    "matter of ",
+    "estate of ",
+)
+
+# A word of a name: it starts with a capital, or with digits and then a capital ("3M"), or is one
+# of the few names written with a lower-case first letter and a capital inside ("eBay"). A
+# purely numeric token is never part of a name: allowing one let "Brandenburg v Ohio 395 US 444"
+# absorb the volume, reporter and page into the defendant.
+NAME_WORD = re.compile(r"(?:[A-Z]|[0-9]{1,10}[A-Z]|[a-z]{1,2}[A-Z])[A-Za-z0-9.'&\-]{0,60}\Z")
+
+# "v." between two names, as a token of its own. Lower case only: "V." is an initial.
+V_ANCHOR = re.compile(r"(?<=\s)v\.?(?=\s)")

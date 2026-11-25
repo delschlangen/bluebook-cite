@@ -184,12 +184,14 @@ class TestPerformance:
         elapsed = time.perf_counter() - start
         assert elapsed < 5.0, f"extraction took {elapsed:.2f}s on a normal document"
 
-    def test_adversarial_input_is_bounded(self):
-        # Capitalized words that never complete a " v. " construction are the
-        # worst case for the party pattern.
+    def test_adversarial_input_is_bounded(self, extractor):
+        # Capitalized words that never complete a " v. " construction were the worst case for
+        # the party pattern. There is no party pattern any more (a name is read outwards from
+        # "v.", a bounded number of words each way), so the same input goes through the reader.
         hostile = "A" + (" Ab" * 2000) + " v"
         start = time.perf_counter()
-        PATTERNS["case_complete"].search(hostile)
+        extractor.extract_all(hostile)
+        extractor.extract_all(hostile + ". Cd")
         elapsed = time.perf_counter() - start
         assert elapsed < 2.0, f"adversarial input took {elapsed:.2f}s"
 

@@ -14,8 +14,8 @@ worse, because every such citation was also sent for lookup under its damaged na
 
 import pytest
 
-from app.services.extractor import CitationExtractor
-from app.utils.bluebook_patterns import PATTERNS
+from app.services.extractor import CitationExtractor, read_party_right
+from app.utils import bluebook_patterns as bp
 
 extractor = CitationExtractor()
 
@@ -46,13 +46,15 @@ class TestPartyNamesAreWhole:
         assert cases[0].raw_text.endswith(second)
 
     def test_a_name_followed_by_a_comma_and_a_reporter_is_not_cut_at_every_letter(self):
-        """The old lookahead made the engine back off letter by letter; the proof is that no
-        shortened name is reachable from the pattern now."""
+        """The old lookahead made the engine back off letter by letter. A name is no longer
+        matched by a pattern at all: it is read word by word and ends at the comma, so there is
+        no shorter name for anything to fall back to."""
         text = "Roe v. Wade, 410 U.S. ___ (1973)."
-        match = PATTERNS["case_incomplete"].search(text)
+        anchor = bp.V_ANCHOR.search(text)
 
-        assert match is not None
-        assert match.group(2) == "Wade"
+        assert anchor is not None
+        end, _ = read_party_right(text, anchor.end())
+        assert text[anchor.end():end].strip() == "Wade"
 
     def test_complete_citations_are_unchanged(self):
         cases = _cases("Brown v. Board of Education, 347 U.S. 483 (1954).")
