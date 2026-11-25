@@ -47,8 +47,13 @@ def pat(regex, flags="i", paste_only=False):
 _MONTH = r"[A-Za-z]{3,9}\.?"
 _DATE = rf"{_MONTH}\s*\d{{1,2}},?\s*\d{{4}}"
 _DATE_OR_ISO = rf"(?:{_DATE}|\d{{4}}-\d{{2}}-\d{{2}})"
-_ROMAN_OR_NUM = r"[IVXLCivxlc]+|\d{1,2}"
-_SUB = r"(?:\([A-Za-z0-9]+\))*"
+_ROMAN_OR_NUM = r"[IVXLCivxlc]{1,8}|\d{1,2}"
+_SUB = r"(?:\([A-Za-z0-9]{1,5}\)){0,8}"
+# White space between two parts of one citation. Bounded: with "\s*" on both sides of an
+# optional part ("\s*,?\s*"), a long run of spaces can be shared out between the two in a
+# number of ways that grows with the square of its length, and every one of them is tried
+# before the pattern gives up. No citation has four spaces between two of its parts.
+_S = r"\s{0,3}"
 _NUM_COMMA = r"\d{1,3}(?:,\d{3})+|\d+"
 
 # Where a citation that begins with free text (an author's or agency's name) may start:
@@ -119,9 +124,9 @@ TYPES = [
         "id": "us_const_article", "label": "U.S. Constitution, article",
         "family": "constitutions_rules", "citation_type": "constitution", "confidence": "high",
         "patterns": [pat(
-            rf"U\.?\s?S\.?\s*Const(?:itution|\.)?\s*,?\s*art(?:icle|\.)?\s*(?P<article>{_ROMAN_OR_NUM})"
-            r"(?:\s*,?\s*(?:§+|sec(?:tion|\.)?)\s*(?P<section>\d+))?"
-            r"(?:\s*,?\s*cl(?:ause|\.)?\s*(?P<clause>\d+))?"
+            rf"U\.?\s?S\.?{_S}Const(?:itution|\.)?{_S},?{_S}art(?:icle|\.)?{_S}(?P<article>{_ROMAN_OR_NUM})"
+            rf"(?:{_S},?{_S}(?:§{{1,2}}|sec(?:tion|\.)?){_S}(?P<section>\d{{1,4}}))?"
+            rf"(?:{_S},?{_S}cl(?:ause|\.)?{_S}(?P<clause>\d{{1,4}}))?"
         )],
         "fields": [
             field("article", "article number", "11", "Articles are cited in roman numerals: art. I, not art. 1.", True),
@@ -136,9 +141,9 @@ TYPES = [
         "id": "us_const_amendment", "label": "U.S. Constitution, amendment",
         "family": "constitutions_rules", "citation_type": "constitution", "confidence": "high",
         "patterns": [pat(
-            rf"U\.?\s?S\.?\s*Const(?:itution|\.)?\s*,?\s*amend(?:ment|\.)?\s*(?P<amendment>{_ROMAN_OR_NUM})"
-            r"(?:\s*,?\s*(?:§+|sec(?:tion|\.)?)\s*(?P<section>\d+))?"
-            r"(?:\s*,?\s*cl(?:ause|\.)?\s*(?P<clause>\d+))?"
+            rf"U\.?\s?S\.?{_S}Const(?:itution|\.)?{_S},?{_S}amend(?:ment|\.)?{_S}(?P<amendment>{_ROMAN_OR_NUM})"
+            rf"(?:{_S},?{_S}(?:§{{1,2}}|sec(?:tion|\.)?){_S}(?P<section>\d{{1,4}}))?"
+            rf"(?:{_S},?{_S}cl(?:ause|\.)?{_S}(?P<clause>\d{{1,4}}))?"
         )],
         "fields": [
             field("amendment", "amendment number", "11", "Amendments are cited in roman numerals: amend. XIV, not amend. 14.", True),
@@ -153,8 +158,8 @@ TYPES = [
         "id": "state_const", "label": "State constitution",
         "family": "constitutions_rules", "citation_type": "constitution", "confidence": "medium",
         "patterns": [pat(
-            rf"(?P<state>{_state_alternation()})\s*Const(?:itution|\.)?\s*,?\s*art(?:icle|\.)?\s*(?P<article>{_ROMAN_OR_NUM})"
-            r"(?:\s*,?\s*(?:§+|sec(?:tion|\.)?)\s*(?P<section>\d+))?"
+            rf"(?P<state>{_state_alternation()}){_S}Const(?:itution|\.)?{_S},?{_S}art(?:icle|\.)?{_S}(?P<article>{_ROMAN_OR_NUM})"
+            rf"(?:{_S},?{_S}(?:§{{1,2}}|sec(?:tion|\.)?){_S}(?P<section>\d{{1,4}}))?"
         )],
         "fields": [
             field("state", "state", "11", "The state, abbreviated per Table T10.", True),
@@ -206,8 +211,8 @@ TYPES = [
         "id": "cfr", "label": "Code of Federal Regulations",
         "family": "admin", "citation_type": "regulation", "confidence": "high",
         "patterns": [pat(
-            rf"(?P<title>\d{{1,2}})\s*C\.?\s?F\.?\s?R\.?\s*(?:§+)?\s*(?P<section>\d+(?:\.\d+)?)(?P<sub>{_SUB})"
-            r"(?:\s*\((?P<year>\d{4})\))?"
+            rf"(?P<title>\d{{1,2}}){_S}C\.?\s?F\.?\s?R\.?{_S}§{{0,2}}{_S}(?P<section>\d{{1,6}}(?:\.\d{{1,6}})?)(?P<sub>{_SUB})"
+            rf"(?:{_S}\((?P<year>\d{{4}})\))?"
         )],
         "fields": [
             field("title", "title number", "14.2", "The C.F.R. title, the number before C.F.R.", True),
@@ -336,8 +341,8 @@ TYPES = [
         "family": "reports", "citation_type": "other", "confidence": "high",
         "patterns": [
             pat(
-                _START + r"(?P<author>[A-Z][A-Za-z'&.\-]*(?:\s+(?:(?:of|for|and|the|on|&)\s+)*[A-Z][A-Za-z'&.\-]*){0,9}?)\s*,\s*(?P<number>GAO-\d{2}-\d+[A-Za-z]*|R[LS]?\d{5}|IF\d{5}|IN\d{5})\s*,\s*"
-                r"(?P<title>[^()]+?)\s*\((?P<year>\d{4})\)",
+                _START + r"(?P<author>[A-Z][A-Za-z'&.\-]{0,40}(?:\s{1,3}(?:(?:of|for|and|the|on|&)\s{1,3}){0,3}[A-Z][A-Za-z'&.\-]{0,40}){0,9}?)\s{0,3},\s{0,3}(?P<number>GAO-\d{2}-\d{1,7}[A-Za-z]{0,3}|R[LS]?\d{5}|IF\d{5}|IN\d{5})\s{0,3},\s{0,3}"
+                r"(?P<title>[^()\s][^()]{0,400}?)\s{0,3}\((?P<year>\d{4})\)",
                 flags="",
             ),
             pat(

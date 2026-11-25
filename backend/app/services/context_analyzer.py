@@ -94,15 +94,19 @@ class DocumentContextAnalyzer:
         """
         suggestions = []
         seen: dict[str, CitationContext] = {}
-        footnote_history: dict[int, list[str]] = {}
+        # Notes are keyed by kind as well as number. A Word file numbers its footnotes and its
+        # endnotes separately, so footnote 1 and endnote 1 are two notes with two histories;
+        # keyed by number alone they shared one, and "Id." was advised across them.
+        footnote_history: dict[tuple[str, int], list[str]] = {}
         # Track last citation for within-footnote Id.
         last_cite_key: str | None = None
-        last_fn: int = 0
+        last_fn: tuple[str, int] = ("footnote", 0)
         # Track position within footnote
-        footnote_position: dict[int, int] = {}
+        footnote_position: dict[tuple[str, int], int] = {}
 
         for citation in citations:
-            fn = citation.footnote_number or 0
+            number = citation.footnote_number or 0
+            fn = (citation.note_type or "footnote", number)
 
             # Track position within this footnote
             if fn not in footnote_position:
@@ -118,7 +122,7 @@ class DocumentContextAnalyzer:
                 "suggested_form": None,
                 "short_form_type": None,
                 "explanation": None,
-                "footnote_number": fn,
+                "footnote_number": number,
                 "position_in_footnote": footnote_position[fn],
                 "can_use_string_cite": False,
             }
@@ -142,7 +146,7 @@ class DocumentContextAnalyzer:
                 can_use_within_footnote_id = (
                     fn == last_fn and
                     last_cite_key == cite_key and
-                    fn > 0
+                    number > 0
                 )
 
                 # Check for cross-footnote Id. (Rule 4.1)
@@ -177,7 +181,7 @@ class DocumentContextAnalyzer:
                     suggestion["short_form_type"] = "short_case"
                     suggestion["explanation"] = "Short form for previously cited case"
 
-                context.last_used_footnote = fn
+                context.last_used_footnote = number
                 context.times_cited += 1
 
                 # Check if string cite is possible (same footnote, different source)
@@ -189,9 +193,9 @@ class DocumentContextAnalyzer:
                 if cite_key:
                     context = CitationContext(
                         citation_id=citation.id,
-                        first_occurrence_footnote=fn,
+                        first_occurrence_footnote=number,
                         full_citation=citation.suggested_correction or citation.raw_text,
-                        last_used_footnote=fn,
+                        last_used_footnote=number,
                     )
 
                     # Check if hereinafter is appropriate
@@ -208,7 +212,7 @@ class DocumentContextAnalyzer:
                 suggestion["short_form_type"] = "full"
 
             # Track in footnote history
-            if fn > 0:
+            if number > 0:
                 if fn not in footnote_history:
                     footnote_history[fn] = []
                 if cite_key:
@@ -281,15 +285,15 @@ class DocumentContextAnalyzer:
     def _can_use_id(
         self,
         cite_key: str,
-        current_fn: int,
-        footnote_history: dict[int, list[str]]
+        current_fn: tuple[str, int],
+        footnote_history: dict[tuple[str, int], list[str]]
     ) -> bool:
         """Check if Id. can be used per Rule 4.1."""
-        if current_fn <= 0:
+        if current_fn[1] <= 0:
             return False
 
-        # Check previous footnote
-        prev_fn = current_fn - 1
+        # Check previous footnote (of the same kind: footnote 3 follows footnote 2, not endnote 2)
+        prev_fn = (current_fn[0], current_fn[1] - 1)
         if prev_fn not in footnote_history:
             return False
 

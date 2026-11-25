@@ -303,7 +303,10 @@ def _clean(value: str) -> str:
 
 def _tidy(text: str) -> str:
     """Remove the seams left where optional blocks were dropped."""
-    text = re.sub(r"\s+([,.;:)])", r"\1", text)
+    # The lookbehind makes a match start only at the beginning of a run of white space. Without
+    # it, a run that is NOT followed by punctuation was retried from each of its characters,
+    # which is quadratic in the length of the run. What is matched is the same.
+    text = re.sub(r"(?<!\s)\s+([,.;:)])", r"\1", text)
     text = re.sub(r"\(\s+", "(", text)
     text = re.sub(r"\s{2,}", " ", text)
     text = re.sub(r",\s*,", ",", text)
