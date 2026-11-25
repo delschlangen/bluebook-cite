@@ -14,6 +14,13 @@ from typing import Any
 
 from ..models.citation import UnsourcedClaim
 
+# "Smith v. Jones" inside a sentence. Bounded, and it cannot start in the middle of a word: the
+# unbounded version started again from every capital of a long run ("held that" followed by
+# 40,000 capitals took 10 s with the interpreter lock held, so nothing else on the server ran).
+_CASE_NAME_IN_SENTENCE = re.compile(
+    r"(?<![A-Za-z])([A-Z][a-zA-Z]{0,60})\s{1,5}v\.\s{1,5}([A-Z][a-zA-Z]{0,60})"
+)
+
 
 class ClaimDetector:
     """
@@ -188,8 +195,7 @@ class ClaimDetector:
         terms = []
 
         # Look for case names
-        case_pattern = r'([A-Z][a-zA-Z]+)\s+v\.\s+([A-Z][a-zA-Z]+)'
-        for match in re.finditer(case_pattern, sentence):
+        for match in _CASE_NAME_IN_SENTENCE.finditer(sentence):
             terms.append(f"{match.group(1)} v. {match.group(2)}")
 
         # Legal concepts

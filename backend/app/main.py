@@ -36,7 +36,12 @@ from .models.citation import (
 from .services.bluebook_rules import BluebookFormatter
 from .services.context_analyzer import DocumentContextAnalyzer
 from .services.extractor import CitationExtractor, TooManyCitationsError
-from .services.lookup_service import CitationCompleter, LegalLookupService, tally_lookups
+from .services.lookup_service import (
+    CitationCompleter,
+    LegalLookupService,
+    parse_volume_reporter_page,
+    tally_lookups,
+)
 from .services.parser import DocumentTooLongError, UnsupportedDocumentError
 from .services.repair import CitationRepairer
 from .services.sandbox import ParseBusyError, ParseUnavailableError, parse_isolated
@@ -77,6 +82,12 @@ MAX_LOOKUPS_PER_DOCUMENT = int(os.getenv("MAX_LOOKUPS_PER_DOCUMENT", "200"))
 # pulled into memory in full. Content-Type is client-supplied and cannot be
 # trusted on its own; the parser validates the actual bytes. The limit itself
 # lives in limits.py with every other one.
+
+# The small endpoints take one citation, a case name or a search phrase. Nothing they accept needs
+# more than this, and a limit in characters is the only bound that holds for every regular
+# expression that will ever read these strings: a 3 KB string of spaces once held the event loop
+# for 45 seconds here, inside a 1 MB body limit.
+MAX_FIELD_CHARS = int(os.getenv("MAX_FIELD_CHARS", "2000"))
 
 # The repair endpoint takes one citation, not a document. The cap keeps it
 # cheap and steers whole-document work to the upload path.
@@ -600,9 +611,41 @@ async def analyze_citations(
             return Response(status_code=499)  # nobody is listening; this is only for the log
 
 
+def _too_long(name: str) -> HTTPException:
+    return HTTPException(
+        status_code=413,
+        detail=(
+            f"'{name}' is longer than the {MAX_FIELD_CHARS:,} characters one citation can need. "
+            "For a whole document, use the upload tab."
+        ),
+    )
+
+
+def _require_short(name: str, value) -> None:
+    if isinstance(value, str) and len(value) > MAX_FIELD_CHARS:
+        raise _too_long(name)
+
+
+def _require_short_fields(data: dict) -> None:
+    """Refuse a citation object any of whose text fields is longer than a citation can be.
+
+    The formatter and the lookups read these fields with regular expressions on the event loop."""
+    if not isinstance(data, dict):
+        return
+    for name, value in data.items():
+        if isinstance(value, str):
+            _require_short(str(name)[:40], value)
+        elif isinstance(value, list | tuple):
+            if len(value) > 50:
+                raise _too_long(str(name)[:40])
+            for item in value:
+                _require_short(str(name)[:40], item)
+
+
 @app.post("/api/format")
 async def format_citation(citation_data: dict):
     """Format a single citation according to Bluebook rules."""
+    _require_short_fields(citation_data)
     try:
         citation = Citation(**citation_data)
         formatted = formatter.format_citation(citation)
@@ -619,6 +662,7 @@ async def format_citation(citation_data: dict):
 @app.post("/api/lookup")
 async def lookup_citation(citation_data: dict):
     """Look up a citation in legal databases."""
+    _require_short_fields(citation_data)
     try:
         citation = Citation(**citation_data)
         results = await get_lookup_service().lookup_citation(citation)
@@ -633,6 +677,8 @@ async def lookup_case(
     citation: str = Body(default=None),
 ):
     """Look up a case by parties or citation string."""
+    _require_short("parties", parties)
+    _require_short("citation", citation)
     search_citation = Citation(
         type=CitationType.CASE,
         status=CitationStatus.INCOMPLETE,
@@ -649,12 +695,9 @@ async def lookup_case(
         search_citation.parties = [p.strip() for p in parts]
 
     if citation:
-        import re
-        match = re.match(r"(\d+)\s+([A-Za-z.\s]+)\s+(\d+)", citation)
-        if match:
-            search_citation.volume = match.group(1)
-            search_citation.reporter = match.group(2).strip()
-            search_citation.page = match.group(3)
+        parsed = parse_volume_reporter_page(citation)
+        if parsed:
+            search_citation.volume, search_citation.reporter, search_citation.page = parsed
 
     results = await get_lookup_service().lookup_citation(search_citation)
     return results
@@ -674,6 +717,7 @@ async def complete_from_text(text: str = Body(..., embed=True)):
 
     Returns a completed citation with all available information.
     """
+    _require_short("text", text)
     completer = CitationCompleter(get_lookup_service())
     citation, results = await completer.complete_from_text(text)
 
@@ -824,6 +868,7 @@ async def search_citations(
     - "article": Search for law review articles
     - "statute": Parse and lookup statutes
     """
+    _require_short("query", query)
     results = await get_lookup_service().search_by_text(query, search_type)
     return results
 
