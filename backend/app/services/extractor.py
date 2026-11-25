@@ -14,6 +14,7 @@ from ..models.citation import Citation, CitationStatus, CitationType
 from ..utils import bluebook_patterns as bp
 from ..utils.bluebook_patterns import LEGAL_NAME_PREFIXES, PATTERNS
 from ..utils.text_normalize import normalize_text
+from .bluebook_rules import missing_fields
 from .citation_engine import ENGINE
 
 __all__ = ["CitationExtractor", "LEGAL_NAME_PREFIXES", "SpanIndex", "TooManyCitationsError"]
@@ -446,7 +447,41 @@ class CitationExtractor:
         # Assign footnote numbers based on context
         self._assign_footnotes(citations, text)
 
+        for citation in citations:
+            self._finish(citation)
         return citations
+
+    # Fields that hold text taken from the document.
+    _TEXT_FIELDS = (
+        "raw_text", "reporter", "court", "pincite", "author", "title", "journal", "publisher", "code",
+        "section", "subsection", "docket_number", "decision_date", "subsequent_history",
+    )
+
+    def _finish(self, citation: Citation) -> None:
+        """Make one citation fit to show.
+
+        Every piece of text is put on one line: a PDF's layout leaves a line break wherever a
+        line was full, and it was being carried into the card, the fields and the suggestion
+        ("Civ. Code §\n3273.50"). `raw_text` is what the document says between
+        `position_start` and `position_end`, with each run of white space as one space; the
+        positions themselves are exact and are what the page highlights.
+
+        Then what is missing is worked out, and the status follows from it: a citation with a
+        gap is never "complete".
+        """
+        for name in self._TEXT_FIELDS:
+            value = getattr(citation, name)
+            if value and ("\n" in value or "  " in value or value != value.strip()):
+                setattr(citation, name, collapse(value))
+        if citation.kind or citation.is_short_form:
+            return
+        # (`template`, the finished shape with the gaps marked, is made when the citation is
+        # formatted: it needs the abbreviated case name, which is the costly part of formatting.)
+        citation.missing = missing_fields(citation)
+        if not citation.missing:
+            citation.status = CitationStatus.COMPLETE
+        elif citation.status == CitationStatus.COMPLETE:
+            citation.status = CitationStatus.INCOMPLETE
 
     def _overlaps(self, start: int, end: int, spans: list[tuple[int, int]]) -> bool:
         """Check if span overlaps with any existing span."""
@@ -741,7 +776,8 @@ class CitationExtractor:
             citations.append(Citation(
                 type=CitationType.WEBSITE,
                 status=CitationStatus.INCOMPLETE,
-                raw_text=text[start:end],
+                # as one address, even where the page broke it over two lines
+                raw_text=url + (" " + collapse(visited.group(0)) if visited else ""),
                 position_start=start,
                 position_end=end,
                 url=url,

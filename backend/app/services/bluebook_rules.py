@@ -1,9 +1,17 @@
 """
 Bluebook 21st Edition formatting rules engine.
+
+Two promises hold for everything this module prints. Nothing is invented: a formatted citation
+is made only of what the document says or what a looked-up record says, and a part that is
+missing is left out and named in `missing`, never filled with an empty pair of brackets or a
+date nobody stated. And a citation that is not complete does not end with the full stop of a
+finished one.
 """
 
 import html
 import re
+from functools import lru_cache
+from urllib.parse import urlparse
 
 from ..models.citation import Citation, CitationContext, CitationType
 from ..utils.bluebook_patterns import (
@@ -12,8 +20,12 @@ from ..utils.bluebook_patterns import (
     get_journal_abbreviation,
     get_reporter_abbreviation,
 )
+from ..utils.field_guidance import guidance_for
 from .citation_engine import ENGINE
-from .transforms import ordinal, titlecase
+from .transforms import bbdate, ordinal, titlecase
+
+_TAGS = re.compile(r"<[^<>]{0,2000}>")
+_SPACES = re.compile(r"\s+")
 
 
 def clean_html(text: str) -> str:
@@ -23,21 +35,112 @@ def clean_html(text: str) -> str:
     # Decode HTML entities like &lt; &gt; &amp;
     text = html.unescape(text)
     # Remove HTML tags like <i>, </i>, <b>, etc.
-    text = re.sub(r'<[^>]+>', '', text)
+    text = _TAGS.sub("", text)
     return text.strip()
+
+
+def _one_line(text: str) -> str:
+    """A suggestion is one line: a line break carried in from a PDF's layout is a space."""
+    return _SPACES.sub(" ", text).strip()
+
+
+def _finished(text: str) -> str:
+    """`text` with the full stop that ends a citation, unless it already ends with one
+    ("et seq.", "Inc."): two in a row is never right."""
+    return text if text.endswith(".") else text + "."
+
+
+# Reporters that carry U.S. Supreme Court decisions, normalised. Rule 10.4: no court is named
+# in the parenthetical of a citation to one of them.
+_SCOTUS_REPORTERS = {"US", "SCT", "LED", "LED2D"}
+
+
+def _is_scotus_reporter(reporter: str | None) -> bool:
+    return bool(reporter) and "".join(c for c in reporter if c.isalnum()).upper() in _SCOTUS_REPORTERS
+
+
+# The words of subsequent history set in italics (Rule 10.7, Table T8).
+_HISTORY_PHRASE = re.compile(
+    r"(?:cert\.|aff'd|rev'd|vacated|overruled|abrogated|superseded|reh'g|appeal|petition|review|modified|"
+    r"enforced|remanded)[a-z'. ]{0,40}"
+)
+# More than one docket number: "14-1290, 14-1292", "08-4241/-4243", "22-2908(L)/22-2972".
+_SEVERAL_DOCKETS = re.compile(r"[,/&]|\band\b")
+# More than one section: a list or a range written with a word or an en dash. A hyphen alone
+# cannot be told from the hyphen inside one section number ("6-27-101"), so it does not count.
+_SEVERAL_SECTIONS = re.compile(r",|–|\bto\b|\bthrough\b|\band\b")
+_SECTION_SIGNS = re.compile(r"§{2}")
+
+
+def missing_fields(citation: Citation) -> list[str]:
+    """The parts a citation of this kind needs and this one does not have.
+
+    For the kinds the data-driven engine recognised, the engine's own list stands. For the
+    others (cases, statutes, articles, books, web pages) the answer depends on which form the
+    citation takes: a case cited by docket number needs its court and the date of decision, not
+    a volume and a page.
+    """
+    if citation.kind:
+        return list(citation.missing or [])
+    if citation.is_short_form:
+        return []
+
+    def lacks(*names: str) -> list[str]:
+        return [n for n in names if getattr(citation, n, None) in (None, "", [])]
+
+    if citation.type == CitationType.CASE:
+        if not citation.parties:
+            return ["parties"]
+        if citation.volume and citation.reporter and citation.page:
+            if citation.year:
+                return []
+            needs_court = not citation.court and not _is_scotus_reporter(citation.reporter)
+            return (["court"] if needs_court else []) + ["year"]
+        if citation.docket_number:
+            return lacks("court") + ([] if citation.decision_date else ["date"])
+        return lacks("volume", "reporter", "page", "year")
+    if citation.type == CitationType.STATUTE:
+        if citation.form == "session_law":
+            return lacks("year", "code", "page")
+        if (citation.code or "U.S.C.").replace(" ", "").upper().startswith("U.S.C"):
+            return lacks("title_number", "section")
+        # Rule 12.3.2: a state code is cited with the year of the code.
+        return lacks("code", "section", "year")
+    if citation.type == CitationType.LAW_REVIEW:
+        return lacks("author", "title", "volume", "journal", "page", "year")
+    if citation.type == CitationType.BOOK:
+        return lacks("author", "title", "year")
+    if citation.type == CitationType.WEBSITE:
+        return lacks("title", "url")
+    return []
+
+
+_GAP_LABELS = {"date": "date of decision"}
+
+
+def _gap(field: str) -> str:
+    return f"[{_GAP_LABELS.get(field) or guidance_for(field)['label']}]"
+
 
 class BluebookFormatter:
     """Formats citations according to Bluebook 21st Edition rules."""
 
     def format_citation(self, citation: Citation, is_law_review: bool = True) -> str:
-        """Format a citation based on its type."""
+        """Format a citation based on its type.
+
+        Also brings `missing` and `template` up to date for the kinds this module formats: a
+        lookup may have filled a gap since the citation was found, and the list of what is
+        still missing has to say so.
+        """
         # Anything the data-driven engine recognised is rendered from its own template,
         # in the requested style. If a required part is missing there is nothing to
         # render, and the original text is returned rather than a citation with a hole.
         if citation.kind:
             style = "law_review" if is_law_review else "practitioner"
             rendered = ENGINE.render(citation.kind, citation.spec_fields or {}, style)
-            return rendered if rendered is not None else citation.raw_text
+            return rendered if rendered is not None else _one_line(citation.raw_text)
+
+        self.refresh_missing(citation)
 
         formatters = {
             CitationType.CASE: self.format_case,
@@ -49,8 +152,83 @@ class BluebookFormatter:
 
         formatter = formatters.get(citation.type)
         if formatter:
-            return formatter(citation, is_law_review)
-        return citation.raw_text
+            return _one_line(formatter(citation, is_law_review))
+        return _one_line(citation.raw_text)
+
+    # -- what is missing ------------------------------------------------------------------
+
+    def refresh_missing(self, citation: Citation) -> None:
+        """Set `missing` (and `template`, the finished shape with the gaps marked)."""
+        if citation.kind:
+            return
+        citation.missing = missing_fields(citation)
+        citation.template = self.gap_template(citation) if citation.missing else None
+
+    def gap_template(self, citation: Citation) -> str | None:
+        """The citation as it will read when finished, each missing part named in brackets."""
+        gaps = set(citation.missing or [])
+
+        def part(field: str, value) -> str:
+            return _gap(field) if field in gaps or value in (None, "") else str(value)
+
+        if citation.type == CitationType.CASE:
+            name = f"*{self._case_name(citation)}*" if citation.parties else _gap("parties")
+            if citation.docket_number and not (citation.volume and citation.reporter and citation.page):
+                paren = " ".join(p for p in (part("court", citation.court), part("date", citation.decision_date)) if p)
+                return f"{name}, {self._docket(citation.docket_number)} ({paren})."
+            # Rule 10.4: the U.S. Supreme Court takes no court identifier, so the slot is
+            # dropped rather than shown as a gap the reader must fill.
+            if _is_scotus_reporter(citation.reporter):
+                court = ""
+            elif citation.court:
+                court = f"{citation.court} "
+            else:
+                court = f"{_gap('court')} " if "court" in gaps or not citation.reporter else ""
+            return (
+                f"{name}, {part('volume', citation.volume)} {part('reporter', citation.reporter)} "
+                f"{part('page', citation.page)} ({court}{part('year', citation.year)})."
+            )
+        if citation.type == CitationType.STATUTE:
+            copy = citation.model_copy(update={"year": citation.year or _gap("year")}) if "year" in gaps else citation
+            if "title_number" in gaps:
+                copy = copy.model_copy(update={"title_number": _gap("title_number")})
+            if "section" in gaps:
+                copy = copy.model_copy(update={"section": _gap("section")})
+            return _finished(self._statute_text(copy))
+        if citation.type == CitationType.WEBSITE:
+            head = ", ".join(p for p in (clean_html(citation.author or ""), f"*{part('title', citation.title)}*") if p)
+            return f"{head}, {part('url', citation.url)}."
+        if citation.type == CitationType.LAW_REVIEW:
+            return (
+                f"{part('author', citation.author)}, *{part('title', citation.title)}*, {part('volume', citation.volume)} "
+                f"{part('journal', citation.journal)} {part('page', citation.page)} ({part('year', citation.year)})."
+            )
+        if citation.type == CitationType.BOOK:
+            return f"{part('author', citation.author)}, {part('title', citation.title)} ({part('year', citation.year)})."
+        return None
+
+    # -- cases ----------------------------------------------------------------------------
+
+    @staticmethod
+    @lru_cache(maxsize=4096)
+    def _party(party: str) -> str:
+        """One party's name as Rule 10.2 sets it. (Remembered: abbreviating a name tries every
+        word of Table T6 against it, and each case's name is needed twice, for the suggestion
+        and for the template that marks what is missing.)"""
+        words = party.split()
+        if len(words) > 2 and words[-2] == "et" and words[-1] in ("al.", "al"):
+            party = " ".join(words[:-2]).rstrip(",")              # Rule 10.2.1(a)
+        # Rule 10.2.2: "United States" is written out when it is the whole of a party's name.
+        if party in ("U.S.", "U. S.", "US"):
+            return "United States"
+        return abbreviate_party_name(party)
+
+    def _case_name(self, citation: Citation) -> str:
+        return " v. ".join(self._party(p) for p in (citation.parties or [])[:2] if p)
+
+    @staticmethod
+    def _docket(number: str) -> str:
+        return f"{'Nos.' if _SEVERAL_DOCKETS.search(number) else 'No.'} {number}"
 
     def format_case(self, citation: Citation, is_law_review: bool = True) -> str:
         """
@@ -58,35 +236,62 @@ class BluebookFormatter:
 
         Law review format: Case Name, Vol. Reporter Page, Pincite (Court Year).
         Brief format: Case Name, Vol. Reporter Page, Pincite (Court Year)
+        A case with no reporter yet is cited by docket: Case Name, No. X (Court Date) (Rule
+        10.8.1). Whatever the document does not give is left out, never bracketed empty.
         """
-        if not citation.parties or len(citation.parties) < 2:
+        if not citation.parties or not any(citation.parties):
             return citation.raw_text
 
         # Format case name (Rule 10.2)
-        plaintiff = abbreviate_party_name(citation.parties[0])
-        defendant = abbreviate_party_name(citation.parties[1])
-        case_name = f"{plaintiff} v. {defendant}"
+        case_name = self._case_name(citation)
+        shown = f"*{case_name}*" if is_law_review else case_name
 
-        # Build reporter citation (Rule 10.3)
-        if citation.volume and citation.reporter and citation.page:
-            reporter = get_reporter_abbreviation(citation.reporter)
-            reporter_cite = f"{citation.volume} {reporter} {citation.page}"
+        if citation.is_short_form:
+            # Rule 10.9: Name, Volume Reporter at Page.
+            out = shown
+            if citation.volume and citation.reporter:
+                out += f", {citation.volume} {get_reporter_abbreviation(citation.reporter)}"
+                if citation.pincite:
+                    out += f" at {citation.pincite}"
+            return _finished(out) if is_law_review else out
 
-            # Add pincite if present (Rule 10.3.2)
+        pieces = [shown]
+        has_reporter = bool(citation.volume and citation.reporter and citation.page)
+        if citation.docket_number and not has_reporter:
+            pieces.append(self._docket(citation.docket_number))
+        if has_reporter:
+            # Build reporter citation (Rule 10.3), with the pincite if present (Rule 10.3.2)
+            cite = f"{citation.volume} {get_reporter_abbreviation(citation.reporter)} {citation.page}"
             if citation.pincite:
-                reporter_cite += f", {citation.pincite}"
-        else:
-            reporter_cite = ""
+                cite += f", {citation.pincite}"
+            pieces.append(cite)
+        pieces.extend(citation.parallel_citations or [])
+        out = ", ".join(pieces)
 
-        # Build parenthetical (Rule 10.4)
-        court_year = self._format_court_year(citation.court, citation.year)
+        # Build parenthetical (Rule 10.4). No year and no court: no parenthetical at all.
+        paren = self._case_parenthetical(citation, has_reporter)
+        if paren:
+            out += f" ({paren})"
+        if citation.subsequent_history:
+            history = citation.subsequent_history
+            phrase = _HISTORY_PHRASE.match(history) if is_law_review else None
+            if phrase:
+                history = f"*{phrase.group(0).rstrip()}*{history[len(phrase.group(0).rstrip()):]}"
+            out += f", {history}"
 
-        if is_law_review and reporter_cite:
-            return f"*{case_name}*, {reporter_cite} ({court_year})."
-        elif reporter_cite:
-            return f"{case_name}, {reporter_cite} ({court_year})"
-        else:
-            return f"*{case_name}*" if is_law_review else case_name
+        dated = bool(citation.year) and (has_reporter or bool(citation.docket_number))
+        return _finished(out) if is_law_review and dated else out
+
+    def _case_parenthetical(self, citation: Citation, has_reporter: bool) -> str:
+        when = citation.decision_date or (str(citation.year) if citation.year else "")
+        if has_reporter:
+            court = self._format_court_year(citation.court, citation.year)
+            if not court:
+                return ""
+            return court if not citation.decision_date else court.replace(str(citation.year), citation.decision_date)
+        if not citation.court:
+            return when
+        return f"{get_court_abbreviation(citation.court)} {when}".strip()
 
     def _format_court_year(self, court: str | None, year: int | None) -> str:
         """Format court and year parenthetical per Rule 10.4."""
@@ -105,20 +310,47 @@ class BluebookFormatter:
 
         return f"{court_abbrev} {year}"
 
-    def format_statute(self, citation: Citation, is_law_review: bool = True) -> str:
-        """Format statute citation per Bluebook Rule 12."""
-        if not citation.title_number or not citation.section:
-            return citation.raw_text
+    # -- statutes -------------------------------------------------------------------------
 
+    def _statute_text(self, citation: Citation) -> str:
+        """A statute in the order its form requires, without the closing full stop."""
         code = citation.code or "U.S.C."
-        base = f"{citation.title_number} {code} § {citation.section}"
+        section = str(citation.section or "")
+        sign = "§§" if _SEVERAL_SECTIONS.search(section) or (
+            "-" in section and _SECTION_SIGNS.search(citation.raw_text or "")
+        ) else "§"
+        year = citation.year
+        paren = " ".join(str(p) for p in (citation.publisher, year) if p)
+        form = citation.form
 
+        if form == "session_law":
+            base = " ".join(str(p) for p in (year, code, citation.page) if p)
+            for parallel in citation.parallel_citations or []:
+                base += f" (codified at {parallel})"
+            return base
+        if form in ("state_title", "state_chapter"):
+            unit = "tit." if form == "state_title" else "ch."
+            base = f"{code} {unit} {citation.title_number}, {sign} {section}"
+        elif form == "no_sign":
+            base = " ".join(str(p) for p in (citation.title_number, code, section) if p)
+        elif citation.title_number:
+            base = f"{citation.title_number} {code} {sign} {section}"
+        else:
+            base = f"{code} {sign} {section}"
         if citation.subsection:
             base += f"({citation.subsection})"
+        return f"{base} ({paren})" if paren else base
 
-        if citation.year:
-            return f"{base} ({citation.year})."
-        return f"{base}."
+    def format_statute(self, citation: Citation, is_law_review: bool = True) -> str:
+        """Format statute citation per Bluebook Rule 12."""
+        if citation.form != "session_law" and not citation.section:
+            return citation.raw_text
+        if not citation.form and not citation.title_number and not citation.code:
+            return citation.raw_text
+        text = self._statute_text(citation)
+        return text if missing_fields(citation) else _finished(text)
+
+    # -- periodicals and books ------------------------------------------------------------
 
     def format_law_review(self, citation: Citation, is_law_review: bool = True) -> str:
         """Format a periodical article: author, title, volume, journal, page, year.
@@ -150,7 +382,7 @@ class BluebookFormatter:
         out = ", ".join(pieces)
         if citation.year:
             out += f" ({citation.year})"
-        return out + "."
+        return _finished(out)
 
     @staticmethod
     def _split_pinpoint(title: str) -> tuple[str, str]:
@@ -159,11 +391,22 @@ class BluebookFormatter:
         The book pattern captures everything up to the parenthesis as the title, which
         swept the pinpoint in with it. The title is italic or capitalised on its own, and
         the pinpoint is always ordinary type, so the two have to be told apart.
+
+        Done on the last two words of the title, not by searching the whole of it: the search
+        retried from every run of spaces, which is quadratic (a 20 KB title held a request for
+        nine seconds).
         """
-        m = re.search(r"\s+((?:§+|¶+|at\s+)\s*[\w.\-]+|\d{1,4})\s*$", title)
-        if not m:
+        words = title.split()
+        if len(words) < 2:
             return title.strip(), ""
-        return title[: m.start()].strip(), m.group(1).strip()
+        last = words[-1]
+        if len(words) >= 3 and words[-2] in ("§", "§§", "¶", "¶¶", "at") and _PIN_WORD.fullmatch(last):
+            return " ".join(words[:-2]), f"{words[-2]} {last}"
+        if _PIN_WITH_SIGN.fullmatch(last):
+            return " ".join(words[:-1]), last
+        if last.isdigit() and len(last) <= 4:
+            return " ".join(words[:-1]), last
+        return title.strip(), ""
 
     def format_book(self, citation: Citation, is_law_review: bool = True) -> str:
         """Format a book: author, title, pinpoint, edition and year.
@@ -193,10 +436,19 @@ class BluebookFormatter:
         if paren:
             head += f" ({' '.join(paren)})"
 
-        return head + "."
+        return _finished(head)
+
+    # -- web pages ------------------------------------------------------------------------
 
     def format_website(self, citation: Citation, is_law_review: bool = True) -> str:
-        """Format website citation per Bluebook Rule 18."""
+        """Format website citation per Bluebook Rule 18.2.2:
+        Author, Title, Site Name (Mon. D, YYYY), URL.
+
+        The date in the parenthetical is the page's own date of publication, from the page
+        when it was looked up. "(last visited ...)" is printed only when the document itself
+        says when its author looked at the page: a publication date printed under that label
+        would state something nobody said.
+        """
         parts = []
 
         if citation.author:
@@ -206,15 +458,31 @@ class BluebookFormatter:
             title = clean_html(citation.title)
             parts.append(f"*{title}*")
 
+        published = bbdate(citation.publication_date) if citation.publication_date else ""
+        site = clean_html(citation.site_name or "")
+        if site and citation.url and site.lower() == urlparse(citation.url).netloc.lower():
+            site = ""                 # the host name again is not the name of a site
+        if site:
+            site = site.upper() if is_law_review else site
+            parts.append(f"{site} ({published})" if published else site)
+        elif published and parts:
+            parts[-1] += f" ({published})"
+
         if citation.url:
-            parts.append(citation.url)
+            address = citation.url
+            if citation.access_date:
+                address += f" (last visited {citation.access_date})"
+            parts.append(address)
 
-        if citation.access_date:
-            parts.append(f"(last visited {citation.access_date})")
+        if not parts:
+            return citation.raw_text
+        out = ", ".join(parts)
+        # A bare address is not a finished citation and does not end like one.
+        return out if missing_fields(citation) else _finished(out)
 
-        if parts:
-            return ", ".join(parts) + "."
-        return citation.raw_text
+
+_PIN_WORD = re.compile(r"[\w.\-]{1,40}")
+_PIN_WITH_SIGN = re.compile(r"[§¶]{1,2}[\w.\-]{1,40}")
 
 
 class ShortFormManager:

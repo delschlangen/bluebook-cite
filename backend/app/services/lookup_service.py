@@ -1031,8 +1031,13 @@ class CitationCompleter:
                 citation.title = data["title"]
             if not citation.url and data.get("url"):
                 citation.url = data["url"]
-            if not citation.access_date and data.get("publication_date"):
-                citation.access_date = data["publication_date"]
+            # The page's own date is the day it was PUBLISHED. It used to be stored as the day
+            # the author visited the page and was printed as "(last visited 2004-09-10)", which
+            # nobody had said. `access_date` is now set only from the document's own words.
+            if not citation.publication_date and data.get("publication_date"):
+                citation.publication_date = data["publication_date"]
+            if not citation.site_name and data.get("site_name"):
+                citation.site_name = data["site_name"]
 
         return citation
 
