@@ -219,10 +219,11 @@ class TestRunningLines:
     def test_what_comes_to_the_edge_next_stays_unless_it_is_on_nine_pages_in_ten(self):
         """Under a three-line head, six pages of ten open with the same sentence. It is body text."""
         head = self.LETTERHEAD[:3]
+        opening = "The same opening sentence, which six of the ten pages share."
         pages = numbered(10, top=head)
-        pages = [p.replace("Body line alpha", "The same opening sentence. Body line alpha") if i < 6 else p for i, p in enumerate(pages)]
+        pages = ["\n".join(head + [opening]) + p[len("\n".join(head)):] if i < 6 else p for i, p in enumerate(pages)]
         out = strip_running_lines(pages)
-        assert sum(page.startswith("The same opening sentence.") for page in out) == 6
+        assert sum(page.startswith(opening) for page in out) == 6
         assert not any(line in page for page in out for line in head)
 
     def test_a_document_of_one_paragraph_repeated_loses_no_more_than_it_did(self):
