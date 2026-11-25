@@ -164,3 +164,35 @@ class TestTheBodyLimitForSmallEndpoints:
 
         assert response.status_code == 413
         assert response.headers["access-control-allow-origin"] == ORIGIN
+
+
+class TestHeadIsAnswered:
+    """Uptime monitors and load balancers probe with HEAD; a 405 there reads as "down"."""
+
+    @pytest.mark.parametrize("path", ["/health", "/"])
+    def test_head_is_200_like_get(self, client, path):
+        assert client.head(path).status_code == 200
+        assert client.get(path).status_code == 200
+
+
+class TestAnEmptyFileIsDescribedAsWhatItIs:
+    """"If this is a scanned PDF it needs OCR first" was shown for Word and text files too."""
+
+    def _upload(self, client, monkeypatch, fmt):
+        from app.services.parser import ParsedDocument
+
+        async def parsed(content, filename, **kw):
+            return ParsedDocument(text="   ", format=fmt, footnote_count=0, endnote_count=0, warnings=[])
+
+        monkeypatch.setattr(main, "parse_isolated", parsed)
+        return client.post("/api/upload", files={"file": ("a.bin", b"x", "application/octet-stream")})
+
+    def test_a_pdf_is_told_about_scans(self, client, monkeypatch):
+        response = self._upload(client, monkeypatch, "pdf")
+        assert response.status_code == 400 and "OCR" in response.json()["detail"]
+
+    @pytest.mark.parametrize("fmt", ["docx", "txt"])
+    def test_other_files_are_not_told_to_run_ocr(self, client, monkeypatch, fmt):
+        response = self._upload(client, monkeypatch, fmt)
+        assert response.status_code == 400
+        assert "OCR" not in response.json()["detail"] and "PDF" not in response.json()["detail"]

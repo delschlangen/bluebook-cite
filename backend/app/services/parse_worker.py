@@ -89,6 +89,24 @@ def _read_exactly(stream, size: int) -> bytes:
     return data if data is not None else b""
 
 
+def _volunteer_when_memory_runs_out() -> None:
+    """Make this child the kernel's first choice when the container runs out of memory.
+
+    The address-space limit above is a ceiling on virtual memory for ONE child. A container's
+    own limit is on resident memory for the server and its children together, and is usually
+    lower (512 MB against 1 GB): when it is reached the kernel picks a process to end, and
+    nothing in Python is consulted. Measured in a real 512 MB container: a burst of 862-byte
+    hostile PDFs during three ordinary analyses got the SERVER ended in 4 runs of 4, taking every
+    request in flight with it; with this line, 117 to 120 such uploads per run were absorbed with
+    no restart, because the child is ended instead and its upload gets the "too complex" answer.
+    A process may always raise its own score; Linux only, and harmless where it is not there."""
+    try:
+        with open("/proc/self/oom_score_adj", "w") as handle:
+            handle.write("1000")
+    except OSError:
+        pass
+
+
 def main() -> int:
     # Keep the result channel clean: a native library or a stray print that writes to stdout
     # must not be able to corrupt the one JSON object. The real stdout becomes `out`, and file
@@ -112,6 +130,7 @@ def main() -> int:
         return 2
 
     _limit_resources(int(header.get("mem_mb") or 0), int(header.get("cpu_s") or 0))
+    _volunteer_when_memory_runs_out()
     if hasattr(signal, "alarm") and header.get("alarm_s"):
         # SIGALRM's default action ends the process. It does not need the interpreter, so it
         # also works when a regular expression is holding it, and it ends a child whose parent

@@ -24,4 +24,8 @@ EXPOSE 8000
 # form hardcoded 8000, so if this Dockerfile were ever built without the
 # matching railway.json startCommand the container would listen on the wrong
 # port and every health check would fail.
-CMD uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000}
+# "exec" makes uvicorn replace the shell as process 1, so the SIGTERM a deploy sends reaches it
+# and requests in flight are finished. Without it the signal went to the shell, which ignores
+# it: measured in a container, the server was still running 40 s later and was then killed
+# outright (exit 137), cutting off whatever it was doing.
+CMD exec uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000}

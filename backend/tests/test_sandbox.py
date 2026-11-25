@@ -526,3 +526,44 @@ def test_the_parent_stays_flat_across_many_uploads(http):
         assert upload(http, *docs[i % 3]).status_code == 200
     growth = rss_mb() - before
     assert growth < 15, f"the server grew by {growth:.1f} MB over 50 uploads"
+
+
+# --- when the container runs out of memory -------------------------------------------------------
+
+
+@pytest.mark.skipif(not os.path.exists("/proc/self/oom_score_adj"), reason="needs Linux /proc")
+class TestTheChildIsTheFirstToGoWhenMemoryRunsOut:
+    """A container's memory limit is on the server and its children together. When it is reached
+    the kernel ends one process without asking anyone; measured in a 512 MB container it chose the
+    server, which took every request in flight with it. The child now volunteers."""
+
+    def test_the_real_worker_raises_its_own_score_before_it_reads_the_file(self):
+        header = json.dumps({"v": 1, "size": 5, "filename": "a.txt", "mem_mb": 512, "cpu_s": 20,
+                             "alarm_s": 20, "sys_path": [p for p in sys.path if p], "max_text_chars": 1000}).encode() + b"\n"
+        proc = subprocess.Popen(
+            [sys.executable, "-E", "-s", "-m", "app.services.parse_worker"],
+            cwd=BACKEND, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        )
+        try:
+            proc.stdin.write(header)          # the header only: the child now waits for the file
+            proc.stdin.flush()
+            score = None
+            for _ in range(100):
+                try:
+                    score = Path(f"/proc/{proc.pid}/oom_score_adj").read_text().strip()
+                except OSError:
+                    break
+                if score == "1000":
+                    break
+                time.sleep(0.05)
+            assert score == "1000", f"the child's oom_score_adj is {score!r}"
+            proc.stdin.write(b"hello")        # and it still does its job
+            proc.stdin.close()
+            out = proc.stdout.read()
+            assert json.loads(out)["ok"] is True
+        finally:
+            proc.kill()
+            proc.wait(timeout=10)
+
+    def test_the_server_itself_is_left_alone(self):
+        assert Path("/proc/self/oom_score_adj").read_text().strip() != "1000"

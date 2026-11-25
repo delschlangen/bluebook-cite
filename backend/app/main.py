@@ -244,13 +244,15 @@ app.add_middleware(
 )
 
 
-@app.get("/")
+# HEAD as well as GET on both: uptime monitors and load balancers probe with HEAD, and a 405 there
+# reads as "down".
+@app.api_route("/", methods=["GET", "HEAD"])
 async def root():
     """Root endpoint."""
     return {"message": "Bluebook Citation Generator API", "version": "1.0.0"}
 
 
-@app.get("/health")
+@app.api_route("/health", methods=["GET", "HEAD"])
 async def health_check():
     """Health check, and enough build detail to answer "which build is live?".
 
@@ -337,10 +339,21 @@ async def upload_document(request: Request, file: UploadFile = File(...)):
 
     document_text = parsed.text
     if not document_text or not document_text.strip():
-        raise HTTPException(
-            status_code=400,
-            detail="No text could be extracted. If this is a scanned PDF it needs OCR first.",
-        )
+        # Say what applies to THIS kind of file: telling someone to run OCR on a Word document
+        # or a text file sends them the wrong way.
+        if parsed.format == "pdf":
+            reason = (
+                "No text could be read from this PDF. If it is a scan (pictures of pages), run "
+                "OCR on it first, or upload the original Word document."
+            )
+        elif parsed.format == "docx":
+            reason = (
+                "No text could be read from this Word document. If its pages are pictures or it "
+                "is empty, there is nothing to check; otherwise save it again as .docx and retry."
+            )
+        else:
+            reason = "This file is empty: it has no text to check."
+        raise HTTPException(status_code=400, detail=reason)
 
     # The byte limit does not bound the work (a small file can expand to a lot of text), so the
     # text itself is limited, whatever the format. PDFs were already stopped by the reader.
