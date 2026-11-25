@@ -116,6 +116,24 @@ FLOODS = {
     "years": repeated("2023 "),
     "public-law-section": repeated("Pub. L. No. 116-136, § 2102, 134 Stat. 281, 313 (2020) "),
     "book-shaped": repeated("Alpha Beta, Gamma Delta (2020). "),
+    # What follows a case name: courts, docket numbers, pin cites, parallel citations, history.
+    "docket-style": repeated("A v. B, 9th Cir. (No. 12-55115). "),
+    "docket-numbers": "A v. B, No. 1" + repeated("-1", SIZE - 13),
+    "docket-list": "A v. B (Nos. " + repeated("1-1, ", SIZE - 13),
+    "docket-slashes": "A v. B (Nos. " + repeated("1/-1", SIZE - 13),
+    "courts": "A v. B, " + repeated("Vt. Super. Ct., ", SIZE - 8),
+    "court-words": repeated("Ohio Ct. App., 8th Dist. Vt. Super. Ct., Windham Unit "),
+    "pin-cites": "A v. B, 1 U.S. 1" + repeated(", 1 n.1", SIZE - 16),
+    "parallel-citations": "A v. B, 1 U.S. 1" + repeated(", 1 U.S. 1", SIZE - 16),
+    "reporter-words": "A v. B, 1 " + repeated("F. ", SIZE - 10),
+    "numbers-then-words": repeated("1 Ab. Cd. "),
+    "short-forms": repeated("Bruen, 597 U.S. at 29 n.7, "),
+    "electronic": repeated("A v. B, No. 1-1, 2020 WL 1, at *1 (S.D.N.Y. Mar. 3, 2020). "),
+    "history": repeated("A v. B, 1 U.S. 1 (1990), cert. denied, "),
+    "in-re": repeated("In re "),
+    "in-re-names": repeated("In re Alpha, 1 U.S. 1 (1990). "),
+    "id-pins": repeated("Id. at 1, 2 n.3; Id. § 1(a)(1); "),
+    "open-paren-after-name": "A v. B (" + repeated("a ", SIZE - 8),
 }
 
 
@@ -247,6 +265,9 @@ def main() -> None:
         "state-code", "state-code-names", "subject-words", "title-section", "tit-run", "section-ranges",
         "section-list", "section-hyphens", "subsections", "illinois", "local-code-style", "session-law", "years",
         "public-law-section", "book-shaped",
+        "docket-style", "docket-numbers", "docket-list", "docket-slashes", "courts", "court-words", "pin-cites",
+        "parallel-citations", "reporter-words", "numbers-then-words", "short-forms", "electronic", "history",
+        "in-re", "in-re-names", "id-pins", "open-paren-after-name", "id", "supra", "reporter", "court-year",
     ]
     for stage_name, stage in stages():
         for flood_name in stage_floods:

@@ -4,6 +4,7 @@ Based on Bluebook 21st Edition.
 """
 
 import re
+from functools import lru_cache
 from re import Pattern
 
 # Reporter abbreviations that must never be mistaken for a footnote marker.
@@ -27,11 +28,12 @@ _REPORTER_LOOKAHEAD = (
 # "153", "842-43", "152 n.4", "152 & n.4", "140 nn.3-4". (En dashes are hyphens by the time a
 # pattern sees them: see text_normalize.) The lookaheads stop the engine from giving back a digit
 # to make a later part fit, and keep ", 93 S. Ct. 705" from being read as a pin cite of 93.
-_PIN = (
+_PAGE = (
     r"\d{1,6}(?:-\d{1,6})?(?![\d-])"
     r"(?:\s{1,2}(?:&\s)?nn?\.\s?\d{1,4}(?:-\d{1,4})?(?!\d))?"
-    r"(?!\s{1,2}[A-Z])"
 )
+_PAGES = rf"{_PAGE}(?:,\s{{1,2}}{_PAGE}){{0,5}}"
+_PIN = _PAGE + r"(?!\s{1,2}[A-Z])"
 _PINS = rf"{_PIN}(?:,\s{{1,2}}{_PIN}){{0,5}}"
 
 # A section number and the subsections after it: "922(g)(1)", "2C:58-33", "59.1-148.5", "898-a",
@@ -49,23 +51,8 @@ _SECTION_MORE = (
 )
 _SECTIONS = rf"{_SECTION}(?:{_SECTION_MORE}){{0,8}}"
 
-# A reporter citation after a case name, read from where the name ends. The two patterns are only
-# ever applied there (with .match), never searched for through a document.
-_REPORTER_CITE = r"(\d{1,5})\s{1,3}([A-Z][a-zA-Z\.\s\d]{0,40}?[a-zA-Z\.\d])\s{1,3}(\d{1,6})"
-
 # Citation detection patterns
 PATTERNS: dict[str, Pattern] = {
-    # ", Volume Reporter Page[, Pin] (Court Year)" after a case name.
-    "case_tail_complete": re.compile(
-        rf",\s{{0,3}}{_REPORTER_CITE}(?:,\s{{0,3}}(\d{{1,6}}(?:-\d{{1,6}})?))?\s{{0,3}}\(([^)]{{1,200}})\)"
-    ),
-    # A reporter citation with no year parenthetical, e.g. "Brandenburg v Ohio 395 US 444". The
-    # volume, reporter and page are all present and must be recognised as such rather than
-    # reported missing.
-    "case_tail_no_year": re.compile(
-        rf",?\s{{1,3}}{_REPORTER_CITE}(?!\s{{0,3}}[\d,]{{0,12}}\s{{0,3}}\()"
-    ),
-
     # Law review articles: Author, Title, Volume Journal Page (Year)
     # (White space and numbers are bounded like everything else: "\s+" and "\d+" between two
     # parts that can fail let a search restart inside the run.)
@@ -89,9 +76,10 @@ PATTERNS: dict[str, Pattern] = {
         r"\((?:(\d{1,3}(?:st|nd|rd|th|d))\s{1,4}ed\.\s{1,4})?(\d{4})\)"
     ),
 
-    # Short forms - Id.
+    # Short forms - Id., with what it points at: a page ("Id. at 177", "Id. at 29 n.7") or a
+    # section ("Id. § 7903(5)(A)(iii)").
     "id_citation": re.compile(
-        r"\bId\.(?:\s+at\s+(\d+(?:-\d+)?))?"
+        rf"\bId\.(?:\s{{1,3}}at\s{{1,3}}({_PAGES})|\s{{1,3}}(§{{1,2}}\s{{0,3}}{_SECTIONS}))?"
     ),
 
     # Short forms - Supra
@@ -515,8 +503,12 @@ def get_journal_abbreviation(journal: str) -> str:
     """Get the Bluebook abbreviation for a journal."""
     return JOURNAL_ABBREVIATIONS.get(journal, journal)
 
+@lru_cache(maxsize=4096)
 def abbreviate_party_name(party: str) -> str:
     """Abbreviate a party name per Bluebook Table 6.
+
+    Remembered, because it tries every word of the table against the name and the same names
+    come round again and again in one document (each short form, each template).
 
     Protects state names from being incorrectly abbreviated (e.g.,
     "North Carolina" should not become "N. Carolina").
@@ -958,3 +950,102 @@ NOT_AN_AUTHOR = re.compile(
 LEGISLATIVE_AUTHOR = re.compile(
     r"\b(?:Senate|House|Congress|Cong\.|Committee|Comm\.|Subcommittee|Subcomm\.|Legislature|Assembly)(?!\w)"
 )
+
+
+# =============================================================================================
+# What follows a case name
+# =============================================================================================
+#
+# Each of these is applied with .match at the one position where a party name ended (or, for the
+# short form, searched for from a number). None describes a party name.
+
+# A reporter: one to four abbreviated words and, for a later series, its ordinal, attached or
+# not: "U.S.", "S. Ct.", "F.4th", "F. Supp. 3d", "F. App'x", "N.E.3d", "So. 2d", "Wash. 2d",
+# "Cal. App. 4th", "L. Ed. 2d". The words are separated by white space and the series begins
+# with a digit, so there is one way only to read any run of characters as a reporter.
+_REPORTER_WORD = r"[A-Z][A-Za-z.']{0,11}"
+_REPORTER = rf"{_REPORTER_WORD}(?:\s{_REPORTER_WORD}){{0,3}}(?:\s?(?:\d(?:d|th)|2nd|3rd))?"
+# "(1 Cranch)" in "5 U.S. (1 Cranch) 137": the early reporters named for their editors.
+_NOMINATIVE = rf"(?:{_GAP}\(\d{{1,3}}{_GAP}[A-Z][a-z]{{1,10}}\.?\))?"
+_REPORTER_CITATION = (
+    rf"(?P<volume>\d{{1,4}}){_GAP}(?P<reporter>{_REPORTER}{_NOMINATIVE}){_GAP}(?P<page>\d{{1,6}}|_{{2,6}})(?!\d)"
+)
+# "(2d Cir. 2025)", "(1973)", "(U.S. June 15, 2026)": whatever stands before the year is read in
+# code, where it can be checked to be a court and a date and not a remark.
+_COURT_YEAR = r"\s{0,2}\((?P<paren>[^()]{0,70}?)(?P<year>(?:1[5-9]|20)\d\d)\)"
+
+# A docket number, or several: "23-1214", "3:22-cv-06646-ZNQ", "S071885", "29 MAP 2020",
+# "14-1290, 14-1292", "08-4241/-4243/-4244", "22-2908(L)/22-2972". It has a digit in it, and a
+# later number of a list begins with a digit, which is how ", panel stage" is left out.
+_DOCKET_NUMBER = r"[0-9A-Za-z](?:[0-9A-Za-z:.\-]{0,28}[0-9A-Za-z])?(?:\([A-Z]\))?"
+_DOCKET = (
+    rf"(?=[0-9A-Za-z:.\-]{{0,12}}\d){_DOCKET_NUMBER}(?:\s[A-Z]{{2,4}}\s\d{{4}})?"
+    rf"(?:(?:,\s{{1,2}}|/|\s&\s)(?=-?\d)(?!\d{{4}}\s{{1,2}}(?:WL|U\.S\.))-?{_DOCKET_NUMBER}){{0,9}}"
+)
+_ELECTRONIC = rf"\d{{4}}{_GAP}(?:WL|U\.S\.{_GAP}(?:Dist\.|App\.){_GAP}LEXIS){_GAP}\d{{1,9}}"
+_STAR_PAGE = rf"(?:,{_GAP}at{_GAP}(?P<star>\*\d{{1,5}}(?:-\*?\d{{1,5}})?))?"
+
+# Courts, as Tables T1 and T7 abbreviate them: the federal circuits and districts, the Supreme
+# Court as writers name it in a docket citation, and a state followed by the words of one of its
+# courts, with the district, division or unit some states add after a comma.
+_ORDINAL = r"\d{1,2}(?:st|nd|rd|th|d)"
+_COURT_WORD = (
+    r"(?:Sup\.|Super\.|S\.\s?Ct\.|Ct\.|App\.|Dist\.|Cir\.|Crim\.|Civ\.|Ch\.|Com\.|Pl\.|Div\.|Fam\.|Prob\.|Mun\.|"
+    r"Cnty\.|Tax|Jud\.|Commw\.|Sur\.|Juv\.|Magis\.|Cl\.)"
+)
+_COURT_SUBDIVISION = (
+    rf"(?:,{_GAP}(?:{_ORDINAL}{_GAP}(?:Dist\.|Dep't|Dept\.|Div\.|Cir\.)"
+    rf"|[A-Z][a-z]{{2,15}}(?:{_GAP}[A-Z][a-z]{{2,8}}\.)?{_GAP}(?:Unit|Div\.|Dist\.|Cnty\.|County|Dep't)))?"
+)
+_NAMED_COURT = (
+    rf"(?:(?:{_ORDINAL}|D\.C\.|Fed\.){_GAP}Cir\."
+    rf"|(?:[NSEWCM]\.D\.|D\.)\s?(?:{_STATES})"
+    rf"|(?:{_STATES})(?:{_GAP}{_COURT_WORD}){{1,4}}{_COURT_SUBDIVISION}"
+    rf"|U\.S\.{_GAP}(?:Sup\.{_GAP}Ct\.|S\.\s?Ct\.)"
+    rf"|Bankr\.{_GAP}(?:[NSEWCM]\.D\.|D\.)\s?(?:{_STATES})|Fed\.{_GAP}Cl\.|Ct\.{_GAP}Int'l{_GAP}Trade|T\.C\.)"
+)
+
+CASE_PATTERNS: dict[str, Pattern] = {
+    # ", 410 U.S. 113, 153, 93 S. Ct. 705, 727 (1973), cert. denied, 555 U.S. 1 (2008)": the
+    # reporter citation, pin cites (with "n.4"), up to three parallel citations, the court and
+    # year, and what happened to the case afterwards.
+    "reporter": re.compile(
+        rf",?{_GAP}{_REPORTER_CITATION}(?:,{_GAP}(?P<pin>{_PINS}))?"
+        rf"(?P<parallel>(?:,{_GAP}\d{{1,4}}{_GAP}{_REPORTER}{_GAP}\d{{1,6}}(?!\d)(?:,{_GAP}{_PINS})?){{0,3}})"
+        rf"(?:{_COURT_YEAR})?"
+    ),
+    "history": re.compile(
+        rf",{_GAP}(?P<history>(?:cert\.{_GAP}(?:denied|granted|dismissed)|aff'd(?:{_GAP}(?:in{_GAP}part|mem\.))?"
+        rf"|rev'd(?:{_GAP}in{_GAP}part)?|vacated|reh'g{_GAP}(?:en{_GAP}banc{_GAP})?denied|appeal{_GAP}(?:dismissed|denied|docketed|filed)"
+        rf"|review{_GAP}(?:denied|granted)|modified|enforced)"
+        rf"(?:{_GAP}(?:on{_GAP}other{_GAP}grounds|as{_GAP}moot|sub{_GAP}nom\.{_GAP}[^,()]{{1,80}}))?,?{_GAP}"
+        rf"(?:\d{{1,4}}{_GAP}{_REPORTER}{_GAP}\d{{1,6}}(?!\d)|Nos?\.{_GAP}{_DOCKET}(?:,{_GAP}{_ELECTRONIC})?)"
+        rf"(?:\s{{0,2}}\([^()]{{1,60}}\))?)"
+    ),
+    # Rule 10.8.1, a case with no reporter yet: ", No. 19-1234, 2020 WL 1234567, at *3 (S.D.N.Y.
+    # Mar. 3, 2020)", with or without the electronic citation; and that citation alone.
+    "docket": re.compile(
+        rf",{_GAP}Nos?\.{_GAP}(?P<docket>{_DOCKET})(?:,{_GAP}(?P<electronic>{_ELECTRONIC}))?{_STAR_PAGE}(?:{_COURT_YEAR})?"
+    ),
+    "electronic": re.compile(rf",{_GAP}(?P<electronic>{_ELECTRONIC}){_STAR_PAGE}(?:{_COURT_YEAR})?"),
+    # The order people write in a list of filings: ", 9th Cir. (No. 12-55115)", "(No. 07-290)"
+    # with no court, "(appeal from Denver Dist. Ct. No. 2013CV33879)", "(No. 13-17132, panel
+    # stage)". The court may be a bare state or "U.S." here, because the docket vouches for it.
+    "court_docket": re.compile(
+        rf"(?:,{_GAP}(?P<court>{_NAMED_COURT}|U\.S\.|{_STATES}))?\s{{0,2}}\((?P<before>[^()\d]{{0,60}}?)Nos?\.{_GAP}"
+        rf"(?P<docket>{_DOCKET})(?:,[^()]{{0,40}})?\)"
+    ),
+    # ", Ohio Sup. Ct." with no docket: only a court that is unmistakably one.
+    "court": re.compile(rf",{_GAP}(?P<court>{_NAMED_COURT})(?![\w'])"),
+    # "Jacobson v. Massachusetts (1905)", "Smith v. Jones (9th Cir. 2020)".
+    "year": re.compile(_COURT_YEAR),
+
+    # The short form of Rule 10.9, which has no "v.": "Bruen, 597 U.S. at 29 n.7".
+    "short_form": re.compile(
+        rf"(?<![\w.])(?P<volume>\d{{1,4}}){_GAP}(?P<reporter>{_REPORTER}){_GAP}at{_GAP}(?P<pin>{_PINS})"
+    ),
+    # Case names that are not two parties: "In re Winship", "Ex parte Young".
+    "procedural": re.compile(
+        rf"(?<![\w.])(?P<prefix>In{_GAP}re|Ex{_GAP}parte|In{_GAP}the{_GAP}Matter{_GAP}of|Matter{_GAP}of)(?=\s)"
+    ),
+}

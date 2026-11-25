@@ -264,8 +264,13 @@ class BluebookFormatter:
 
         pieces = [shown]
         has_reporter = bool(citation.volume and citation.reporter and citation.page)
-        if citation.docket_number and not has_reporter:
+        # "2020 WL 1234567" stands where a reporter would, and keeps its docket number in front.
+        electronic = has_reporter and (citation.reporter == "WL" or "LEXIS" in citation.reporter)
+        if citation.docket_number and (not has_reporter or electronic):
             pieces.append(self._docket(citation.docket_number))
+        if citation.volume and citation.reporter and not citation.page:
+            # "410 U.S. ___": decided, not yet paginated. The blank is the document's own.
+            pieces.append(f"{citation.volume} {get_reporter_abbreviation(citation.reporter)} ___")
         if has_reporter:
             # Build reporter citation (Rule 10.3), with the pincite if present (Rule 10.3.2)
             cite = f"{citation.volume} {get_reporter_abbreviation(citation.reporter)} {citation.page}"

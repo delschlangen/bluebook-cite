@@ -43,7 +43,11 @@ class TestPartyNamesAreWhole:
 
         assert len(cases) == 1, [(c.parties, c.raw_text) for c in cases]
         assert cases[0].parties == [first, second]
-        assert cases[0].raw_text.endswith(second)
+        # The name is whole. (What follows it used to be left out of the citation, because a
+        # blank page number and an early reporter's name in brackets were not understood; they
+        # are now, so the citation runs on past the name. See tests/test_case_forms.py.)
+        assert cases[0].raw_text.startswith(f"{first} v. {second}")
+        assert not cases[0].raw_text.startswith(f"{first} v. {second}".rstrip() + "x")
 
     def test_a_name_followed_by_a_comma_and_a_reporter_is_not_cut_at_every_letter(self):
         """The old lookahead made the engine back off letter by letter. A name is no longer

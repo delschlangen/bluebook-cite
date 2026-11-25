@@ -94,6 +94,9 @@ class SpanIndex:
 # is linear in its length however many "v." it holds.
 
 _TOKEN = re.compile(r"\S+")
+_MONTHS = frozenset("Jan Feb Mar Apr May Jun Jul Aug Sep Oct Nov Dec".split())
+# Between two parallel citations: the comma before a volume number and a reporter.
+_PARALLEL_SPLIT = re.compile(r",\s{1,2}(?=\d{1,4}\s{1,2}[A-Z])")
 _SPACES = re.compile(r"\s+")
 _LEAD_CHARS = "([{\"'*_"
 _TRAIL_CHARS = ",;:.!?)]}\"'*_"
@@ -447,6 +450,7 @@ class CitationExtractor:
 
         # Extract each citation type in priority order
         citations.extend(self._extract_cases(text, matched_spans))
+        citations.extend(self._extract_other_cases(text, matched_spans))
         citations.extend(self._extract_statutes(text, matched_spans, original))
         citations.extend(self._extract_law_reviews(text, matched_spans))
         citations.extend(self._extract_books(text, matched_spans))
@@ -529,10 +533,9 @@ class CitationExtractor:
             spans.append((name_start, end))
             floor = end
 
-            complete = bool(fields.pop("complete", False))
             citations.append(Citation(
                 type=CitationType.CASE,
-                status=CitationStatus.COMPLETE if complete else CitationStatus.INCOMPLETE,
+                status=CitationStatus.INCOMPLETE,          # settled by what is missing, in _finish
                 raw_text=text[name_start:end],
                 position_start=name_start,
                 position_end=end,
@@ -542,42 +545,157 @@ class CitationExtractor:
 
         return citations
 
+    def _extract_other_cases(self, text: str, spans: SpanIndex) -> list[Citation]:
+        """The case citations that have no "v.": "In re Winship", and the short form of Rule
+        10.9, "Bruen, 597 U.S. at 29 n.7"."""
+        citations = []
+        patterns = bp.CASE_PATTERNS
+
+        if " re " in text or " parte " in text or "atter of " in text:
+            for match in patterns["procedural"].finditer(text):
+                if spans.overlaps(match.start(), match.end()):
+                    continue
+                right = read_party_right(text, match.end(), spans.start_after(match.end(), len(text)))
+                if right is None:
+                    continue
+                name_end = right[0]
+                fields = self._case_tail(text, name_end)
+                end = fields.pop("end")
+                # "In re" and "Ex parte" are case names wherever they stand; "Matter of ..." is
+                # one only with a citation after it.
+                if end == name_end and "atter" in match.group("prefix"):
+                    continue
+                if spans.overlaps(match.start(), end):
+                    continue
+                spans.append((match.start(), end))
+                fields.pop("complete", None)
+                citations.append(Citation(
+                    type=CitationType.CASE, status=CitationStatus.INCOMPLETE, raw_text=text[match.start():end],
+                    position_start=match.start(), position_end=end,
+                    parties=[collapse(text[match.start():name_end])], **fields,
+                ))
+
+        if " at " in text or " at\n" in text:
+            for match in patterns["short_form"].finditer(text):
+                if "." not in match.group("reporter") or spans.overlaps(match.start(), match.end()):
+                    continue
+                start, parties = match.start(), None
+                # the name the short form goes by, if one stands in front of it: "Bruen, 597 ..."
+                before = text[max(0, match.start() - 3):match.start()].rstrip()
+                comma = match.start() - 3 + len(before) - 1 if match.start() >= 3 else -1
+                if before.endswith(","):
+                    name_start = read_party_left(text, comma, spans.end_before(comma))
+                    if name_start is not None and not spans.overlaps(name_start, match.end()):
+                        start, parties = name_start, [collapse(text[name_start:comma])]
+                spans.append((start, match.end()))
+                citations.append(Citation(
+                    type=CitationType.CASE, status=CitationStatus.COMPLETE, raw_text=text[start:match.end()],
+                    position_start=start, position_end=match.end(), parties=parties,
+                    volume=match.group("volume"), reporter=collapse(match.group("reporter")),
+                    pincite=collapse(match.group("pin")), is_short_form=True, short_form_type="short_case",
+                ))
+
+        return citations
+
+    @staticmethod
+    def _court_and_date(paren: str, year: str) -> tuple[str | None, str | None] | None:
+        """The court and the full date from the words before the year in a parenthetical, or None
+        if they are not a court and a date at all ("(decided in 1990)" is a remark)."""
+        words = paren.split()
+        date = None
+        if len(words) >= 2 and words[-1][:-1].isdigit() and words[-1].endswith(",") and words[-2][:3] in _MONTHS:
+            date = f"{words[-2]} {words[-1]} {year}"
+            words = words[:-2]
+        if any(not (word[0].isupper() or word[0].isdigit()) for word in words):
+            return None
+        return (" ".join(words) or None), date
+
     def _case_tail(self, text: str, position: int) -> dict:
-        """What follows a case name at `position`: its reporter citation, if it has one.
+        """What follows a case name at `position`.
 
         Returns the fields found and `end`, where the citation stops (`position` itself when
-        the name is all there is).
+        the name is all there is). In order: a docket number in the Bluebook's own form (Rule
+        10.8.1), an electronic citation, a reporter citation, a court and docket number in the
+        order filings are listed, a court alone, a year alone.
         """
-        match = PATTERNS["case_tail_complete"].match(text, position)
+        patterns = bp.CASE_PATTERNS
+
+        def court_year(match, fields: dict) -> int:
+            """Add court, year and date from the parenthetical, if it is one; where it ends."""
+            if not match.group("year"):
+                return match.end()
+            read = self._court_and_date(match.group("paren"), match.group("year"))
+            if read is None:
+                end = match.start("paren") - 1       # a remark in brackets, not a court and year
+                while end > position and text[end - 1].isspace():
+                    end -= 1
+                return end
+            fields["court"], fields["decision_date"] = read
+            fields["year"] = int(match.group("year"))
+            return match.end()
+
+        def electronic(match, fields: dict) -> None:
+            words = match.group("electronic").split()   # "2020 WL 1234567", "2020 U.S. Dist. LEXIS 12345"
+            fields.update(volume=words[0], reporter=" ".join(words[1:-1]), page=words[-1])
+            if match.group("star"):
+                fields["pincite"] = f"at {match.group('star')}"
+
+        match = patterns["docket"].match(text, position)
         if match:
-            # Parse court and year from the parenthetical
-            court_year = match.group(5)
-            year = court = None
-            year_match = re.search(r"(\d{4})", court_year)
-            if year_match:
-                year = int(year_match.group(1))
-                court = collapse(court_year.replace(year_match.group(1), "")) or None
+            fields = {"docket_number": collapse(match.group("docket"))}
+            if match.group("electronic"):
+                electronic(match, fields)
+            fields["end"] = court_year(match, fields)
+            return fields
+
+        match = patterns["electronic"].match(text, position)
+        if match:
+            fields = {}
+            electronic(match, fields)
+            fields["end"] = court_year(match, fields)
+            return fields
+
+        match = patterns["reporter"].match(text, position)
+        if match:
+            page = match.group("page")
+            fields = {
+                "volume": match.group("volume"),
+                "reporter": collapse(match.group("reporter")),
+                "page": None if page.startswith("_") else page,       # "410 U.S. ___": not yet paginated
+                "pincite": collapse(match.group("pin")) if match.group("pin") else None,
+            }
+            if match.group("parallel"):
+                fields["parallel_citations"] = [
+                    collapse(p) for p in _PARALLEL_SPLIT.split(match.group("parallel")) if p.strip(" ,\n")
+                ]
+            end = court_year(match, fields)
+            if fields.get("year") and end == match.end():
+                history = patterns["history"].match(text, end)
+                if history:
+                    fields["subsequent_history"] = collapse(history.group("history"))
+                    end = history.end()
+            fields["end"] = end
+            return fields
+
+        match = patterns["court_docket"].match(text, position)
+        if match:
             return {
-                "volume": match.group(1),
-                "reporter": collapse(match.group(2)),
-                "page": match.group(3),
-                "pincite": match.group(4),
-                "court": court,
-                "year": year,
-                "complete": True,
+                "court": collapse(match.group("court")) if match.group("court") else None,
+                "docket_number": collapse(match.group("docket")),
                 "end": match.end(),
             }
 
-        # Then a reporter citation but no year parenthetical. These are mostly complete and must
-        # not be reported as though the volume, reporter and page were absent.
-        match = PATTERNS["case_tail_no_year"].match(text, position)
+        match = patterns["court"].match(text, position)
         if match:
-            return {
-                "volume": match.group(1),
-                "reporter": collapse(match.group(2)),
-                "page": match.group(3),
-                "end": match.end(),
-            }
+            return {"court": collapse(match.group("court")), "end": match.end()}
+
+        match = patterns["year"].match(text, position)
+        if match:
+            fields = {}
+            end = court_year(match, fields)
+            if fields:
+                fields["end"] = end
+                return fields
 
         return {"end": position}
 
@@ -810,7 +928,7 @@ class CitationExtractor:
                 # A bare "Id." has no groups at all, so lastindex is None, not 0. Comparing
                 # None to an int raised TypeError, which made every document containing a
                 # bare "Id." fail (the most common short form in legal writing).
-                pincite=match.group(1),
+                pincite=match.group(1) or match.group(2),
             ))
 
         # Supra citations
