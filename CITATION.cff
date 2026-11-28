@@ -2,6 +2,8 @@ cff-version: 1.2.0
 message: "If you use this software, please cite it as below."
 type: software
 title: "Bluebook Citation Generator"
+version: 1.0.0
+date-released: 2026-11-28
 abstract: "Automated legal citation formatting, completion, and verification using Bluebook 21st Edition rules."
 authors:
   - family-names: "Schlangen"
