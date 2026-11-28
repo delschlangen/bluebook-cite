@@ -192,8 +192,10 @@ pdfplumber, which kept every page in memory (about 9 MB per page, 2.5 GB for 273
 crashed the server on a long document. The reader also rejoins superscript footnote markers,
 drops pleading-paper line numbers, repairs ligatures and hyphenation, removes running headers,
 footers and page numbers that repeat on most pages, and marks footnotes the same way the Word
-reader does. On 17 realistic PDFs this raised citation recall from 97.3% to 99.96% and footnote
-numbers from 92.6% to 98.7%.
+reader does. On 17 PDFs **generated for testing** this raised citation recall from 97.3% to 99.96%
+and footnote numbers from 92.6% to 98.7%. Those figures say how the reader does on documents built
+to contain the citation forms it handles; see "How far to trust it" for what happened on a real
+paper.
 
 Inside the child the reader is bounded before the child's own limits have to stop it: a page's
 character count is read before any layout is built (a page that cannot fit in the text limit is
@@ -307,6 +309,14 @@ and rule numbers come from library guides and cited examples, so:
   unchanged but a few are known to differ, so the interface says to confirm in yours.
 - **Nothing is reported as found unless it links to a real record.** For most kinds there
   is no free source to look a record up in, so the tool says what is missing instead.
+- **The accuracy figures in this README come from test documents, not from real ones.** The
+  first real paper it was checked against (58 pages, about 345 citations, written in Word) came
+  out almost entirely wrong: case names swallowed the words around them, web addresses lost
+  hyphens and gained the sentence's full stop, most state statutes were missed, and every
+  citation was labelled as being in footnote 2. Those causes were fixed and the same paper was
+  checked again (every case name read whole, all 171 web addresses intact, all eleven statutes of
+  its first footnote found), but it has not been re-scored citation by citation, and one paper
+  is not a benchmark. Treat every result as a draft to check against the source.
 - Text typed entirely in capitals is brought back to ordinary case for court documents, with
   a short list of known agency acronyms kept. An acronym not on that list needs its capitals
   restored by hand.
