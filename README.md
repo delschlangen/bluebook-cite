@@ -1,6 +1,7 @@
 # Bluebook Citation Generator
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.24618245.svg)](https://doi.org/10.5281/zenodo.24618245)
 [![Deploy](https://img.shields.io/badge/demo-live-brightgreen)](https://delschlangen.github.io/bluebook-cite/)
 
 **Automated legal citation formatting, completion, and verification using Bluebook 21st Edition rules.**
@@ -353,7 +354,11 @@ If you use this software in your research, please cite it:
 @software{schlangen_bluebook_cite,
   author = {Schlangen, Del},
   title = {Bluebook Citation Generator},
-  url = {https://github.com/delschlangen/bluebook-cite},
+  year = {2026},
+  version = {1.0.0},
+  publisher = {Zenodo},
+  doi = {10.5281/zenodo.24618245},
+  url = {https://doi.org/10.5281/zenodo.24618245},
   license = {MIT}
 }
 ```
